@@ -1,0 +1,15 @@
+{
+  "_readme": [
+    "Optional local notes for model selection.",
+    "Copy this file to models.reference.json and use Provider:model keys.",
+    "Record observed behavior; do not present assumptions as measurements."
+  ],
+  "OpenAI:replace-with-model-id": {
+    "notes": "Describe suitable tasks and known limitations.",
+    "measured": {
+      "samples": 0,
+      "p50_latency_s": null,
+      "usd_per_call_p50": null
+    }
+  }
+}

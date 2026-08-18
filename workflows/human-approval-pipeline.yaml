@@ -1,0 +1,45 @@
+# 示例 4/6:人工审批管线。
+# draft 产出 → human 暂停等人批准/驳回 → finalize 出终稿。
+# 展示:interrupt 暂停、Web 界面批准按钮、批准记录本身是产物(可被下游引用)。
+name: human-approval-pipeline
+description: 草拟-人工审批-终稿;暂停在 human 节点等浏览器里批准
+
+meta:
+  title: 人工审批管线
+  description: AI 起草,人在 Web 界面批准或驳回,批准后才生成终稿
+  kind: example
+  category: approval
+  tags: [人工审批, 暂停恢复]
+  estimated_calls: 2
+  requires:
+    human_approval: true
+  example_task: 起草一封向客户解释延期一周的邮件,语气诚恳不推责
+
+nodes:
+  - id: draft
+    type: llm
+    prompt: |
+      按任务起草初稿。标注你拿不准、需要人确认的地方(用 ⚠ 标记)。
+    consumes: [task]
+
+  - id: gate
+    type: human
+    prompt: |
+      请审阅初稿。批准将进入终稿;驳回需说明理由(运行会终止)。
+    consumes: [task, draft.output]
+
+  - id: finalizer
+    type: llm
+    timeout_s: 180
+    prompt: |
+      你收到初稿和人工批准记录(含批复意见)。按批复意见定稿:
+      该改的改,该保留的保留;去掉 ⚠ 标记,输出可直接使用的终稿。
+    consumes: [task, draft.output, gate.output]
+
+edges:
+  - from: draft
+    to: gate
+  - from: gate
+    to: finalizer
+  - from: finalizer
+    to: END

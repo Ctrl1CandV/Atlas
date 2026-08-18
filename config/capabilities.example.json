@@ -1,0 +1,4 @@
+{
+  "_readme": "Copy to capabilities.json. Add only locally verified entries with kind effort, budget, or none; omit unprobed models.",
+  "capabilities": {}
+}

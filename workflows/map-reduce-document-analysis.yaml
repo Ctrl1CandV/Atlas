@@ -1,0 +1,62 @@
+# 示例 6/6:长材料分片分析(map-reduce)。
+# 三个分析节点各持一个视角读同一份材料,reducer 完整性受控地合并。
+# 展示:大输入投影、多方视角、汇合、完整原文消费(A1)。
+# 与「并行调研与综合」的区别:那张图各节点自己去找信息,这张图
+# 所有节点读的是同一份输入材料、只是视角不同。
+name: map-reduce-document-analysis
+description: 同一份材料交给三个视角并行分析,reducer 汇总为单一结论
+
+meta:
+  title: 分片分析与汇总
+  description: 把同一份材料交给三个视角(证据强度/风险反面/可行动性)的分析节点并行处理,第四个节点合并为一份结论,不抹掉分歧
+  kind: example
+  category: document
+  tags: [并行, 汇合, map-reduce, 大输入投影]
+  estimated_calls: 4
+  example_task: 分析这份实验记录:哪些结论站得住,哪些是侥幸,下一步实验怎么设计
+
+nodes:
+  - id: lens_evidence
+    type: llm
+    prompt: |
+      你只带一个视角看材料:证据强度。每个结论标注
+      支持/部分支持/不支持,并指出缺的关键证据。
+    consumes: [task]
+
+  - id: lens_risk
+    type: llm
+    prompt: |
+      你只带一个视角看材料:风险与反面解释。
+      找出每个结论 alternative explanation,评估其可能性。
+    consumes: [task]
+
+  - id: lens_action
+    type: llm
+    thinking: low
+    prompt: |
+      你只带一个视角看材料:可行动性。
+      提炼可以立刻做的事、需要先验证的事、应该放弃的事。
+    consumes: [task]
+
+  - id: reducer
+    type: llm
+    thinking: high
+    timeout_s: 180
+    prompt: |
+      三份视角分析(证据/风险/行动)完整附上。合并成一份结论:
+      1) 站得住的结论(证据视角支持且风险视角无强反对);
+      2) 存疑的结论(写清为什么存疑);
+      3) 建议的下一步。不要为了整洁抹掉分歧。
+    consumes: [task, lens_evidence.output, lens_risk.output, lens_action.output]
+
+entry: [lens_evidence, lens_risk, lens_action]
+
+edges:
+  - from: lens_evidence
+    to: reducer
+  - from: lens_risk
+    to: reducer
+  - from: lens_action
+    to: reducer
+  - from: reducer
+    to: END

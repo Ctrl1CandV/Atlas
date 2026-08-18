@@ -1,0 +1,51 @@
+# Credentials and private machine configuration
+config/.env
+.env
+*.key
+*.pem
+config/providers.json
+config/models.reference.json
+config/capabilities.json
+config/pricing.json
+config/agents.json
+config/.atlas-init-notice.json
+config/.atlas-init-journal.json
+config/.atlas-init.lock
+config/.atlas-init-*.tmp
+
+# Run records may contain prompts, source files, and model output
+runs/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+logs*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+
+# Frontend
+node_modules/
+dist/
+.vite/
+
+# Local agent/session state and GUI evidence
+.zcode/
+gui-test-screenshots/
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,18 @@
+{
+  "providers": [
+    {
+      "id": "OpenAI",
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "models": ["replace-with-model-id"],
+      "openaiBaseUrl": "https://api.openai.com/v1",
+      "preferTransport": "openai"
+    },
+    {
+      "id": "Anthropic",
+      "apiKeyEnv": "ANTHROPIC_API_KEY",
+      "models": ["replace-with-model-id"],
+      "anthropicBaseUrl": "https://api.anthropic.com",
+      "preferTransport": "anthropic"
+    }
+  ]
+}

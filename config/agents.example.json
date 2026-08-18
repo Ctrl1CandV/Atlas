@@ -1,0 +1,8 @@
+{
+  "runner": "fail_closed",
+  "cli": {
+    "kind": "claude",
+    "command": "claude",
+    "extra_args": []
+  }
+}

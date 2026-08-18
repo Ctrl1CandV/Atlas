@@ -1,0 +1,114 @@
+name: Source prerelease
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Verify PEP 440 version maps to release tag
+        shell: pwsh
+        run: |
+          $pythonVersion = uv run --no-project python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])"
+          if ($pythonVersion -notmatch '^(\d+\.\d+\.\d+)rc(\d+)$') {
+            throw "Python version $pythonVersion is not the expected RC PEP 440 form"
+          }
+          $productVersion = "$($Matches[1])-rc.$($Matches[2])"
+          $expectedTag = "v$productVersion"
+          if ($expectedTag -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} does not match Python $pythonVersion (expected $expectedTag)"
+          }
+          $initVersion = uv run --no-project python -c "import re, pathlib; print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', pathlib.Path('atlas/__init__.py').read_text(encoding='utf-8')).group(1))"
+          if ($initVersion -ne $pythonVersion) { throw "atlas/__init__.py is $initVersion, expected $pythonVersion" }
+          $webVersion = (Get-Content web/package.json -Raw | ConvertFrom-Json).version
+          if ($webVersion -ne $productVersion) { throw "Web version $webVersion, expected $productVersion" }
+      - name: Sync locked dependencies
+        run: uv sync --locked --all-groups
+      - name: Initialize generic test configuration
+        shell: pwsh
+        run: |
+          Copy-Item config/providers.example.json config/providers.json
+          Copy-Item config/models.reference.example.json config/models.reference.json
+          Copy-Item config/capabilities.example.json config/capabilities.json
+          Copy-Item config/pricing.example.json config/pricing.json
+          Copy-Item config/.env.example config/.env
+      - name: Install and build Web from lock
+        run: |
+          npm --prefix web ci
+          npm --prefix web run build
+      - name: Compile and run release tests
+        run: |
+          uv run python -m compileall -q atlas
+          uv run pytest
+      - name: Validate and preview six workflows
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          from atlas.mcp import dry_run_impl, validate_workflow_impl
+          files = sorted(Path("workflows").glob("*.yaml"))
+          if len(files) != 6:
+              raise SystemExit(f"expected 6 workflows, found {len(files)}")
+          for path in files:
+              checked = validate_workflow_impl(workflow_id=path.stem)
+              preview = dry_run_impl(path.stem, "release static preview")
+              if not checked.get("valid") or preview.get("dry_run") is not True:
+                  raise SystemExit(f"{path.stem}: validation={checked}, preview={preview}")
+          '@ | uv run python -
+      - name: Validate Web app
+        run: |
+          npm --prefix web ci
+          npm --prefix web run lint
+          npm --prefix web run test:diff
+          npm --prefix web run build
+      - name: Build source distribution only
+        run: uv build --sdist
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/atlas-${{ github.ref_name }}.spdx.json
+          upload-artifact: false
+      - name: Generate SHA256 manifest
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem dist -File | Where-Object { $_.Name -ne 'SHA256SUMS' } | Sort-Object Name
+          if (-not $files) { throw "No release artifacts found" }
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          Set-Content -Path dist/SHA256SUMS -Value $lines -Encoding ascii
+          Get-Content dist/SHA256SUMS
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+      - name: Create source-only prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          generate_release_notes: true
+          files: dist/*
+          fail_on_unmatched_files: true

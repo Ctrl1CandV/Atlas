@@ -1,0 +1,12 @@
+{
+  "_readme": [
+    "Copy to pricing.json and enter verified USD prices per million tokens.",
+    "Keep unknown prices null. Atlas warns rather than inventing a cost."
+  ],
+  "prices": {
+    "OpenAI:replace-with-model-id": {
+      "input_per_m": null,
+      "output_per_m": null
+    }
+  }
+}

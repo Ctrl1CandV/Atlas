@@ -1,0 +1,47 @@
+# 示例 1/6：并行 LLM 分析与综合。名称中的 research 指任务形态，不是 research 节点。
+name: parallel-research-synthesis
+description: 三个模型节点从不同角度分析，第四个节点综合；不预设供应商独立性
+
+meta:
+  title: 并行分析与综合
+  description: 三个互不消费彼此输出的分支并行分析，综合节点保留共识、分歧和未知项
+  kind: example
+  category: research
+  tags: [并行, 汇合, 模型待绑定]
+  estimated_calls: 4
+  example_task: 比较三种本地工作流引擎的数据完整性设计
+
+nodes:
+  - id: scout_a
+    type: llm
+    prompt: 提取可确认事实、证据来源和未知项，不要把推测写成事实。
+    consumes: [task]
+  - id: scout_b
+    type: llm
+    prompt: 从工程实践角度分析常见做法、失败模式和规避手段。
+    consumes: [task]
+  - id: scout_c
+    type: llm
+    prompt: 从反面检查流行说法，列出证据不足处和替代解释。
+    consumes: [task]
+  - id: synthesizer
+    type: llm
+    timeout_s: 180
+    prompt: |
+      综合三份材料：列出共识、分歧和未知项，并标明来源。
+      只有显式绑定到真实不同的供应商/底模时，才可称分支为独立模型意见。
+    consumes: [task, scout_a.output, scout_b.output, scout_c.output]
+
+entry: [scout_a, scout_b, scout_c]
+edges:
+  - from: scout_a
+    to: synthesizer
+  - from: scout_b
+    to: synthesizer
+  - from: scout_c
+    to: synthesizer
+  - from: synthesizer
+    to: END
+
+guards:
+  timeout_s: 900

@@ -1,0 +1,810 @@
+# -*- coding: utf-8 -*-
+"""只读观测界面(v1):FastAPI + SSE。
+
+界面没有编辑功能、没有改图的按钮——操控发生在 harness 对话里(agent 改
+YAML)或直接编辑文件。这条界线让 UI 复杂度天花板很低,也让「界面显示的
+每个数字都能在事件流里找到出处」可检(红线 ②/④ 的落地)。
+
+只绑 127.0.0.1(红线 ④):serve() 硬编码,想绑别的地址直接被拒绝。
+"""
+import json
+import logging
+import os
+import re
+import shutil
+import threading
+import time
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+
+from atlas import __version__
+from atlas.adapters import build_real_registry
+from atlas.artifacts import artifacts_from_event
+from atlas.config import PROJECT_ROOT, load_provider_configs
+from atlas.costs import fold_cost_accounting
+from atlas.effective import build_effective_spec, provider_ids_for_spec
+from atlas.engine import (RunConflictError, RunNotFoundError, acquire_run_lock,
+                          approve_run, execute_graph, lock_approval_run,
+                          new_run_id, prepare_execution,
+                          prepare_production_agent_runner,
+                          release_approval_run_lock, release_run_lock)
+from atlas.events import EventReader, fold_events
+from atlas.integrity import TASK_MAX_BYTES
+from atlas.spec import SpecError, spec_from_snapshot, spec_from_yaml_file
+from atlas.thinking import load_capabilities, model_capability
+
+DEFAULT_WORKFLOWS_DIR = PROJECT_ROOT / "workflows"
+DEFAULT_RUNS_DIR = PROJECT_ROOT / "runs"
+DEFAULT_HOST = "127.0.0.1"   # 红线 ④:不改
+DEFAULT_PORT = 8321
+
+# run_id / workflow id 的白名单:挡住反斜杠路径穿越(Windows 上 \ 也是分隔符)
+# 和把线程池占满的无效轮询
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+# 防浏览器驱动:绑定 127.0.0.1 挡不住用户浏览器里别的网页向本机发请求。
+# Host 校验挡 DNS rebinding;POST 必须带自定义头(跨站 no-cors 表单带不了,
+# 预检也过不了),GET 是只读的,风险只在读响应,Host 校验已覆盖。
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+
+log = logging.getLogger("atlas.web")
+
+
+def _check_id(value: str, what: str) -> str:
+    if not _SAFE_ID_RE.match(value) or ".." in value:
+        raise HTTPException(404, f"没有这个{what}:{value!r}")
+    return value
+
+
+def _is_sharing_violation(exc: OSError) -> bool:
+    """Windows 文件占用/共享冲突；调用方映射为可重试响应。"""
+    return getattr(exc, "winerror", None) in (5, 32, 33)
+
+
+def _rmtree_no_follow(path: Path) -> None:
+    """删除 tombstone，但绝不沿 symlink/junction 进入运行目录之外。"""
+    if path.is_symlink():
+        path.unlink()
+        return
+    if path.is_junction():
+        path.rmdir()
+        return
+    for root, dirs, _files in os.walk(path, topdown=True, followlinks=False):
+        root_path = Path(root)
+        for name in list(dirs):
+            child = root_path / name
+            if child.is_symlink():
+                child.unlink()
+                dirs.remove(name)
+            elif child.is_junction():
+                child.rmdir()
+                dirs.remove(name)
+    shutil.rmtree(path)
+
+
+def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
+               runs_dir: Path = DEFAULT_RUNS_DIR,
+               registry_factory=None,
+               providers_path: Path | None = None,
+               env_store=None,
+               agent_runner_factory=None,
+               *,
+               api_only: bool = False,
+               web_dist_dir: Path | None = None) -> FastAPI:
+    """registry_factory(provider_ids) → AdapterRegistry。
+
+    生产环境不传(用 build_real_registry,真实密钥);测试注入假供应商,
+    让 Web 层的每个端点都能走真实路径而不花钱。
+    providers_path / env_store 同理:配置面 API 的注入点。
+    ``api_only`` 只供明确不测试静态界面的 API 测试使用；生产默认仍要求
+    已构建的 web/dist。``web_dist_dir`` 用于隔离该启动契约的测试。
+    """
+    app = FastAPI(title="Atlas 观测界面", version=__version__)
+    workflows_dir = Path(workflows_dir)
+    runs_dir = Path(runs_dir)
+    _registry_factory = registry_factory or build_real_registry
+    _agent_runner_factory = agent_runner_factory or (
+        lambda spec: prepare_production_agent_runner(
+            spec, providers_path=providers_path, env_store=env_store))
+    _run_threads: dict[str, threading.Thread] = {}
+    # 删除事务很短且低频；串行化可让同进程的重复 DELETE 稳定收敛为
+    # 首个成功、后续 404；稳定 .locks OS 锁保护跨进程/跨操作竞争。
+    _delete_guard = threading.Lock()
+
+    @app.exception_handler(RequestValidationError)
+    async def _strip_422_input(request: Request, exc: RequestValidationError):
+        """FastAPI 的 422 默认回显请求体 input——客户端刚提交的密钥若
+        恰在坏请求里会被原样弹回。剥掉它(A8 补充面,M3 审查🟡10)。"""
+        return JSONResponse(status_code=422,
+                            content={"detail": "请求体不合法(字段类型/结构错误)"})
+
+    @app.middleware("http")
+    async def _local_only(request: Request, call_next):
+        host = (request.headers.get("host") or "").rsplit(":", 1)[0]
+        if host not in _LOCAL_HOSTS:
+            return JSONResponse(status_code=403, content={
+                "detail": "界面只服务本机(Host 头不是 127.0.0.1/localhost)。"
+                          "红线 ④:暴露到网络等于暴露执行权"})
+        if request.method in ("POST", "PUT", "DELETE") \
+                and request.headers.get("X-Atlas-Request") != "1":
+            # 浏览器里的恶意网页可以用 no-cors 发简单请求,但带不了自定义头
+            return JSONResponse(status_code=403, content={
+                "detail": "写操作要求 X-Atlas-Request: 1 头(防浏览器跨站驱动)"})
+        return await call_next(request)
+
+    # ── workflows ──────────────────────────────────────────────
+
+    def _structure_tags(spec) -> list[str]:
+        """从图形状推导结构标签(展示用,不参与执行)。"""
+        tags: list[str] = []
+        if len(spec.all_entries()) > 1:
+            tags.append("多入口")
+        sources = {e.source for e in spec.edges}
+        # 并行 = 无条件扇出(一个节点多条无条件出边);条件出边是路由不是并行
+        if any(sum(1 for e in spec.edges if e.source == s and not e.when) > 1
+               for s in sources):
+            tags.append("并行")
+        if any(e.when for e in spec.edges):
+            tags.append("条件分支")
+        # 回边:b 可达 a 则 a→b 成环
+        def _reaches(a: str, b: str) -> bool:
+            stack = [t for e in spec.edges if e.source == a for t in [e.target]]
+            seen: set[str] = set()
+            while stack:
+                cur = stack.pop()
+                if cur == b:
+                    return True
+                if cur in seen or cur == "END":
+                    continue
+                seen.add(cur)
+                stack += [e.target for e in spec.edges if e.source == cur]
+            return False
+        if any(e.target != "END" and _reaches(e.target, e.source) for e in spec.edges):
+            tags.append("有限循环")
+        types = {n.type for n in spec.nodes}
+        if "human" in types:
+            tags.append("人工审批")
+        if "coding_agent" in types:
+            tags.append("改码")
+        if "research" in types:
+            tags.append("调研")
+        if len({n.model.partition(":")[0] for n in spec.nodes if n.model}) > 1:
+            tags.append("多供应商")
+        return tags
+
+    def _load_workflow(wid: str):
+        path = workflows_dir / f"{wid}.yaml"
+        if not path.exists():
+            raise HTTPException(404, f"没有这个工作流:{wid}")
+        return spec_from_yaml_file(path)   # 校验不过 → SpecError(在 handler 里转 400)
+
+    @app.get("/api/workflows")
+    def list_workflows():
+        items = []
+        for path in sorted(workflows_dir.glob("*.yaml")):
+            try:
+                spec = spec_from_yaml_file(path)
+                items.append({"id": path.stem, "name": spec.name,
+                              "description": spec.description, "valid": True,
+                              "error": None,
+                              "meta": spec.meta.as_dict() or None,
+                              "node_count": len(spec.nodes),
+                              "structure_tags": _structure_tags(spec)})
+            except SpecError as e:
+                items.append({"id": path.stem, "name": path.stem,
+                              "description": "", "valid": False, "error": str(e)})
+        return items
+
+    def _workflow_payload(spec, wid: str = "") -> dict:
+        """公开的非秘密工作流视图；基础定义与历史有效快照共用。"""
+        return {
+            "id": wid,
+            "name": spec.name,
+            "description": spec.description,
+            "entry": spec.entry,
+            "entries": list(spec.entries) if spec.entries else [],
+            "meta": spec.meta.as_dict() or None,
+            "structure_tags": _structure_tags(spec),
+            "nodes": [{
+                "id": n.id, "type": n.type, "model": n.model,
+                "fallback": n.fallback, "prompt": n.prompt,
+                "consumes": n.consumes,
+                "required_fields": n.required_fields or [],
+                "route_field": n.route_field,
+                "max_output_tokens": n.max_output_tokens,
+                "thinking": n.thinking,
+                "temperature": n.temperature,
+                "seed": n.seed,
+                "timeout_s": n.timeout_s,
+                "retry": n.retry,
+                "writable": n.writable,
+                "allow_web": n.allow_web,
+                "workdir": n.workdir,
+                "max_turns": n.max_turns,
+            } for n in spec.nodes],
+            "edges": [{"from": e.source, "to": e.target, "when": e.when}
+                      for e in spec.edges],
+            "guards": {
+                "max_iterations": spec.guards.max_iterations,
+                "max_iterations_effective": spec.guards.effective_max_iterations,
+                "max_cost_usd": spec.guards.max_cost_usd,
+                "timeout_s": spec.guards.timeout_s,
+            },
+        }
+
+    def _param_defaults(spec) -> dict[str, dict]:
+        """每个节点"空输入框背后"的真实生效默认值,供前端灰显。
+
+        只有无秘密标量;唯一随配置变的是 max_output_tokens 的供应商上限
+        (providers.json 的 maxOutputTokens,缺省 8192)。默认值以引擎与
+        适配器的实现为准:llm 单次调用 300s,agent CLI 1800s;temperature/
+        seed 留空时不发字段,由供应商自己默认。
+        """
+        try:
+            configs = load_provider_configs()
+        except Exception:
+            configs = {}
+        defaults: dict[str, dict] = {}
+        for n in spec.nodes:
+            if n.type == "llm":
+                cap = None
+                if n.model:
+                    cfg = configs.get(n.model.partition(":")[0])
+                    cap = cfg.max_output_tokens if cfg and cfg.max_output_tokens \
+                        else 8192
+                defaults[n.id] = {
+                    "max_output_tokens": cap,   # None=模型未选,上限还定不了
+                    "temperature": None,        # 留空=不发,供应商默认
+                    "seed": None,
+                    "timeout_s": 300,
+                    "retry": 0,
+                }
+            elif n.type in ("research", "coding_agent"):
+                defaults[n.id] = {
+                    "timeout_s": 1800, "retry": 0, "max_turns": 12,
+                }
+        return defaults
+
+    @app.get("/api/workflows/{wid}")
+    def get_workflow(wid: str):
+        _check_id(wid, "工作流")
+        try:
+            spec = _load_workflow(wid)
+        except SpecError as e:
+            raise HTTPException(400, str(e))
+        return _workflow_payload(spec, wid)
+
+    @app.post("/api/workflows/{wid}/preview")
+    def preview_run(wid: str, body: dict):
+        """零成本预览本次将执行的具体规格；不分配 run_id、不建目录。
+
+        模型未配置(示例在新机器上的正常状态)不是错误:返回
+        unconfigured_nodes 清单,图与覆盖仍可预览;运行接口才会拒绝。
+        """
+        _check_id(wid, "工作流")
+        unknown = set(body) - {"node_overrides"}
+        if unknown:
+            raise HTTPException(400, f"预览请求有未知字段:{sorted(unknown)}")
+        try:
+            base_spec = _load_workflow(wid)
+            effective = build_effective_spec(base_spec, body.get("node_overrides"))
+            execution_sha256 = None
+            prepared = None
+            if not effective.unconfigured_nodes:
+                registry = _registry_factory(provider_ids_for_spec(effective.spec))
+                agent_runner = _agent_runner_factory(effective.spec)
+                prepared = prepare_execution(
+                    effective.spec, registry, agent_runner=agent_runner)
+                execution_sha256 = prepared.execution_sha256
+        except Exception as e:
+            raise HTTPException(400, f"运行前预览不通过:{e}")
+        return {
+            "effective_workflow": _workflow_payload(effective.spec, wid),
+            "base_spec_sha256": effective.base_fingerprint,
+            "effective_spec_sha256": effective.effective_fingerprint,
+            "execution_sha256": execution_sha256,
+            "bindings": list(effective.bindings),
+            "overrides": list(effective.overrides),
+            "unconfigured_nodes": list(effective.unconfigured_nodes),
+            "prompt_overridden": list(effective.prompt_overridden),
+            "param_defaults": _param_defaults(effective.spec),
+        }
+
+    # ── 运行 ───────────────────────────────────────────────────
+
+    @app.post("/api/workflows/{wid}/run")
+    def start_run(wid: str, body: dict):
+        _check_id(wid, "工作流")
+        unknown = set(body) - {"task", "node_overrides", "expected_execution_sha256"}
+        if unknown:
+            raise HTTPException(400, f"运行请求有未知字段:{sorted(unknown)}")
+        task = body.get("task")
+        if not isinstance(task, str) or not task.strip():
+            raise HTTPException(400, "task 必须是非空字符串")
+        task = task.strip()
+        if len(task.encode("utf-8")) > TASK_MAX_BYTES:
+            raise HTTPException(
+                413, f"task 超过上限 {TASK_MAX_BYTES} 字节;拒绝截断")
+        try:
+            base_spec = _load_workflow(wid)
+            effective = build_effective_spec(base_spec, body.get("node_overrides"))
+            if effective.unconfigured_nodes:
+                nodes = ", ".join(effective.unconfigured_nodes)
+                raise SpecError(
+                    f"节点 {nodes} 未配置模型:请在节点详情中选择,"
+                    "或让 AI 写入 workflows/*.yaml")
+            provider_ids = provider_ids_for_spec(effective.spec)
+            registry = _registry_factory(provider_ids)
+            agent_runner = _agent_runner_factory(effective.spec)
+            prepared = prepare_execution(
+                effective.spec, registry, agent_runner=agent_runner)
+        except Exception as e:
+            raise HTTPException(400, f"运行前校验不通过，未分配 run_id:{e}")
+
+        expected_execution = body.get("expected_execution_sha256")
+        if expected_execution is not None and (
+                not isinstance(expected_execution, str)
+                or expected_execution != prepared.execution_sha256):
+            raise HTTPException(
+                409, "expected_execution_sha256 与当前执行配置不符;"
+                     "未分配 run_id、未创建锁或运行目录")
+
+        run_id = new_run_id()
+        try:
+            acquire_run_lock(run_id, runs_root=runs_dir)
+        except RunConflictError as e:
+            raise HTTPException(409, str(e)) from e
+
+        def _execute():
+            try:
+                execute_graph(
+                    effective.spec, task=task, runs_root=runs_dir,
+                    registry=registry, run_id=run_id,
+                    agent_runner=agent_runner, prepared=prepared,
+                    base_spec_sha256=effective.base_fingerprint,
+                    binding_summary=effective.bindings,
+                    override_summary=effective.overrides,
+                    _lock_held=True)
+            except Exception:
+                log.exception("run %s 后台执行异常", run_id)
+            finally:
+                _run_threads.pop(run_id, None)
+
+        try:
+            thread = threading.Thread(target=_execute, daemon=True)
+            _run_threads[run_id] = thread
+            thread.start()
+        except Exception:
+            _run_threads.pop(run_id, None)
+            release_run_lock(run_id, runs_root=runs_dir)
+            raise
+        return {"run_id": run_id}
+
+    # ── runs ───────────────────────────────────────────────────
+
+    def _run_events(rid: str, *, wait: float = 0.0) -> list[dict] | None:
+        path = runs_dir / rid / "events.jsonl"
+        deadline = time.time() + wait
+        while True:
+            if path.exists():
+                return EventReader(path).all()
+            if time.time() >= deadline:
+                return None
+            time.sleep(0.1)
+
+    @app.get("/api/runs")
+    def list_runs():
+        if not runs_dir.exists():
+            return []
+        items = []
+        for d in sorted(runs_dir.iterdir(), reverse=True):
+            if d.name in (".locks", ".trash"):
+                continue
+            if not (d / "events.jsonl").exists():
+                continue
+            events = EventReader(d / "events.jsonl").all()
+            if not events:
+                continue
+            folded = fold_events(events)
+            items.append({
+                "run_id": d.name,
+                "graph": folded["graph"],
+                "status": folded["status"],
+                "nodes_done": len(folded["nodes_done"]),
+                "started": next((e["ts"] for e in events
+                                 if e["type"] == "run_started"), None),
+            })
+        return items
+
+    def _delete_run_locked(rid: str):
+        """持权威运行锁将终态 run 原子隔离，再清理 tombstone。"""
+        _check_id(rid, "运行")
+        run_dir = runs_dir / rid
+        trash_dir = runs_dir / ".trash"
+        tombstone = trash_dir / rid
+        try:
+            acquire_run_lock(rid, runs_root=runs_dir)
+        except RunConflictError as exc:
+            raise HTTPException(
+                423, f"运行 {rid!r} 正被其他操作占用(.locks),请稍后重试") from exc
+
+        try:
+            # 清理失败留下的 tombstone 可由相同 DELETE 重试，但绝不恢复成 run。
+            if tombstone.exists():
+                if run_dir.exists():
+                    raise HTTPException(
+                        500, f"运行 {rid!r} 同时存在活动目录和删除 tombstone")
+            else:
+                events_path = run_dir / "events.jsonl"
+                if not events_path.is_file():
+                    raise HTTPException(404, f"没有这个运行:{rid}")
+                events = EventReader(events_path).all()
+                if not events:
+                    raise HTTPException(404, f"没有这个运行:{rid}")
+                status = fold_events(events)["status"]
+                if status not in ("done", "failed"):
+                    raise HTTPException(
+                        409, f"运行 {rid!r} 当前状态为 {status!r};"
+                        "只有 done/failed 的运行可以删除")
+                trash_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    run_dir.replace(tombstone)
+                except OSError as exc:
+                    if _is_sharing_violation(exc):
+                        raise HTTPException(
+                            423, f"运行 {rid!r} 的文件仍被占用,请稍后重试") from exc
+                    raise HTTPException(
+                        500, f"隔离运行 {rid!r} 失败:{exc}") from exc
+
+            try:
+                _rmtree_no_follow(tombstone)
+            except OSError as exc:
+                if _is_sharing_violation(exc):
+                    raise HTTPException(
+                        423, f"运行 {rid!r} 已隔离但文件仍被占用,可重试删除") from exc
+                raise HTTPException(
+                    500, f"运行 {rid!r} 已隔离但清理失败,可重试:{exc}") from exc
+            return {"deleted": rid}
+        finally:
+            release_run_lock(rid, runs_root=runs_dir)
+
+    @app.delete("/api/runs/{rid}")
+    def delete_run(rid: str):
+        """仅删除 done/failed；运行锁和重复请求都不会绕过终态复核。"""
+        with _delete_guard:
+            return _delete_run_locked(rid)
+
+    def _thinking_summary(model_used: str | None, tier, reasoning_tokens,
+                          reasoning_kind: str) -> dict:
+        """三层思考语义(PLAN-v3 M6-D):能力 / 请求档位 / 响应证据。
+
+        能力来自 capabilities 探测表;未探测的模型标 unprobed 而不是猜。
+        响应证据按协议分:usage_reasoning_tokens=精确数量,
+        thinking_block=只有存在性(value 是哨兵 1,不是 token 数)。
+        """
+        cap = model_capability(model_used) if model_used and ":" in model_used else "unknown"
+        if cap == "unknown":
+            cap = "unprobed"   # 与 /api/thinking-capabilities 同一枚举(审查 M6-minor8)
+        if tier:
+            requested = tier
+        else:
+            requested = "provider_default"
+        if reasoning_kind == "usage_reasoning_tokens":
+            evidence = {"kind": "reasoning_tokens", "value": reasoning_tokens}
+        elif reasoning_kind == "thinking_block":
+            evidence = {"kind": "thinking_block", "value": None}
+        elif reasoning_tokens:
+            # 旧事件没有 reasoning_kind 字段:有数量按数量报,只有 1 无法区分
+            evidence = {"kind": "reasoning_tokens", "value": reasoning_tokens} \
+                if reasoning_tokens > 1 else {"kind": "unknown", "value": None}
+        else:
+            evidence = {"kind": "none", "value": None}
+        return {"capability": cap, "requested_tier": requested,
+                "evidence": evidence}
+
+    @app.get("/api/runs/{rid}")
+    def get_run(rid: str):
+        _check_id(rid, "运行")
+        events = _run_events(rid, wait=0.3 if rid in _run_threads else 0.0)
+        if not events:
+            # 空/缺失账本不能证明 run 存在；只有本进程刚分配且线程仍登记的
+            # id 才能暴露短暂的 starting 状态。
+            if rid not in _run_threads:
+                raise HTTPException(404, f"没有这个运行:{rid}")
+            return {"run_id": rid, "status": "starting", "nodes": [],
+                    "nodes_done": [], "artifacts": {},
+                    "totals": {"input_tokens": 0, "output_tokens": 0,
+                               "known_actual_cost_usd": 0.0,
+                               "accounted_cost_usd": 0.0,
+                               "actual_cost_unknown_count": 0,
+                               "outstanding_reserved_usd": 0.0,
+                               "cost_usd": None},
+                    "failed_error": None}
+        folded = fold_events(events)
+        # 每个节点的最新状态(循环的节点保留最后一次,attempts 全留)
+        nodes: dict[str, dict] = {}
+        run_failed = folded["status"] == "failed"
+        for e in events:
+            t, nid = e.get("type"), e.get("node")
+            if nid is None:
+                continue
+            slot = nodes.setdefault(nid, {"id": nid, "status": "pending",
+                                          "attempts": []})
+            if t == "node_input":
+                slot["projection_path"] = e["projection_path"]
+                slot["projection_sha256"] = e["projection_sha256"]
+                slot["consumed"] = e["consumed"]
+                slot["iteration"] = e["iteration"]
+            elif t == "node_started":
+                slot["status"] = "running"
+                slot["model_requested"] = e["model_requested"]
+                if e.get("runner"):
+                    slot["runner"] = e["runner"]
+            elif t == "model_failed":
+                slot["attempts"].append({"model": e["model"], "reason": e["reason"]})
+            elif t == "output_truncated":
+                slot["output_truncated"] = True
+            elif t == "node_done":
+                slot.update({
+                    "status": "done",
+                    "model_used": e["model_used"],
+                    "model_requested": e["model_requested"],
+                    "degraded": e["degraded"],
+                    "output_truncated": e.get("output_truncated", False),
+                    "output_path": e["output_path"],
+                    "output_sha256": e["output_sha256"],
+                    "artifacts": artifacts_from_event(e),
+                    "input_tokens": e["input_tokens"],
+                    "output_tokens": e["output_tokens"],
+                    "reasoning_tokens": e.get("reasoning_tokens", 0),
+                    "reasoning_kind": e.get("reasoning_kind", ""),
+                    "thinking_tier": e.get("thinking_tier"),
+                    "thinking": _thinking_summary(
+                        e["model_used"], e.get("thinking_tier"),
+                        e.get("reasoning_tokens", 0),
+                        e.get("reasoning_kind", "")),
+                    "cost_usd": e.get("cost_usd"),
+                    "runner": e.get("runner", slot.get("runner")),
+                    "duration_s": e["duration_s"],
+                    "iteration": e["iteration"],
+                })
+        # 启动了但没做完的节点:按运行终态标 failed(而不是永远 running)
+        if folded["status"] in ("failed", "done"):
+            for slot in nodes.values():
+                if slot["status"] == "running":
+                    slot["status"] = "failed" if run_failed else "done"
+        accounting = fold_cost_accounting(events)
+        totals = {
+            "input_tokens": sum(e.get("input_tokens") or 0 for e in events
+                                if e["type"] == "node_done"),
+            "output_tokens": sum(e.get("output_tokens") or 0 for e in events
+                                 if e["type"] == "node_done"),
+            "known_actual_cost_usd": accounting.known_actual_usd,
+            "accounted_cost_usd": accounting.accounted_usd,
+            "actual_cost_unknown_count": accounting.unknown_count,
+            "outstanding_reserved_usd": accounting.outstanding_reserved_usd,
+            # 兼容旧 UI；存在未知费用时不得冒充完整实际总额。
+            "cost_usd": (accounting.known_actual_usd
+                         if accounting.unknown_count == 0 else None),
+        }
+        cost_warnings = [
+            {"models": e.get("models"), "reason": e.get("reason")}
+            for e in events if e["type"] == "cost_unknown"]
+        effective_workflow = None
+        try:
+            effective_workflow = _workflow_payload(_spec_for_run(rid), rid)
+        except HTTPException:
+            # 历史旧 run 可能没有快照且对应 YAML 已删除；运行账本仍应可看。
+            pass
+        return {"run_id": rid, **folded,
+                "nodes": sorted(nodes.values(), key=lambda n: n["id"]),
+                "totals": totals,
+                "cost_warnings": cost_warnings,
+                "effective_workflow": effective_workflow,
+                "failed_error": next((e.get("error") for e in reversed(events)
+                                      if e["type"] == "run_failed"), None)}
+
+    @app.get("/api/runs/{rid}/events")
+    def stream_events(rid: str, after: int = 0):
+        _check_id(rid, "运行")
+        events = _run_events(rid, wait=5.0 if rid in _run_threads else 0.0)
+        if not events:
+            raise HTTPException(404, f"没有这个运行:{rid}")
+        path = runs_dir / rid / "events.jsonl"
+
+        def gen():
+            last = after
+            offset = 0
+            terminal_seen = False
+            idle_rounds = 0
+            reader = EventReader(path)
+            while not terminal_seen:
+                records, offset = reader.read_from(offset)
+                if records:
+                    # 即使 after 过滤掉了这批事件，读侧也确实有进展；idle 只表示
+                    # 账本没有新增字节，不能按是否向客户端 yield 来计算。
+                    idle_rounds = 0
+                for r in records:
+                    if r["seq"] <= last:
+                        continue
+                    last = r["seq"]
+                    yield f"data: {json.dumps(r, ensure_ascii=False)}\n\n"
+                    if r["type"] in ("run_done", "run_failed"):
+                        terminal_seen = True
+                if records:
+                    continue
+                elif not terminal_seen:
+                    idle_rounds += 1
+                    # 长事件空窗(推理模型一跑几分钟)期间发 SSE 注释保活,
+                    # 防止中间层把空闲连接掐掉
+                    if idle_rounds % 30 == 0:
+                        yield ": keepalive\n\n"
+                    # 运行早已终止但账本里没有终态事件(进程被 kill):别无限挂
+                    if idle_rounds > 200:   # ~60s 无新事件
+                        yield 'data: {"type": "stream_closed"}\n\n'
+                        break
+                    time.sleep(0.3)
+
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "X-Accel-Buffering": "no"})
+
+    def _serve_run_file(rid: str, sub: str, filename: str) -> FileResponse:
+        _check_id(rid, "运行")
+        # 只允许子目录里的扁平文件名,杜绝路径穿越。
+        # 白名单而非黑名单:Windows 上 "C:secret.txt" 不含 / \ ..,但
+        # Path(base) / "C:secret.txt" 会整体重置成 WindowsPath("C:secret.txt")
+        # (drive-relative,实测已复现),原有黑名单挡不住这条——安全审查发现的真漏洞。
+        if not _SAFE_ID_RE.match(filename) or ".." in filename:
+            raise HTTPException(400, "非法文件名")
+        path = runs_dir / rid / sub / filename
+        if not path.is_file() or not path.resolve().is_relative_to(
+                (runs_dir / rid / sub).resolve()):
+            raise HTTPException(404, f"没有这个文件:{sub}/{filename}")
+        return FileResponse(path, media_type="text/plain; charset=utf-8")
+
+    @app.get("/api/runs/{rid}/artifacts/{filename}")
+    def get_artifact(rid: str, filename: str):
+        return _serve_run_file(rid, "artifacts", filename)
+
+    @app.get("/api/runs/{rid}/projections/{filename}")
+    def get_projection(rid: str, filename: str):
+        return _serve_run_file(rid, "projections", filename)
+
+    def _spec_for_run(rid: str):
+        """批复要用的 spec:优先 run 目录里的快照(M2 起每次运行都落盘),
+        旧 run 退回按 graph 名扫 workflows/。指纹校验在 approve_run 里兜底。"""
+        snapshot = runs_dir / rid / "spec.snapshot.json"
+        if snapshot.is_file():
+            try:
+                return spec_from_snapshot(json.loads(
+                    snapshot.read_text(encoding="utf-8")), source=str(snapshot))
+            except Exception as e:
+                raise HTTPException(500, f"run {rid} 的 spec 快照损坏:{e}")
+        events = _run_events(rid, wait=0.5)
+        graph = fold_events(events or [])["graph"] if events else None
+        if not graph:
+            raise HTTPException(404, f"run {rid!r} 没有图名,找不到定义")
+        for path in workflows_dir.glob("*.yaml"):
+            try:
+                spec = spec_from_yaml_file(path)
+                if spec.name == graph:
+                    return spec
+            except SpecError:
+                continue
+        raise HTTPException(404, f"workflows/ 里找不到名为 {graph!r} 的图")
+
+    @app.post("/api/runs/{rid}/approve")
+    def approve(rid: str, body: dict):
+        """对暂停在 human 节点的运行给出批复(approve/reject)。"""
+        _check_id(rid, "运行")
+        decision = str(body.get("decision", ""))
+        if decision not in ("approve", "reject"):
+            raise HTTPException(400, "decision 只能是 approve/reject")
+        comment = str(body.get("comment", "") or "")
+        spec = _spec_for_run(rid)
+
+        provider_ids = provider_ids_for_spec(spec)
+        try:
+            registry = _registry_factory(provider_ids)
+            agent_runner = _agent_runner_factory(spec)
+            prepared = prepare_execution(
+                spec, registry, agent_runner=agent_runner)
+        except Exception as e:
+            raise HTTPException(400, f"运行后端配置不通过:{e}")
+
+        try:
+            lock_approval_run(rid, spec=spec, runs_root=runs_dir,
+                              prepared=prepared)
+        except RunConflictError as e:
+            # RunConflictError 同时继承 RunNotFoundError；必须优先映射 409。
+            raise HTTPException(409, str(e)) from e
+        except RunNotFoundError as e:
+            raise HTTPException(404, str(e)) from e
+        except SpecError as e:
+            raise HTTPException(409, str(e)) from e
+
+        def _execute():
+            try:
+                approve_run(rid, decision=decision, comment=comment, spec=spec,
+                            runs_root=runs_dir, prepared=prepared,
+                            _lock_held=True)
+            except Exception:
+                # approve_run 对预占锁也在 finally 中负责释放；这里不能二次删除，
+                # 否则可能误删紧随其后另一请求刚创建的新锁。
+                log.exception("run %s 批复后执行异常", rid)
+
+        try:
+            threading.Thread(target=_execute, daemon=True).start()
+        except Exception:
+            release_approval_run_lock(rid, runs_root=runs_dir)
+            raise
+        return {"run_id": rid, "decision": decision}
+
+    # ── 配置面(供应商/密钥/模型白名单;PLAN-v2 M3)──────────────
+    from atlas.configapi import register_config_routes
+    register_config_routes(app, providers_path, env_store)
+
+    @app.get("/api/thinking-capabilities")
+    def thinking_capabilities():
+        """白名单里每个模型的思考能力(PLAN-v3 M6-D)。
+
+        拉取到模型列表 ≠ 能力已探测:不在探测表里的模型标 unprobed,
+        界面不得把它显示成「已配置」。探测证据字段如实转述,不加工。
+        """
+        caps = load_capabilities()
+        out: dict[str, dict] = {}
+        for pid, cfg in load_provider_configs().items():
+            for model_id in cfg.models:
+                ref = f"{pid}:{model_id}"
+                entry = caps.get(ref)
+                if entry is None:
+                    out[ref] = {"kind": "unprobed"}
+                else:
+                    out[ref] = {
+                        "kind": entry.get("kind"),
+                        "evidence": ("reasoning_tokens"
+                                     if entry.get("reasoning_tokens")
+                                     else "thinking_block" if entry.get("blocks")
+                                     else None),
+                    }
+        return out
+
+    # ── 静态前端(构建产物)───────────────────────────────────────
+
+    dist = (Path(web_dist_dir) if web_dist_dir is not None else
+            Path(__file__).resolve().parent.parent / "web" / "dist")
+    if not api_only:
+        if not dist.is_dir() or not (dist / "index.html").is_file():
+            raise RuntimeError(
+                f"Web 构建产物缺失:{dist}。请先在项目根目录运行 "
+                "`npm ci`，再运行 `npm run build`（工作目录 web/）。")
+        app.mount("/", StaticFiles(directory=dist, html=True), name="web")
+
+    return app
+
+
+def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
+    """启动观测界面。host 只接受 127.0.0.1(红线 ④,硬编码拒绝其他值)。"""
+    if host != DEFAULT_HOST:
+        raise ValueError(
+            f"界面只绑 {DEFAULT_HOST}(红线 ④:节点里有能改文件跑命令的 agent,"
+            f"暴露到网络等于暴露执行权)。请求的 {host!r} 被拒绝。"
+        )
+    from atlas.config_init import initialize_runtime_config
+
+    initialize_runtime_config()
+    import uvicorn
+    uvicorn.run(create_app(), host=host, port=port)
+
+
+def main() -> None:
+    """``atlas-web`` 命令入口。"""
+    serve()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,66 @@
+# 示例 5/6：coding-agent 实施、完整文本 unified diff 审查、有限回修与人工审批。
+# Diff 来自冻结 baseline/result 的普通文件字节清单比较；二进制变更 fail-loud，审批绑定三类摘要。
+# 真实运行要求 config/agents.json 显式 runner=local_cli，并为 agent 绑定含 anthropicBaseUrl 的模型。
+name: code-change-review-approve
+description: coding_agent 实施改动、独立审查完整文本 unified diff，并在人工批准后结束
+
+meta:
+  title: 代码实施与独立审查
+  description: 展示 agent、完整文本 unified diff 消费、有限回修和人工审批门
+  kind: example
+  category: code
+  tags: [coding-agent, 有限循环, 人工审批, diff 审阅]
+  estimated_calls: 每轮 1 次 agent 与 1 次审查，最多 2 轮
+  requires:
+    workdir: true
+    human_approval: true
+  example_task: 修复 demo-project 中的示例错误并自测
+
+nodes:
+  - id: implementer
+    type: coding_agent
+    prompt: |
+      按任务与上游材料实施修改、运行测试，并报告文件、原因和结果。
+      若上游有审查意见，逐条回应。只修改 worktree 副本，不假设 OS 沙箱保护。
+    consumes: [task]
+    # 运行时不展开 ${ATLAS_HOME}。此相对路径仅在 Atlas 源码根目录启动时有效；
+    # 其他启动目录应通过 node_overrides.workdir 提供已存在的绝对目录。
+    workdir: demo-project
+    # 当前 Claude CLI 不提供硬轮次参数；此字段保留为规格元数据。
+    max_turns: 10
+    # 默认关闭 WebSearch/WebFetch；这不是网络隔离，coding Bash 仍可能联网。
+    allow_web: false
+    retry: 1
+
+  - id: reviewer
+    type: llm
+    timeout_s: 180
+    prompt: |
+      你收到改动报告与完整文本 unified diff，以及 baseline/result/patch 三项摘要。只输出 JSON：verdict 取 pass 或 repair；
+      issues 是问题清单；risk 是风险。没有真实报告、完整文本 unified diff 和匹配的三项摘要时不得声称通过。
+    consumes: [task, implementer.output, implementer.diff]
+    output_schema:
+      required: [verdict, issues, risk]
+    route_field: verdict
+
+  - id: gate
+    type: human
+    prompt: 审阅报告、完整文本 unified diff 与 baseline/result/patch 三项摘要；只有证据完整且匹配时才批准。
+    consumes: [task, implementer.output, implementer.diff, reviewer.output]
+
+entry: implementer
+edges:
+  - from: implementer
+    to: reviewer
+  - from: reviewer
+    when: pass
+    to: gate
+  - from: reviewer
+    when: repair
+    to: implementer
+  - from: gate
+    to: END
+
+guards:
+  max_iterations: 2
+  timeout_s: 1800

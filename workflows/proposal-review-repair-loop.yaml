@@ -1,0 +1,52 @@
+# 示例 3/6:方案审查与有限修复循环。
+# author 产出方案 → reviewer 结构化判定 → 不合格回 author 修订(回边)。
+# 终止双保险:条件出口(verdict=pass)+ max_iterations 上限(决定 1)。
+name: proposal-review-repair-loop
+description: 方案产出-审查-修订循环,回边有条件出口与轮数上限
+
+meta:
+  title: 方案审查与修复循环
+  description: 生成方案、结构化审查、不合格自动回修;最多 2 轮,超限大声失败
+  kind: example
+  category: document
+  tags: [有限循环, 条件分支, 结构化判定]
+  estimated_calls: 每轮 2 次,上限 2 轮
+  example_task: 为一个三人团队写一份两周内上线的内部工具技术方案
+
+nodes:
+  - id: author
+    type: llm
+    prompt: |
+      按任务产出/修订一份方案。若上游有审查意见,逐条回应:
+      接受的怎么改、拒绝的为什么。方案要具体到可执行。
+    consumes: [task]
+
+  - id: reviewer
+    type: llm
+    timeout_s: 180
+    prompt: |
+      审查上游方案,输出一个 JSON 对象,恰好三个顶层字段,不要输出任何其他文字:
+      verdict:取 pass 或 repair;
+      issues:具体问题清单,每条形如
+        {"位置": "...", "问题": "...", "建议": "...", "severity": "blocker|major|minor"};
+      severity:本次审查的整体严重度,取 blocker / major / minor。
+      判定标准:没有 blocker 且 major 不多于 1 个时,verdict 才给 pass。
+    consumes: [task, author.output]
+    output_schema:
+      required: [verdict, issues, severity]
+    route_field: verdict
+
+entry: author
+
+edges:
+  - from: author
+    to: reviewer
+  - from: reviewer
+    when: pass
+    to: END
+  - from: reviewer
+    when: repair
+    to: author
+
+guards:
+  max_iterations: 2

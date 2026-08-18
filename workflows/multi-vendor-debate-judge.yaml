@@ -1,0 +1,45 @@
+# 示例 2/6：多模型辩论拓扑。文件名保留，但示例不预填或假定任何供应商。
+name: multi-vendor-debate-judge
+description: 两个未绑定模型的分析分支与一个裁决节点；用户负责配置真实异质性
+
+meta:
+  title: 多模型辩论与裁决
+  description: 两个互不消费彼此输出的分支分析同一问题，裁决节点保留共识与分歧
+  kind: example
+  category: decision
+  tags: [并行, 结构化裁决, 模型待绑定]
+  estimated_calls: 3
+  example_task: 评估小型团队应自建工作流引擎还是使用现成方案
+
+nodes:
+  - id: analyst_a
+    type: llm
+    prompt: 独立列出选项、关键论据、倾向、理由和不确定性。
+    consumes: [task]
+  - id: analyst_b
+    type: llm
+    prompt: 独立给出最强反方论证，再说明权衡后的判断和不确定性。
+    consumes: [task]
+  - id: judge
+    type: llm
+    timeout_s: 180
+    prompt: |
+      只输出 JSON。verdict 取 adopt_a、adopt_b、synthesize 或 insufficient；
+      同时输出 consensus、disagreement、recommendation、confidence。
+      不得仅凭拓扑声称 A/B 来自不同供应商；以实际运行绑定为准。
+    consumes: [task, analyst_a.output, analyst_b.output]
+    output_schema:
+      required: [verdict, consensus, disagreement, recommendation, confidence]
+    route_field: verdict
+
+entry: [analyst_a, analyst_b]
+edges:
+  - from: analyst_a
+    to: judge
+  - from: analyst_b
+    to: judge
+  - from: judge
+    to: END
+
+guards:
+  timeout_s: 900

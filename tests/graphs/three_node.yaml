@@ -1,0 +1,30 @@
+# A4/A6 用:三节点线性链。
+name: three_node
+description: 断言 A4 A6 夹具
+
+nodes:
+  - id: node_a
+    type: llm
+    model: Fake:primary
+    prompt: 第一步:梳理任务。
+    consumes: [task]
+
+  - id: node_b
+    type: llm
+    model: Fake:other
+    prompt: 第二步:扩展上游结论。
+    consumes: [task, node_a.output]
+
+  - id: node_c
+    type: llm
+    model: Fake:third
+    prompt: 第三步:终审。
+    consumes: [task, node_b.output]
+
+edges:
+  - from: node_a
+    to: node_b
+  - from: node_b
+    to: node_c
+  - from: node_c
+    to: END
