@@ -333,6 +333,22 @@ SECURITY.md 边界措辞、README/README.zh-CN"当前不能执行"章节、指�
 - 最终裁决：不通过（仅因新发现重要②；上轮唯一遗留重要项①确认关闭，关闭条件②闸门全绿）。关闭条件：①diff 证据校验以投影证据键集为完整触发域，consumed 摘除/改名被拒，并以两个攻击回归证明 I/J 被拒；②重跑完整无付费后端与前端 test/lint 闸门全绿。完成并经独立复核前，阶段 C/D、发布与真实花销继续暂停。
 - 回流：developer 按 A 路径小修；memory-keeper 核验本记录与修复回流。
 
+### REVIEW-003 · 2026-08-19 · 最终关闭复核（reviewer，重要②修复验证）
+- 审查对象：修复 commit `56be2fe`（上轮重要②关闭路径 A）+ 上轮关闭条件①②。
+- 产出复述：`_verify_approval_material`（`atlas/engine.py`）在 consumed 校验循环后新增完整覆盖校验——`set(projection_evidence) - evidence_covered` 非空即以 `IntegrityError` 拒绝，触发域由"consumed 内名字"改为哈希锚定投影证据键集的完整覆盖；新增 `tests/test_human_gate.py::test_approve_rejects_diff_removed_from_consumed` 与 `::test_approve_rejects_diff_renamed_in_consumed` 两个攻击回归（变体 I/J 蓝本）。
+- 四维结果：正确性通过——重要②确认关闭：reviewer 独立脚本（非项目测试，从生产 API `prepare_execution`+`execute_graph` 构建真实暂停 run：production-shaped runner + `_require_clean_git_workdir` SourceBaselineToken + 真实 git 仓库）复现 I（consumed 摘除 coder.diff）与 J（consumed 改名），两者均在写 `run_approval` 之前以 `IntegrityError`（"审批投影声明了 Diff 证据…不在暂停节点的 consumed 清单中"）拒绝、账本字节级零追加、无 `run_approval`/`run_resumed`，拒绝后锁正常释放（同一 run 还原账本即批准成功）；正向路径完好（`approved_diffs` 单项含 name/artifact_sha256/baseline/result/patch 三摘要且三值互异、与账本 metadata 和投影锚逐一相符，`approved_consumed` 三项齐全，`approved_projection_sha256` 等于 gate 投影哈希）。其余变体（V3 名大小写、V4 consumed 清空、V5 consumed 键删除、V6 path 改指他产物+sha 同步伪造、V7 只改 path、V9 consumed+账本条目同时改名、V10 条目非 dict、V11 sha 置空、V12 path/条目 sha/patch_digest 三重伪造指向他产物）全部在 `run_approval` 前以 `IntegrityError` 拒绝且零追加——分别落入覆盖校验、投影↔账本双向声明校验、`read_artifact` 哈希断言或 patch_digest↔产物哈希/投影证据交叉校验；V8 精确重复条目与 V13 追加伪造条目（coder.output→diff 哈希）虽获批准，但 `approved_diffs` 的 diff 证据仍完整且逐字段正确（V8 仅多一条完全一致的重复记录），无证据静默丢失。完整性通过——后端 331 passed、1 skipped、5 deselected（329+2 新回归），前端 16 passed、oxlint 0 错误；两个新增攻击回归真实存在且通过；`56be2fe` 归因聚焦（3 文件 +71/−0：engine.py +10、PLAN +10、tests +51），HEAD 即 `56be2fe`、工作树 clean，5 commit 链完整（`9d1ed48`→`2c30560`→`5cd4c5d`→`fc190ae`→`56be2fe`）。回归性通过——定向抽查全绿无回归：伪造 metadata/role 降级/伪造条目 sha256/投影与 patch 篡改拒绝（test_human_gate.py 全绿）、`credentialRevision` 轮换（test_prepared_execution.py 全绿）、SourceBaselineToken 竞态（test_agent_diff_security.py 全绿）、保守预算/成本熔断（test_costs_breaker.py 全绿）、稳定锁/tombstone（test_run_locking.py 全绿）、notice CAS（test_web_api.py 24 项全绿）、MCP task 校验（test_mcp.py 全绿）。优越性通过——触发域从"consumed 内名字"升为投影证据键集的完整覆盖，与 `fc190ae` 的"任一侧声明即强制校验"构成双层防线：本类绕过的全部合理变体（摘除/改名/大小写/清空/删键/改指/置空/三重伪造）均无法在不动锚定物的前提下让投影声明的证据静默脱离审批；纵深额外证实 V14a——即使重写投影去证据标记并同步伪造账本哈希锚，只要 consumed 未摘除，账本 role=diff 单侧声明仍触发拒绝。
+- 已验证：未读取 `config/.env`、未调用真实模型或供应商（仅 FakeProvider/Stub 路径与本地真实 git 仓库，5 个 `real_api` 全程 deselected）、未修改生产代码（唯一文件变更为本条目）。后端 `uv run pytest`：331 passed、1 skipped、5 deselected；前端 `npm --prefix web test`：16 passed，`npm run lint`（oxlint）：0 警告 0 错误；`git status` clean、`git log`/`git show --stat` 归因完整。独立脚本 19/19 断言通过：I/J/P0×2 + V3–V7、V8×2、V9–V13×2、V14a/V14b（残余边界特征化：V14b 需同时重写投影本体、账本 `projection_sha256` 锚与 consumed 摘除才获批，此时 `approved_diffs=[]`、锚定哈希即伪造值——该攻击必须摧毁哈希锚定物本身，属已裁定"同用户可重写全部审批材料、事件账本无哈希链"的残余边界，与 I/J 无需触碰锚定物即绕过有本质区别，维持原判、非新发现）。
+- 问题汇总：无新增致命/重要。次要①（新，次要，不阻碍关闭）：consumed 追加伪造条目（V13，如 name=coder.output 而 path/sha=diff 产物）或精确重复条目（V8）可让 `approved_consumed`/`approved_diffs` 出现冗余或错标条目且校验层不标记——但 diff 证据绑定不被削弱、无证据静默丢失，且需与残余边界同级的账本写权限；后续批次可考虑 consumed 键集与投影"上游产物"节段名集的一致性/去重校验。次要②（既有权衡维持）：credentialRevision 离线猜测预言机与事件账本无哈希链残余边界均维持原判。
+- 决策路径：无需回流。关闭条件①（投影证据键集完整触发域 + I/J 两个攻击回归）与②（闸门全绿）均经独立验证满足。
+- 最终裁决：**通过**（REVIEW-003 关闭）。重要②确认关闭，上轮全部已关闭项无回归，无新的致命/重要发现。阶段 C 发布闸门与阶段 D 前置中的"独立复核"要求就 REVIEW-003 而言已满足；D 仍须待所有者预算确认与 preview/dry-run 红线。
+- 回流：memory-keeper 核验本记录与关闭状态归档。
+
+### 2026-08-19 · 阶段 A/B 修复 · REVIEW-003 关闭里程碑（developer）
+- 实际改动：REVIEW-002/003 全部 blocker 经三轮路径 A 修复关闭——`2c30560`（审批投影证据交叉验证 + LLM credentialRevision）、`5cd4c5d`（diff 补丁 git 惯例头，修复前端 0 文件解析）、`fc190ae`（diff 校验触发锚改投影证据、role 降级/伪造 sha256 拒绝）、`56be2fe`（投影证据键集完整覆盖、consumed 摘除/改名拒绝）。仓库初始化为本地 Git（`9d1ed48` 基线，白名单审计 163 文件 0 禁项），5 commit 归因链完整。
+- 验证证据：后端 331 passed/1 skipped/5 real_api deselected；前端 16 passed/lint 0/build 成功；sdist 重建 161 文件禁项 0、绝对路径 0；浏览器验收：diff 工作区三文件渲染、审批条、fail-closed 错误展示、守卫计入成本显示、初始化提示确认；HTTP 删除含 tombstone。REVIEW-003 最终关闭复核独立红队 19/19 断言通过。
+- 计划偏差：无。阶段 C 的"独立复核"要求已满足；阶段 D 待所有者预算确认。
+- 遗留问题：次要①consumed 追加/重复条目可造成 approved 列表冗余（无证据丢失，后续批次）；credentialRevision 离线猜测与账本无哈希链为已裁定残余边界。
+
 ## 13. 计划修订
 
 ### REV-001 提案 · 2026-08-18
