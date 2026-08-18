@@ -296,3 +296,56 @@ def test_approve_rejects_forged_metadata_digests_against_projection(tmp_path):
     assert after == before
     assert not any(event["type"] in {"run_approval", "run_resumed"}
                    for event in after)
+
+
+def _tamper_coder_done(events_path, mutate):
+    lines = events_path.read_text(encoding="utf-8").splitlines()
+    rewritten = []
+    for line in lines:
+        event = json.loads(line)
+        if event.get("type") == "node_done" and event.get("node") == "coder":
+            mutate(event)
+            rewritten.append(json.dumps(event, ensure_ascii=False))
+        else:
+            rewritten.append(line)
+    events_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+
+
+def test_approve_rejects_role_downgrade_of_diff_entry(tmp_path):
+    """变体 D:把账本 diff 条目 role 降级,跳过投影证据校验 → 拒绝。"""
+    spec, prepared, run = _pause_coding_run(tmp_path)
+    events_path = run.dir / "events.jsonl"
+
+    def downgrade(event):
+        for item in event["artifacts"]:
+            if item.get("role") == "diff":
+                item["role"] = ""
+
+    _tamper_coder_done(events_path, downgrade)
+
+    with pytest.raises(IntegrityError, match="role 被降级|与审批投影证据不一致"):
+        approve_run(run.run_id, decision="approve", comment="",
+                    spec=spec, runs_root=tmp_path / "runs", prepared=prepared)
+    after = EventReader(events_path).all()
+    assert not any(event["type"] in {"run_approval", "run_resumed"}
+                   for event in after)
+
+
+def test_approve_rejects_forged_diff_entry_sha256(tmp_path):
+    """变体 G:伪造账本条目 sha256,让投影证据匹配落空 → 拒绝。"""
+    spec, prepared, run = _pause_coding_run(tmp_path)
+    events_path = run.dir / "events.jsonl"
+
+    def forge_sha(event):
+        for item in event["artifacts"]:
+            if item.get("role") == "diff":
+                item["sha256"] = "0" * 64
+
+    _tamper_coder_done(events_path, forge_sha)
+
+    with pytest.raises(IntegrityError, match="role 被降级|与审批投影证据不一致"):
+        approve_run(run.run_id, decision="approve", comment="",
+                    spec=spec, runs_root=tmp_path / "runs", prepared=prepared)
+    after = EventReader(events_path).all()
+    assert not any(event["type"] in {"run_approval", "run_resumed"}
+                   for event in after)

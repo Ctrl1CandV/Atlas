@@ -1014,7 +1014,18 @@ def _verify_approval_material(run_dir: Path, events: list[dict]) -> dict:
                          if isinstance(item, dict)
                          and item.get("name") == ref.name
                          and item.get("sha256") == ref.sha256), None)
-        if artifact and artifact.get("role") == "diff":
+        # 触发锚是投影证据(哈希锚定),不是账本:把账本 role 降级或伪造条目
+        # sha256 不能跳过校验——投影里声明过 diff 证据的消费名必须完整验证。
+        projection_says_diff = ref.name in projection_evidence
+        ledger_says_diff = artifact is not None and artifact.get("role") == "diff"
+        if projection_says_diff or ledger_says_diff:
+            if not projection_says_diff:
+                raise IntegrityError(
+                    f"审批投影缺少 Diff 产物 {ref.name} 的证据摘要,拒绝批准")
+            if not ledger_says_diff:
+                raise IntegrityError(
+                    f"Diff 产物 {ref.name} 的账本条目缺失或 role 被降级,"
+                    "与审批投影证据不一致")
             metadata = artifact.get("metadata") or {}
             required = ("baseline_digest", "result_digest", "patch_digest")
             if not all(isinstance(metadata.get(key), str) and metadata[key]
@@ -1023,9 +1034,6 @@ def _verify_approval_material(run_dir: Path, events: list[dict]) -> dict:
             if metadata["patch_digest"] != ref.sha256:
                 raise IntegrityError(f"Diff 产物 {ref.name} 的 patch_digest 与产物哈希不符")
             expected = projection_evidence.get(ref.name)
-            if not isinstance(expected, dict):
-                raise IntegrityError(
-                    f"审批投影缺少 Diff 产物 {ref.name} 的证据摘要,拒绝批准")
             for key in required:
                 if metadata.get(key) != expected.get(key):
                     raise IntegrityError(
