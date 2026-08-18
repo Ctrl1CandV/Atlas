@@ -1000,6 +1000,7 @@ def _verify_approval_material(run_dir: Path, events: list[dict]) -> dict:
 
     consumed_evidence = []
     diff_evidence = []
+    evidence_covered: set[str] = set()
     done_events = [e for e in events if e.get("type") == "node_done"]
     for raw in node_input.get("consumed", []):
         if not isinstance(raw, dict):
@@ -1044,6 +1045,15 @@ def _verify_approval_material(run_dir: Path, events: list[dict]) -> dict:
                 "artifact_sha256": ref.sha256,
                 **{key: metadata[key] for key in required},
             })
+            evidence_covered.add(ref.name)
+
+    # 触发域必须是投影证据键集的完整覆盖:consumed 摘除或改名 diff 条目
+    # 不能让投影里声明的证据静默消失——那是审批者实际看到的材料。
+    uncovered = set(projection_evidence) - evidence_covered
+    if uncovered:
+        raise IntegrityError(
+            f"审批投影声明了 Diff 证据 {sorted(uncovered)},但对应产物"
+            "不在暂停节点的 consumed 清单中;账本可能已被篡改,拒绝批准")
 
     return {
         "node": node_id,

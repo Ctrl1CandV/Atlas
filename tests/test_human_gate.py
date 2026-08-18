@@ -349,3 +349,54 @@ def test_approve_rejects_forged_diff_entry_sha256(tmp_path):
     after = EventReader(events_path).all()
     assert not any(event["type"] in {"run_approval", "run_resumed"}
                    for event in after)
+
+
+def _tamper_gate_input_consumed(events_path, mutate):
+    lines = events_path.read_text(encoding="utf-8").splitlines()
+    rewritten = []
+    for line in lines:
+        event = json.loads(line)
+        if event.get("type") == "node_input" and event.get("node") == "gate":
+            mutate(event)
+            rewritten.append(json.dumps(event, ensure_ascii=False))
+        else:
+            rewritten.append(line)
+    events_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+
+
+def test_approve_rejects_diff_removed_from_consumed(tmp_path):
+    """变体 I:把 diff 条目从暂停节点 consumed 摘除 → 投影证据未覆盖,拒绝。"""
+    spec, prepared, run = _pause_coding_run(tmp_path)
+    events_path = run.dir / "events.jsonl"
+    _tamper_gate_input_consumed(
+        events_path,
+        lambda event: event.__setitem__(
+            "consumed",
+            [c for c in event["consumed"] if c.get("name") != "coder.diff"]))
+
+    with pytest.raises(IntegrityError, match="不在暂停节点的 consumed 清单"):
+        approve_run(run.run_id, decision="approve", comment="",
+                    spec=spec, runs_root=tmp_path / "runs", prepared=prepared)
+    after = EventReader(events_path).all()
+    assert not any(event["type"] in {"run_approval", "run_resumed"}
+                   for event in after)
+
+
+def test_approve_rejects_diff_renamed_in_consumed(tmp_path):
+    """变体 J:把 consumed 里 diff 条目改名 → 证据键集失配,拒绝。"""
+    spec, prepared, run = _pause_coding_run(tmp_path)
+    events_path = run.dir / "events.jsonl"
+
+    def rename(event):
+        for consumed in event["consumed"]:
+            if consumed.get("name") == "coder.diff":
+                consumed["name"] = "coder.output"
+
+    _tamper_gate_input_consumed(events_path, rename)
+
+    with pytest.raises(IntegrityError, match="不在暂停节点的 consumed 清单"):
+        approve_run(run.run_id, decision="approve", comment="",
+                    spec=spec, runs_root=tmp_path / "runs", prepared=prepared)
+    after = EventReader(events_path).all()
+    assert not any(event["type"] in {"run_approval", "run_resumed"}
+                   for event in after)
