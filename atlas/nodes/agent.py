@@ -521,6 +521,13 @@ def _collect_diff(baseline: Path, result: Path,
 
         old_name = f"a/{rel}" if before else "/dev/null"
         new_name = f"b/{rel}" if after else "/dev/null"
+        # 前端 diffParse 以 `diff --git` 行切分文件;没有它整个补丁会被
+        # 当成空补丁。这里补上 git 惯例头,正文仍由 difflib 生成。
+        header = [f"diff --git a/{rel} b/{rel}\n"]
+        if before is None:
+            header.append("new file mode 100644\n")
+        elif after is None:
+            header.append("deleted file mode 100644\n")
         rendered: list[str] = []
         file_add = file_del = 0
         for line in difflib.unified_diff(
@@ -537,7 +544,7 @@ def _collect_diff(baseline: Path, result: Path,
         # patch，避免 UI 展示空补丁而 metadata 单独声称有改动。
         if not rendered and (before is None or after is None):
             rendered = [f"--- {old_name}\n", f"+++ {new_name}\n"]
-        encoded = "".join(rendered).encode("utf-8")
+        encoded = "".join(header).encode("utf-8") + "".join(rendered).encode("utf-8")
         total_size += len(encoded)
         if total_size > DIFF_MAX_BYTES:
             raise AgentCliError(
