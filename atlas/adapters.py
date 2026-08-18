@@ -53,6 +53,16 @@ class ModelResponse:
     reasoning_kind: str = ""
 
 
+def _llm_credential_revision(provider_id: str, api_key: str) -> str:
+    """LLM 凭据的单向版本标识：检测轮换，永不回显或记录密钥值。"""
+    material = (
+        b"atlas-llm-credential/v1\0"
+        + provider_id.encode("utf-8") + b"\0"
+        + api_key.encode("utf-8")
+    )
+    return hashlib.sha256(material).hexdigest()
+
+
 class OpenAICompatAdapter:
     """OpenAI 兼容端点(/chat/completions)。"""
 
@@ -67,6 +77,7 @@ class OpenAICompatAdapter:
         self.base_url = base_url
         self.default_timeout_s = timeout_s
         self.credential_ref = credential_ref
+        self.credential_revision = _llm_credential_revision(provider_id, api_key)
         self._client = OpenAI(base_url=base_url, api_key=api_key,
                               timeout=timeout_s, max_retries=0)
         self._max_output_tokens = max_output_tokens
@@ -78,6 +89,7 @@ class OpenAICompatAdapter:
             "default_timeout_s": self.default_timeout_s,
             "default_max_output_tokens": self._max_output_tokens,
             "credential_ref": self.credential_ref,
+            "credentialRevision": self.credential_revision,
         }
 
     def call(self, model_id: str, prompt: str, extra_body: dict | None = None,
@@ -132,6 +144,7 @@ class AnthropicCompatAdapter:
         self.base_url = base_url
         self.default_timeout_s = timeout_s
         self.credential_ref = credential_ref
+        self.credential_revision = _llm_credential_revision(provider_id, api_key)
         self._client = Anthropic(base_url=base_url, api_key=api_key,
                                  timeout=timeout_s, max_retries=0)
         self._max_output_tokens = max_output_tokens
@@ -143,6 +156,7 @@ class AnthropicCompatAdapter:
             "default_timeout_s": self.default_timeout_s,
             "default_max_output_tokens": self._max_output_tokens,
             "credential_ref": self.credential_ref,
+            "credentialRevision": self.credential_revision,
         }
 
     def call(self, model_id: str, prompt: str, extra_body: dict | None = None,

@@ -4,6 +4,8 @@
 interrupt 的「暂停—重启进程—恢复」语义由 scripts/interrupt_smoke.py
 先行验证;这里测 Atlas 层的完整闭环。
 """
+import json
+
 import pytest
 
 from atlas.adapters import FakeProvider
@@ -210,3 +212,87 @@ edges:
         "result_digest": metadata["result_digest"],
         "patch_digest": metadata["patch_digest"],
     }]
+
+
+def _pause_coding_run(tmp_path):
+    import subprocess
+
+    from atlas.nodes.local_cli import _require_clean_git_workdir
+    from atlas.spec import spec_from_yaml
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "app.py").write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=project, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-qm", "baseline"], cwd=project, check=True)
+
+    spec = spec_from_yaml(f"""
+name: coding-metadata-forgery
+nodes:
+  - id: coder
+    type: coding_agent
+    model: Stub:agent
+    prompt: 修改文件。
+    consumes: [task]
+    workdir: {project.as_posix()}
+  - id: gate
+    type: human
+    prompt: 审阅报告和补丁。
+    consumes: [task, coder.output, coder.diff]
+edges:
+  - from: coder
+    to: gate
+  - from: gate
+    to: END
+""")
+
+    class ProductionRunner:
+        production_runner = True
+        runner_name = "local_cli"
+
+        def __init__(self):
+            self.source_baseline_tokens = (
+                _require_clean_git_workdir(project, "coder"),)
+
+        def __call__(self, _attachment, *, cwd=None, **_kwargs):
+            (cwd / "app.py").write_text("value = 2\n", encoding="utf-8")
+            return "已修改 app.py"
+
+    prepared = prepare_execution(
+        spec, make_registry(FakeProvider()), agent_runner=ProductionRunner())
+    run = execute_graph(
+        spec, task=TASK_TEXT, runs_root=tmp_path / "runs", prepared=prepared)
+    assert run.status == "paused"
+    return spec, prepared, run
+
+
+def test_approve_rejects_forged_metadata_digests_against_projection(tmp_path):
+    """暂停后只改账本 metadata 的 baseline/result 摘要 → 与哈希锚定投影不符,拒绝。"""
+    spec, prepared, run = _pause_coding_run(tmp_path)
+    events_path = run.dir / "events.jsonl"
+    lines = events_path.read_text(encoding="utf-8").splitlines()
+    forged = []
+    for line in lines:
+        event = json.loads(line)
+        if event.get("type") == "node_done" and event.get("node") == "coder":
+            diff_entry = next(item for item in event["artifacts"]
+                              if item.get("role") == "diff")
+            diff_entry["metadata"]["baseline_digest"] = "f" * 64
+            diff_entry["metadata"]["result_digest"] = "e" * 64
+            forged.append(json.dumps(event, ensure_ascii=False))
+        else:
+            forged.append(line)
+    events_path.write_text("\n".join(forged) + "\n", encoding="utf-8")
+    before = EventReader(events_path).all()
+
+    with pytest.raises(IntegrityError, match="投影中的证据不符"):
+        approve_run(run.run_id, decision="approve", comment="",
+                    spec=spec, runs_root=tmp_path / "runs", prepared=prepared)
+
+    after = EventReader(events_path).all()
+    assert after == before
+    assert not any(event["type"] in {"run_approval", "run_resumed"}
+                   for event in after)

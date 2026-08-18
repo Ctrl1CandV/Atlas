@@ -55,6 +55,7 @@ def test_registry_descriptor_is_nonsecret_stable_and_order_sensitive():
     adapter.base_url = "https://gateway.invalid/v1"
     adapter.default_timeout_s = 123.0
     adapter.credential_ref = "P_API_KEY"
+    adapter.credential_revision = "revision-placeholder"
     adapter._max_output_tokens = 4096
     adapter._client = object()
     descriptor_text = json.dumps(adapter.execution_descriptor(), sort_keys=True)
@@ -130,6 +131,40 @@ def test_registry_freeze_rejects_register_and_keeps_default_cap():
     registry.freeze()
     with pytest.raises(ConfigError, match="冻结"):
         registry.register("Other", ["m"], fake)
+
+
+def test_llm_credential_rotation_changes_execution_identity():
+    from atlas.adapters import AnthropicCompatAdapter, OpenAICompatAdapter
+
+    def registry_with(adapter) -> AdapterRegistry:
+        registry = AdapterRegistry()
+        registry.register("P", ["m"], adapter)
+        return registry
+
+    old = OpenAICompatAdapter("P", "https://gateway.invalid/v1", "key-one",
+                              credential_ref="P_API_KEY")
+    rotated = OpenAICompatAdapter("P", "https://gateway.invalid/v1", "key-two",
+                                  credential_ref="P_API_KEY")
+    assert registry_with(old).fingerprint() != registry_with(rotated).fingerprint()
+    rendered = json.dumps(registry_with(old).execution_descriptor())
+    assert "key-one" not in rendered and "key-two" not in rendered
+
+    old_anthropic = AnthropicCompatAdapter(
+        "P", "https://anthropic.invalid", "key-one", credential_ref="P_API_KEY")
+    rotated_anthropic = AnthropicCompatAdapter(
+        "P", "https://anthropic.invalid", "key-two", credential_ref="P_API_KEY")
+    assert (registry_with(old_anthropic).fingerprint()
+            != registry_with(rotated_anthropic).fingerprint())
+    rendered_anthropic = json.dumps(
+        registry_with(old_anthropic).execution_descriptor())
+    assert "key-one" not in rendered_anthropic
+
+    spec = spec_from_yaml(SIMPLE_YAML.replace("Fake:primary", "P:m"))
+    before = prepare_execution(spec, registry_with(old),
+                               agent_runner=lambda *a, **k: None)
+    after = prepare_execution(spec, registry_with(rotated),
+                              agent_runner=lambda *a, **k: None)
+    assert before.execution_sha256 != after.execution_sha256
 
 
 def test_prepared_rejects_backend_object_mutation_before_disk(tmp_path):

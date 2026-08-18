@@ -36,10 +36,12 @@ from atlas.nodes import make_agent_node_fn
 from atlas.nodes.agent import SourceBaselineToken
 from atlas.integrity import (
     ArtifactRef,
+    IntegrityError,
     PROJECTION_MAX_BYTES,
     ResourceLimitError,
     TASK_MAX_BYTES,
     build_projection,
+    parse_projection_evidence,
     store_artifact,
     read_artifact,
     sha256_bytes,
@@ -992,6 +994,9 @@ def _verify_approval_material(run_dir: Path, events: list[dict]) -> dict:
     projection_sha256 = sha256_bytes(projection_bytes)
     if projection_sha256 != node_input.get("projection_sha256"):
         raise IntegrityError(f"human 节点 {node_id} 的审批投影哈希不符")
+    # 投影是哈希锚定的"审批者看到的摘要"；事件 metadata 暂停后仍可改写，
+    # 因此 Diff 摘要必须以投影内证据为准，与账本 metadata 逐项交叉验证。
+    projection_evidence = parse_projection_evidence(projection_bytes)
 
     consumed_evidence = []
     diff_evidence = []
@@ -1017,6 +1022,15 @@ def _verify_approval_material(run_dir: Path, events: list[dict]) -> dict:
                 raise IntegrityError(f"Diff 产物 {ref.name} 缺少审批摘要")
             if metadata["patch_digest"] != ref.sha256:
                 raise IntegrityError(f"Diff 产物 {ref.name} 的 patch_digest 与产物哈希不符")
+            expected = projection_evidence.get(ref.name)
+            if not isinstance(expected, dict):
+                raise IntegrityError(
+                    f"审批投影缺少 Diff 产物 {ref.name} 的证据摘要,拒绝批准")
+            for key in required:
+                if metadata.get(key) != expected.get(key):
+                    raise IntegrityError(
+                        f"Diff 产物 {ref.name} 的 {key} 与审批投影中的证据不符,"
+                        "账本摘要可能已被篡改")
             diff_evidence.append({
                 "name": ref.name,
                 "artifact_sha256": ref.sha256,

@@ -194,3 +194,39 @@ def build_projection(
     (proj_dir / f"{proj_path.name}.sha256").write_text(digest, encoding="utf-8")
     projection = proj_path.read_bytes()
     return projection, ArtifactRef(name=f"{node_id}.input", path=proj_path, sha256=digest), consumed
+
+
+_EVIDENCE_MARKER_PREFIX = "===== 审批证据 ["
+_EVIDENCE_MARKER_SUFFIX = "] ====="
+
+
+def parse_projection_evidence(projection: bytes) -> dict[str, dict]:
+    """从投影字节解析审批证据摘要：逻辑名 → 摘要映射。
+
+    投影在构建时按 canonical JSON 内联了 Diff 产物的
+    baseline/result/patch 三项摘要；投影本身被 node_input 的哈希锚定，
+    是"审批者看到了什么"的不可变事实。账本事件里的 metadata 在暂停后
+    仍可被改写，因此审批必须以这里解析出的摘要为准。
+    """
+    evidence: dict[str, dict] = {}
+    lines = projection.decode("utf-8", errors="replace").splitlines()
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if not (stripped.startswith(_EVIDENCE_MARKER_PREFIX)
+                and stripped.endswith(_EVIDENCE_MARKER_SUFFIX)):
+            continue
+        name = stripped[len(_EVIDENCE_MARKER_PREFIX):-len(_EVIDENCE_MARKER_SUFFIX)]
+        if not name:
+            continue
+        for candidate in lines[index + 1:index + 3]:
+            candidate = candidate.strip()
+            if not candidate:
+                continue
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                break
+            if isinstance(parsed, dict):
+                evidence[name] = parsed
+            break
+    return evidence
