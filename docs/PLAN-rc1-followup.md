@@ -40,7 +40,7 @@ REVIEW-004 独立复核通过。** 本文最初定稿于 2026-08-18，并于 202
 - agent 成本在有 `max_cost_usd` 时采用持久 reservation 与保守未知费用结算；无 cap
   不虚构 reservation 或金额；初始化通知采用跨进程 journal/queue/CAS；Web 与 MCP 共用
   task 和执行预检契约；
-- 最终本地闸门：Python 3.14.6 与隔离 Python 3.12.9 均为 **425 passed、1 skipped、
+- 最终本地闸门：Python 3.14.6 与隔离 Python 3.12.9 均为 **426 passed、1 skipped、
   5 real_api deselected**；前端 **22 passed**、lint 0、build 成功；六工作流和 clean-init
   闸门全绿；最终 sdist **173 条目、0 发现**，Python 3.12 离线安装与六 MCP 工具探针通过。
 
@@ -373,7 +373,7 @@ P11/P13 与阶段 E 一样延后到 v0.1.0 发布后按需实施，P5/P8/P12/P14
 - 审查对象：实施结果（P0min、P1、P6、首轮发布 blocker 修复与最终发布闸门）。
 - 产出复述：有成本帽的未知费率 LLM attempt 在派发前保守预留全部剩余额度；SSE 控制通知不污染持久游标并拒绝旧连接迟到回调；YAML 拒绝重复键、anchor/alias/merge、资源炸弹与非法 Unicode；resume 在权威锁内先判持久状态再准备后端；发布工作流、sdist 扫描、harness 忽略规则和文档合同已同步。
 - 四维结果：正确性、完整性、回归性与优越性均通过；未发现可复现的致命或重要发布 blocker。
-- 已验证：同一工作树下 Python 3.14.6 与隔离 Python 3.12.9 均 425 passed、1 skipped、5 real_api deselected；前端 22 passed、lint 0、build 成功；六工作流离线闸门与 clean-init 全绿；sdist 173 条目、0 发现，Python 3.12 离线安装与六 MCP 工具探针通过。
+- 已验证：同一工作树及最终干净提交下，Python 3.14.6 与隔离 Python 3.12.9 均 426 passed、1 skipped、5 real_api deselected；前端 22 passed、lint 0、build 成功；六工作流离线闸门与 clean-init 全绿；sdist 173 条目、0 发现，Python 3.12 离线安装与六 MCP 工具探针通过。
 - 问题汇总：无致命/重要问题。远端 GitHub Actions、受保护 release environment、tag、上传、SHA256SUMS、SBOM、provenance 与下载后验证仍属于尚未执行的操作性闸门；阶段 D 仍未授权。
 - 决策路径：无需回流。
 - 最终裁决：**GO，可进入远端 RC 发布流程**；不得在远端闸门完成前宣称发布完成，也不得自动启动阶段 D。

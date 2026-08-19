@@ -53,7 +53,7 @@ Enju、BoundFlow、agent-blueprint、Dify、n8n 以及 LangGraph、Temporal 等�
 - 源状态：最终候选以承载本文、检查单和 §11 实施证据的同一提交为准；不得用提交前的
   `8c71b6b` 或含额外未提交改动的工作树替代。
 - 后端：`uv run pytest` 在 Python 3.14.6 与 `uv run --isolated --python 3.12 pytest`
-  在 Python 3.12.9 均 **425 passed, 1 skipped, 5 real_api deselected**；包含未知费率
+  在 Python 3.12.9 均 **426 passed, 1 skipped, 5 real_api deselected**；包含未知费率
   reservation、真实子进程强杀、动态 interrupted、Windows WAL 恢复、resume 状态优先、
   YAML 重复键/alias/资源上限和非法 Unicode 回归。
 - 前端：`npm --prefix web test` **22 passed**、oxlint 0/0、build 成功；包含 interrupted

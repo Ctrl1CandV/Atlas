@@ -20,7 +20,7 @@ Status: phase C and the reduced P0min/P1/P6 batch closed locally on 2026-08-19. 
 
 ## Automated validation
 - [x] `uv lock --check` and Python `compileall` pass.
-- [x] Tests pass with real-API tests deselected, including documentation contracts, malformed-cost/YAML attacks, SSE cursor races, and real subprocess-kill recovery. *(425 passed, 1 skipped, 5 deselected on Python 3.14.6 and Python 3.12.9)*
+- [x] Tests pass with real-API tests deselected, including documentation contracts, malformed-cost/YAML attacks, SSE cursor races, and real subprocess-kill recovery. *(426 passed, 1 skipped, 5 deselected on Python 3.14.6 and Python 3.12.9)*
 - [x] Web tests, lint, and production build pass on Node.js 22.12+. *(full `npm test` 22 passed, oxlint 0/0, build OK)*
 - [x] All six shipped workflows parse, validate, and dry-run without provider calls or run directories. *(strict offline gate: 6 registry preflights, 6 runner preflights, 0 provider calls, 0 agent calls, 0 run dirs, all `execution_sha256` non-null)*
 - [ ] Windows required CI passes; Ubuntu compatibility signal is reviewed but is not a support claim. *(workflow definitions validated locally; remote run pending push)*
