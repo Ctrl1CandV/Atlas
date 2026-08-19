@@ -6,6 +6,8 @@
 
 Atlas 是一个**本地、可审计的多模型工作流引擎**。用 YAML 定义图，让不同厂商的模型分工协作——并行调研、交叉辩论、代码实施、人工审批——你在本机 Web 界面实时看到每个节点的完整输入与输出。
 
+> **发布范围：** 当前正式版本是 `v0.1.0`，仅支持 Windows 10/11 x64，以源码 sdist 发布；尚未发布到 PyPI，也没有预编译安装器。Git clone 与发布 sdist 的内容并不完全相同，见下方安装说明。
+
 ![Atlas 运行视图](assets/observe-run.png)
 
 点开任意节点，可以看到它的完整输入与输出、实际使用的模型、token 与耗时：
@@ -19,7 +21,7 @@ Atlas 是一个**本地、可审计的多模型工作流引擎**。用 YAML 定�
 - **全程可审计**：append-only 事件账本、write-once 产物与哈希断言、审批证据绑定 baseline/result/patch 三摘要。
 - **崩溃可恢复**：控制器被杀后运行自动判定为 interrupted，checkpoint 续跑只补未完成节点，成本预留不重算预算。
 - **人工在环**：`human` 节点把图暂停在 Web 界面，等你审阅真实产物后批准或驳回。
-- **本地优先**：Web 仅绑回环地址，凭据只存本机 `config/.env`，不内置任何遥测或云依赖。
+- **本地优先**：Web 仅绑回环地址，凭据只存本机 `config/.env`，Atlas 没有托管控制面或内置遥测；真实运行仍可能调用你配置的远程模型供应商。
 
 ## 能力与边界（如实说明）
 
@@ -48,7 +50,7 @@ npm --prefix web ci
 npm --prefix web run build
 ```
 
-也可以从 [v0.1.0 Release](https://github.com/Ctrl1CandV/Atlas/releases/tag/v0.1.0) 下载源码包（附 SHA256SUMS 与构建来源证明）。
+也可以从 [v0.1.0 Release](https://github.com/Ctrl1CandV/Atlas/releases/tag/v0.1.0) 下载 Atlas 自定义源码 sdist（附 `SHA256SUMS` 与构建来源证明）。GitHub 自动生成的 Source code 归档、Git clone 和该 sdist 是三种不同输入；`v0.1.0` sdist 不含项目级 `.mcp.json`、英文 README 与页面截图，使用 MCP 时应优先 clone 仓库或手动配置 `atlas-mcp`。当前分支已修正下一版 sdist 的内容清单，但不会静默替换既有 `v0.1.0` 资产。
 
 升级时先更新源码并阅读 `CHANGELOG.md`，再重复锁定依赖同步和 Web 全新安装。运行配置保留在本机；修改活动配置前先比较新版 `config/*.example.json`。
 
@@ -72,7 +74,7 @@ uv run python -m atlas.web   # 等价：uv run atlas-web
 
 ### 在 harness 中使用 MCP
 
-仓库自带 [`.mcp.json`](.mcp.json)。用 Claude Code（或其他支持项目级 MCP 配置的 harness）打开克隆下来的 Atlas 仓库，六个 MCP 工具会通过 stdio 自动启动，无需手动开终端。配置执行的是 `uv --directory . run atlas-mcp`，以仓库根目录为工作目录，只要先完成 `uv sync --locked --all-groups` 即可在任何机器上使用。
+Git clone 自带 [`.mcp.json`](.mcp.json)。用 Claude Code（或其他支持项目级 MCP 配置的 harness）打开克隆下来的 Atlas 仓库，六个 MCP 工具会通过 stdio 自动启动，无需手动开终端。配置执行的是 `uv --directory . run atlas-mcp`，以仓库根目录为工作目录，只要先完成 `uv sync --locked --all-groups` 即可使用。已发布的 `v0.1.0` sdist 不含该文件；下一版 sdist 内容清单已补入。
 
 每个工作流都应先校验、再 dry-run，检查模型绑定、守卫和费用后，才明确请求真实运行。校验和 dry-run 不调用供应商；真实运行可能收费。已确认费率时美元帽按预估与实际费用结算；费率未知但设置了成本帽时，Atlas 会保守占满本次剩余预算以阻止后续复用，但无法证明供应商实际账单未超过该帽。`human` 节点在本机界面等待决定。
 
@@ -94,9 +96,8 @@ Agent 子进程环境只包含必要系统变量、所选供应商端点和当�
 ```powershell
 uv lock --check
 uv run python -m compileall -q atlas
-uv run pytest
+npm --prefix web test
 npm --prefix web run lint
-npm --prefix web run test:diff
 npm --prefix web run build
 uv build --sdist
 ```

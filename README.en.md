@@ -6,6 +6,8 @@
 
 Atlas is a **local, auditable multi-model workflow engine**. YAML defines the graph; models from different vendors collaborate — parallel research, cross-examination debates, code implementation, human approval — while the loopback Web UI records every node's full input and output.
 
+> **Release scope:** the current stable version is `v0.1.0`, supports Windows 10/11 x64 only, and ships as a source sdist. It is not published to PyPI and has no prebuilt installer. A Git clone and the release sdist do not contain exactly the same files; see the install notes below.
+
 ![Atlas run view](assets/observe-run.png)
 
 Open any node to inspect its full input and output, the model actually used, tokens, and duration:
@@ -19,7 +21,7 @@ Open any node to inspect its full input and output, the model actually used, tok
 - **Auditable end to end**: append-only event ledger, write-once artifacts with hash assertions, and approval evidence bound to baseline/result/patch digests.
 - **Crash-recoverable**: a killed controller leaves the run dynamically marked interrupted; checkpoint resume completes only unfinished nodes and never re-opens the budget.
 - **Human in the loop**: `human` nodes pause the graph in the Web UI until you review the real artifacts and approve or reject.
-- **Local first**: the Web UI binds to loopback only, credentials stay in local `config/.env`, and there is no telemetry or cloud dependency.
+- **Local first**: the Web UI binds to loopback only, credentials stay in local `config/.env`, and Atlas has no hosted control plane or built-in telemetry. Real runs may still call the remote model providers you configure.
 
 ## Honest scope
 
@@ -48,7 +50,7 @@ npm --prefix web ci
 npm --prefix web run build
 ```
 
-You can also download the source archive from the [v0.1.0 release](https://github.com/Ctrl1CandV/Atlas/releases/tag/v0.1.0) (ships with SHA256SUMS and build provenance).
+You can also download the Atlas source sdist from the [v0.1.0 release](https://github.com/Ctrl1CandV/Atlas/releases/tag/v0.1.0), alongside `SHA256SUMS` and build provenance. GitHub's generated Source code archive, a Git clone, and this custom sdist are three different inputs. The published `v0.1.0` sdist does not contain the project-level `.mcp.json`, the English README, or the screenshots; prefer a Git clone for automatic MCP setup, or configure `atlas-mcp` manually. The current branch fixes the next release's sdist manifest without silently replacing existing `v0.1.0` assets.
 
 For an upgrade, update the source, review `CHANGELOG.md`, then repeat the locked sync and clean Web install. Runtime configuration remains local; compare new `config/*.example.json` files before changing active files.
 
@@ -72,7 +74,7 @@ Open <http://127.0.0.1:8321>. Keep the service on loopback; there is no multi-us
 
 ### MCP in your harness
 
-The repository ships [`.mcp.json`](.mcp.json). Open the cloned Atlas repository in Claude Code (or another harness that reads project-level MCP config) and the six Atlas MCP tools start automatically over stdio — no manual terminal required. The config runs `uv --directory . run atlas-mcp` from the repository root, so it works on any machine after `uv sync --locked --all-groups`.
+A Git clone ships [`.mcp.json`](.mcp.json). Open the cloned Atlas repository in Claude Code (or another harness that reads project-level MCP config) and the six Atlas MCP tools start automatically over stdio — no manual terminal required. The config runs `uv --directory . run atlas-mcp` from the repository root after `uv sync --locked --all-groups`. The published `v0.1.0` sdist does not include this file; the next-release sdist manifest now does.
 
 For each workflow: validate, dry-run, review model bindings/guards/cost, then explicitly request a real run. Validation and dry-run make no provider calls. Real runs may cost money. With `max_cost_usd`, unknown prices conservatively consume all remaining Atlas budget, but only locally verified prices can establish that the provider's actual charge stayed within the dollar cap. Human nodes pause for a decision in the local UI.
 
@@ -94,9 +96,8 @@ Read [`SECURITY.md`](SECURITY.md) before using real credentials. Workflow fields
 ```powershell
 uv lock --check
 uv run python -m compileall -q atlas
-uv run pytest
+npm --prefix web test
 npm --prefix web run lint
-npm --prefix web run test:diff
 npm --prefix web run build
 uv build --sdist
 ```

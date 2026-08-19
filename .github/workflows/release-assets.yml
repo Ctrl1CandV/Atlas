@@ -1,12 +1,12 @@
 name: Release assets
 
-# Minimal release-only pipeline: build the source distribution, generate the
-# SPDX SBOM and SHA256 manifest, attest build provenance, and publish the
-# GitHub release. Validation gates are not repeated here; they run locally on
-# the release tree (see RELEASE_CHECKLIST) and their scripts are not part of
-# the public repository.
+# Stable releases are built only from the tag-push context. The workflow reserves
+# the tag with a new draft Release before building, uploads without overwriting,
+# and publishes that exact draft only after provenance succeeds.
 on:
-  workflow_dispatch:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
   contents: write
@@ -14,7 +14,7 @@ permissions:
   attestations: write
 
 concurrency:
-  group: release-assets
+  group: release-assets-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -23,76 +23,171 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
         with:
           version: "0.8.13"
+      - name: Verify tag context and reserve draft release
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTEXT_REF: ${{ github.ref }}
+          CONTEXT_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:CONTEXT_REF -notmatch '^refs/tags/(v[0-9]+\.[0-9]+\.[0-9]+)$') {
+            throw "Release workflow requires a stable tag-push context, got $env:CONTEXT_REF"
+          }
+          $tag = $Matches[1]
+          $version = $tag.Substring(1)
+          git show-ref --verify --quiet "refs/tags/$tag"
+          if ($LASTEXITCODE -ne 0) { throw "Tag ref does not exist: refs/tags/$tag" }
+          $tagCommit = (git rev-parse "refs/tags/$tag^{commit}").Trim()
+          $head = (git rev-parse HEAD).Trim()
+          if ($head -ne $tagCommit) {
+            throw "Checked-out HEAD $head does not match $tag target $tagCommit"
+          }
+          if ($env:CONTEXT_SHA -ne $tagCommit) {
+            throw "Workflow context SHA $env:CONTEXT_SHA does not match $tag target $tagCommit"
+          }
+          $projectVersion = (python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])").Trim()
+          if ($projectVersion -ne $version) {
+            throw "Tag version $version does not match pyproject version $projectVersion"
+          }
+
+          $createdJson = gh api --method POST "repos/$env:GITHUB_REPOSITORY/releases" `
+            -f "tag_name=$tag" -f "target_commitish=$tagCommit" -f "name=$tag" `
+            -F draft=true -F prerelease=false -F generate_release_notes=true
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not reserve a new draft Release for $tag; an existing release, authentication failure, or API error is fatal"
+          }
+          $created = $createdJson | ConvertFrom-Json
+          if (-not $created.id -or -not $created.draft -or $created.tag_name -ne $tag) {
+            throw "GitHub returned an invalid draft Release response for $tag"
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "commit=$tagCommit" >> $env:GITHUB_OUTPUT
+          "release_id=$($created.id)" >> $env:GITHUB_OUTPUT
       - name: Sync locked dependencies
         run: uv sync --locked --all-groups
       - name: Build source distribution only
         run: uv build --sdist
-      - name: Verify sdist version matches the release tag
+      - name: Verify source distribution name
         shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
-          $archive = Get-ChildItem dist -Filter *.tar.gz | Select-Object -First 1
-          if (-not $archive) { throw "No sdist produced" }
-          $expected = "0.1.0"
-          $archiveName = "atlas-$expected.tar.gz"
-          if ($archive.Name -ne $archiveName) {
-            throw "Expected $archiveName, found $($archive.Name)"
+          $archives = @(Get-ChildItem dist -Filter *.tar.gz)
+          if ($archives.Count -ne 1) { throw "Expected exactly one sdist, found $($archives.Count)" }
+          $expected = "atlas-$env:RELEASE_VERSION.tar.gz"
+          if ($archives[0].Name -ne $expected) {
+            throw "Expected $expected, found $($archives[0].Name)"
           }
       - name: Generate SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           path: .
           format: spdx-json
-          output-file: dist/atlas-v0.1.0.spdx.json
+          output-file: dist/atlas-${{ steps.release.outputs.tag }}.spdx.json
           upload-artifact: false
       - name: Keep only release artifacts in dist
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
-          Write-Host '::group::dist before cleanup'
-          Get-ChildItem dist -Force | Format-Table Name, Length | Out-String | Write-Host
-          Write-Host '::endgroup::'
-          $keep = @('atlas-0.1.0.tar.gz', 'atlas-v0.1.0.spdx.json')
+          $keep = @("atlas-$env:RELEASE_VERSION.tar.gz", "atlas-$env:RELEASE_TAG.spdx.json")
           Get-ChildItem dist -File -Force | Where-Object { $_.Name -notin $keep } |
             Remove-Item -Force
-          Write-Host '::group::dist after cleanup'
-          Get-ChildItem dist -Force | Format-Table Name, Length | Out-String | Write-Host
-          Write-Host '::endgroup::'
-          if (-not (Test-Path dist/atlas-0.1.0.tar.gz)) {
-            throw "sdist missing from dist after cleanup"
-          }
-          if (-not (Test-Path dist/atlas-v0.1.0.spdx.json)) {
-            Get-ChildItem . -Filter '*.spdx.json' -Recurse -Depth 3 |
-              Format-Table FullName | Out-String | Write-Host
-            throw "SBOM missing from dist after cleanup"
+          foreach ($name in $keep) {
+            if (-not (Test-Path (Join-Path dist $name))) { throw "Release artifact missing: $name" }
           }
       - name: Generate and verify SHA256 manifest
         shell: pwsh
         run: |
-          $files = Get-ChildItem dist -File -Force | Sort-Object Name
-          if (-not $files) { throw "No release artifacts found" }
+          $files = @(Get-ChildItem dist -File -Force | Sort-Object Name)
+          if ($files.Count -ne 2) { throw "Expected sdist and SBOM before manifest, found $($files.Count) files" }
           $lines = foreach ($file in $files) {
             $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
             "$hash  $($file.Name)"
           }
           Set-Content -Path dist/SHA256SUMS -Value $lines -Encoding ascii
-          Get-Content dist/SHA256SUMS
+          foreach ($line in Get-Content dist/SHA256SUMS) {
+            if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw "Malformed SHA256SUMS line: $line" }
+            $actual = (Get-FileHash -Algorithm SHA256 (Join-Path dist $Matches[2])).Hash.ToLowerInvariant()
+            if ($actual -ne $Matches[1]) { throw "SHA256 mismatch for $($Matches[2])" }
+          }
       - name: Attest release artifacts
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: dist/*
-      - name: Publish the v0.1.0 release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          tag_name: v0.1.0
-          prerelease: false
-          generate_release_notes: true
-          files: |
-            dist/atlas-0.1.0.tar.gz
-            dist/atlas-v0.1.0.spdx.json
-            dist/SHA256SUMS
-          fail_on_unmatched_files: true
+      - name: Upload assets to the reserved release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          $assets = @(
+            "atlas-$env:RELEASE_VERSION.tar.gz",
+            "atlas-$env:RELEASE_TAG.spdx.json",
+            "SHA256SUMS"
+          )
+          foreach ($name in $assets) {
+            $encodedName = [Uri]::EscapeDataString($name)
+            gh api --hostname uploads.github.com --method POST `
+              -H "Content-Type: application/octet-stream" `
+              --input "dist/$name" `
+              "repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID/assets?name=$encodedName"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Asset upload failed for $name; the workflow never selects another Release by tag"
+            }
+          }
+      - name: Publish reserved release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+        run: |
+          $publishedJson = gh api --method PATCH `
+            "repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID" `
+            -F draft=false -F prerelease=false
+          if ($LASTEXITCODE -ne 0) { throw "Could not publish reserved Release $env:RELEASE_ID" }
+          $published = $publishedJson | ConvertFrom-Json
+          if ($published.draft -or $published.id -ne [long]$env:RELEASE_ID) {
+            throw "GitHub returned an invalid published Release response"
+          }
+      - name: Delete this run's draft after failure
+        if: ${{ failure() && steps.release.outputs.release_id != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          $releaseJson = gh api "repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Could not inspect Release $env:RELEASE_ID; refusing automatic cleanup"
+            exit 0
+          }
+          $release = $releaseJson | ConvertFrom-Json
+          if ($release.id -ne [long]$env:RELEASE_ID -or $release.tag_name -ne $env:RELEASE_TAG) {
+            Write-Host "Release identity no longer matches this run; refusing automatic cleanup"
+            exit 0
+          }
+          if (-not $release.draft) {
+            Write-Host "Release $env:RELEASE_ID is already published; cleanup will not delete it"
+            exit 0
+          }
+          gh api --method DELETE "repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to remove draft Release $env:RELEASE_ID; manual cleanup is required"
+          }
