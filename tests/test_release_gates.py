@@ -162,6 +162,15 @@ def test_ci_and_release_use_shared_gates_without_manual_active_config():
     assert "Verify SHA256 manifest" in release
 
 
+def test_remote_jobs_build_web_before_python_tests():
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    windows, ubuntu = ci.split("  ubuntu-compatibility-signal:", 1)
+
+    for job in (windows, ubuntu, release):
+        assert job.index("npm --prefix web run build") < job.index("uv run pytest")
+
+
 def test_all_actions_are_pinned_to_full_commit_shas_and_jobs_have_timeouts():
     action_ref = re.compile(r"^\s*-?\s*uses:\s*[^@\s]+@([^\s#]+)", re.MULTILINE)
     for path in sorted((ROOT / ".github/workflows").glob("*.yml")):

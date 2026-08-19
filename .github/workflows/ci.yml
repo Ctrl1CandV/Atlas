@@ -30,6 +30,11 @@ jobs:
         run: uv sync --locked --all-groups
       - name: Install Web dependencies from lock
         run: npm --prefix web ci
+      - name: Test, lint, and build Web app once
+        run: |
+          npm --prefix web test
+          npm --prefix web run lint
+          npm --prefix web run build
       - name: Compile Python sources
         run: uv run python -m compileall -q atlas scripts
       - name: Run Python tests without real providers
@@ -38,11 +43,6 @@ jobs:
         run: uv run python scripts/release_workflow_gate.py
       - name: Run clean-init and MCP silence gate
         run: uv run python scripts/release_clean_init_gate.py
-      - name: Test, lint, and build Web app once
-        run: |
-          npm --prefix web test
-          npm --prefix web run lint
-          npm --prefix web run build
       - name: Scan release surfaces for secrets, private paths, and placeholders
         shell: pwsh
         run: |
@@ -111,6 +111,11 @@ jobs:
         run: uv sync --locked --all-groups
       - name: Install Web dependencies from lock
         run: npm --prefix web ci
+      - name: Test, lint, and build Web app once
+        run: |
+          npm --prefix web test
+          npm --prefix web run lint
+          npm --prefix web run build
       - name: Compile and test compatibility
         run: |
           uv run python -m compileall -q atlas scripts
@@ -119,8 +124,3 @@ jobs:
         run: |
           uv run python scripts/release_workflow_gate.py
           uv run python scripts/release_clean_init_gate.py
-      - name: Test, lint, and build Web app once
-        run: |
-          npm --prefix web test
-          npm --prefix web run lint
-          npm --prefix web run build
