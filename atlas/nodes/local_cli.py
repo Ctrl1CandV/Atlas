@@ -123,9 +123,12 @@ def _check_cli_contract(program: str, env: dict[str, str]) -> None:
     if proc.returncode != 0:
         raise ConfigError(f"agent CLI --help 失败(退出码 {proc.returncode})")
     help_text = proc.stdout or ""
+    # rf 原始字符串里必须用单反斜杠:[\\s] 是字面反斜杠,会把真实 --help
+    # 里"参数后跟空格"的排版误判成缺参。
     missing = [
         flag for flag in _REQUIRED_CLAUDE_FLAGS
-        if re.search(rf"(?<![\\w-]){re.escape(flag)}(?=[\\s,=<]|$)", help_text) is None
+        if re.search(rf"(?<![\w-]){re.escape(flag)}(?=[\s,=<]|$)", help_text)
+        is None
     ]
     if missing:
         raise ConfigError(
@@ -382,46 +385,54 @@ class LocalCliRunner:
         child_env = _base_child_env()
         child_env["ANTHROPIC_BASE_URL"] = provider.anthropic_base_url or ""
         child_env["ANTHROPIC_API_KEY"] = secret
+        # CLI 用户 settings(~/.claude/settings.json 的 env 块)优先于进程
+        # 环境变量,会把调用静默改道到用户个人网关与凭据;空配置目录强制
+        # CLI 只使用上面注入的端点与密钥(阶段 D 实测发现)。
+        config_dir = tempfile.mkdtemp(prefix="atlas-claude-config-")
+        child_env["CLAUDE_CONFIG_DIR"] = config_dir
         creationflags = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                          if os.name == "nt" else 0)
         start_new_session = os.name != "nt"
-        with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
-            try:
-                proc = subprocess.Popen(
-                    command, cwd=run_cwd, env=child_env, stdin=subprocess.PIPE,
-                    stdout=stdout_file, stderr=stderr_file, shell=False,
-                    creationflags=creationflags, start_new_session=start_new_session)
+        try:
+            with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
                 try:
-                    proc.communicate(input=Path(attachment).read_bytes(),
-                                     timeout=timeout_s)
-                except subprocess.TimeoutExpired as e:
-                    _terminate_process_tree(proc)
+                    proc = subprocess.Popen(
+                        command, cwd=run_cwd, env=child_env, stdin=subprocess.PIPE,
+                        stdout=stdout_file, stderr=stderr_file, shell=False,
+                        creationflags=creationflags, start_new_session=start_new_session)
+                    try:
+                        proc.communicate(input=Path(attachment).read_bytes(),
+                                         timeout=timeout_s)
+                    except subprocess.TimeoutExpired as e:
+                        _terminate_process_tree(proc)
+                        raise AgentCliError(
+                            f"节点 {node_id} 的 Claude CLI 超过 {timeout_s}s,进程树已终止") from e
+                except OSError as e:
+                    raise AgentCliError(f"无法启动 Claude CLI:{type(e).__name__}") from e
+                stdout_size = stdout_file.tell()
+                stderr_size = stderr_file.tell()
+                if stdout_size > _STDOUT_MAX_BYTES or stderr_size > _STDERR_MAX_BYTES:
                     raise AgentCliError(
-                        f"节点 {node_id} 的 Claude CLI 超过 {timeout_s}s,进程树已终止") from e
-            except OSError as e:
-                raise AgentCliError(f"无法启动 Claude CLI:{type(e).__name__}") from e
-            stdout_size = stdout_file.tell()
-            stderr_size = stderr_file.tell()
-            if stdout_size > _STDOUT_MAX_BYTES or stderr_size > _STDERR_MAX_BYTES:
+                        "Claude CLI 输出超过上限;拒绝静默截断"
+                        f"(stdout={stdout_size}, stderr={stderr_size})")
+                stdout_file.seek(0)
+                stderr_file.seek(0)
+                output = stdout_file.read()
+                error = stderr_file.read().decode("utf-8", errors="replace")
+            if proc.returncode != 0:
+                stdout_summary = output.decode("utf-8", errors="replace").strip()
+                stderr_summary = error.strip()
+                summary = " | ".join(part for part in (
+                    f"stdout:{stdout_summary}" if stdout_summary else "",
+                    f"stderr:{stderr_summary}" if stderr_summary else "",
+                ) if part)
+                summary = summary.replace(secret, "[REDACTED]")[:300]
                 raise AgentCliError(
-                    "Claude CLI 输出超过上限;拒绝静默截断"
-                    f"(stdout={stdout_size}, stderr={stderr_size})")
-            stdout_file.seek(0)
-            stderr_file.seek(0)
-            output = stdout_file.read()
-            error = stderr_file.read().decode("utf-8", errors="replace")
-        if proc.returncode != 0:
-            stdout_summary = output.decode("utf-8", errors="replace").strip()
-            stderr_summary = error.strip()
-            summary = " | ".join(part for part in (
-                f"stdout:{stdout_summary}" if stdout_summary else "",
-                f"stderr:{stderr_summary}" if stderr_summary else "",
-            ) if part)
-            summary = summary.replace(secret, "[REDACTED]")[:300]
-            raise AgentCliError(
-                f"Claude CLI 失败(退出码 {proc.returncode}):"
-                f"{summary or '(无 stdout/stderr)'}")
-        return _parse_result(output)
+                    f"Claude CLI 失败(退出码 {proc.returncode}):"
+                    f"{summary or '(无 stdout/stderr)'}")
+            return _parse_result(output)
+        finally:
+            shutil.rmtree(config_dir, ignore_errors=True)
 
 
 def prepare_local_cli_runner(*, agent_config_path: Path | None = None,

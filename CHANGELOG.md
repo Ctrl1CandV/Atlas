@@ -18,6 +18,11 @@ The tag and GitHub prerelease have not been created yet.
 - Opt-in production `research` and `coding_agent` execution through the Claude CLI when `config/agents.json` explicitly selects `runner: local_cli`; missing configuration remains fail-closed.
 - First-start configuration initialization and `atlas init`, terminal-run deletion, agent boundary visibility, and MCP harness setup documentation.
 
+### Fixed
+- Agent CLI preflight now accepts real `claude --help` output: the required-flag check previously used a double-escaped regex class that misread flags followed by spaces and descriptions as missing, rejecting every real Claude CLI before run creation.
+- Agent child processes now run Claude CLI with an isolated empty `CLAUDE_CONFIG_DIR`: user settings files (`~/.claude/settings.json` env block) take precedence over process environment and previously redirected agent calls to a personal gateway and credential, bypassing the selected provider. The temporary directory is removed after each call.
+- Shipped in-app guides no longer reference `docs/mcp.md` (not distributed with the repository); they point to the committed `.mcp.json` and the README harness section instead.
+
 ### Security
 - Web access remains loopback-only.
 - Active credentials, runtime configuration, and run evidence are excluded from source artifacts and scanned release surfaces.
