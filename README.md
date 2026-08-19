@@ -49,11 +49,13 @@ Agent execution remains disabled until `config/agents.json` explicitly contains 
 
 ```powershell
 uv run python -m atlas.web   # equivalent: uv run atlas-web
-# Manual MCP alternative from the Atlas source directory:
-uv run atlas-mcp
 ```
 
-MCP can instead be configured directly in your harness; see [`docs/mcp.md`](docs/mcp.md) for ZCode, Cursor, and Claude Code stdio examples. Open <http://127.0.0.1:8321>. Keep the service on loopback; this RC has no multi-user authentication or remote-deployment security model.
+Open <http://127.0.0.1:8321>. Keep the service on loopback; this RC has no multi-user authentication or remote-deployment security model.
+
+### MCP in your harness
+
+The repository ships [`.mcp.json`](.mcp.json). Open the cloned Atlas repository in Claude Code (or another harness that reads project-level MCP config) and the six Atlas MCP tools start automatically over stdio — no manual terminal required. The config runs `uv --directory . run atlas-mcp` from the repository root, so it works on any machine after `uv sync --locked --all-groups`.
 
 For each workflow: validate, dry-run, review model bindings/guards/cost, then explicitly request a real run. Validation and dry-run make no provider calls. Real runs may cost money. With `max_cost_usd`, unknown prices conservatively consume all remaining Atlas budget, but only locally verified prices can establish that the provider's actual charge stayed within the dollar cap. Human nodes pause for a decision in the local UI.
 
@@ -84,7 +86,7 @@ uv build --sdist
 
 Real-provider tests are opt-in, billable, and excluded by default. The manual CI workflow uses a protected environment, one narrowly selected discovery test, and a job timeout; it must use disposable test credentials.
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md), [`CHANGELOG.md`](CHANGELOG.md), and [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md).
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CHANGELOG.md`](CHANGELOG.md).
 
 ## License
 

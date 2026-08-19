@@ -49,11 +49,13 @@ Agent 执行默认关闭，直至 `config/agents.json` 显式包含 `"runner": "
 
 ```powershell
 uv run python -m atlas.web   # 等价：uv run atlas-web
-# 在 Atlas 源码目录手动启动 MCP 的备用方式：
-uv run atlas-mcp
 ```
 
-也可把 MCP 直接配置进 harness；ZCode、Cursor 与 Claude Code 的 stdio 示例见 [`docs/mcp.md`](docs/mcp.md)。打开 <http://127.0.0.1:8321>。服务必须留在回环地址；当前 RC 没有多用户认证或远程部署安全模型。
+打开 <http://127.0.0.1:8321>。服务必须留在回环地址；当前 RC 没有多用户认证或远程部署安全模型。
+
+### 在 harness 中使用 MCP
+
+仓库自带 [`.mcp.json`](.mcp.json)。用 Claude Code（或其他支持项目级 MCP 配置的 harness）打开克隆下来的 Atlas 仓库，六个 MCP 工具会通过 stdio 自动启动，无需手动开终端。配置执行的是 `uv --directory . run atlas-mcp`，以仓库根目录为工作目录，只要先完成 `uv sync --locked --all-groups` 即可在任何机器上使用。
 
 每个工作流都应先校验、再 dry-run，检查模型绑定、守卫和费用后，才明确请求真实运行。校验和 dry-run 不调用供应商；真实运行可能收费。已确认费率时美元帽按预估与实际费用结算；费率未知但设置了成本帽时，Atlas 会保守占满本次剩余预算以阻止后续复用，但无法证明供应商实际账单未超过该帽。`human` 节点在本机界面等待决定。
 
@@ -84,7 +86,7 @@ uv build --sdist
 
 真实供应商测试默认排除、可能收费且必须主动运行。手动 CI 使用受保护环境、单个受限 discovery 测试和作业超时，并且只能使用一次性测试凭据。
 
-贡献规则见 [`CONTRIBUTING.md`](CONTRIBUTING.md)，版本变化见 [`CHANGELOG.md`](CHANGELOG.md)，发布闸门见 [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md)。
+贡献规则见 [`CONTRIBUTING.md`](CONTRIBUTING.md)，版本变化见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## 许可证
 
