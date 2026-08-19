@@ -28,6 +28,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Sync locked Python dependencies
         run: uv sync --locked --all-groups
+      - name: Initialize missing runtime configuration
+        run: uv run atlas init
       - name: Install Web dependencies from lock
         run: npm --prefix web ci
       - name: Test, lint, and build Web app once
@@ -109,6 +111,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Sync clean checkout
         run: uv sync --locked --all-groups
+      - name: Initialize missing runtime configuration
+        run: uv run atlas init
       - name: Install Web dependencies from lock
         run: npm --prefix web ci
       - name: Test, lint, and build Web app once

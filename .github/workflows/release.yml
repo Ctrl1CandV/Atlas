@@ -50,6 +50,8 @@ jobs:
           if ($webVersion -ne $productVersion) { throw "Web version $webVersion, expected $productVersion" }
       - name: Sync locked dependencies
         run: uv sync --locked --all-groups
+      - name: Initialize missing runtime configuration
+        run: uv run atlas init
       - name: Install Web dependencies from lock
         run: npm --prefix web ci
       - name: Test, lint, and build Web app once

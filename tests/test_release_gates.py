@@ -168,7 +168,10 @@ def test_remote_jobs_build_web_before_python_tests():
     windows, ubuntu = ci.split("  ubuntu-compatibility-signal:", 1)
 
     for job in (windows, ubuntu, release):
-        assert job.index("npm --prefix web run build") < job.index("uv run pytest")
+        init = job.index("uv run atlas init")
+        build = job.index("npm --prefix web run build")
+        tests = job.index("uv run pytest")
+        assert init < build < tests
 
 
 def test_all_actions_are_pinned_to_full_commit_shas_and_jobs_have_timeouts():
