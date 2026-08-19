@@ -1,0 +1,75 @@
+name: Release assets
+
+# Minimal release-only pipeline: build the source distribution, generate the
+# SPDX SBOM and SHA256 manifest, attest build provenance, and publish the
+# GitHub release. Validation gates are not repeated here; they run locally on
+# the release tree (see RELEASE_CHECKLIST) and their scripts are not part of
+# the public repository.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-assets
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: "0.8.13"
+      - name: Sync locked dependencies
+        run: uv sync --locked --all-groups
+      - name: Build source distribution only
+        run: uv build --sdist
+      - name: Verify sdist version matches the release tag
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem dist -Filter *.tar.gz | Select-Object -First 1
+          if (-not $archive) { throw "No sdist produced" }
+          $expected = "0.1.0"
+          $archiveName = "atlas-$expected.tar.gz"
+          if ($archive.Name -ne $archiveName) {
+            throw "Expected $archiveName, found $($archive.Name)"
+          }
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/atlas-v0.1.0.spdx.json
+          upload-artifact: false
+      - name: Generate and verify SHA256 manifest
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem dist -File | Where-Object { $_.Name -ne 'SHA256SUMS' } | Sort-Object Name
+          if (-not $files) { throw "No release artifacts found" }
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          Set-Content -Path dist/SHA256SUMS -Value $lines -Encoding ascii
+          Get-Content dist/SHA256SUMS
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@96b4a1a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-path: dist/*
+      - name: Publish the v0.1.0 release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: v0.1.0
+          prerelease: false
+          generate_release_notes: true
+          files: dist/*
+          fail_on_unmatched_files: true
