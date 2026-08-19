@@ -17,8 +17,8 @@ import yaml
 # 封闭清单(红线 ①):加新类型要写 Python,不能在 YAML 里发明。
 # llm    :调模型供应商(带失败链与假成功检测)
 # human  :不调模型,暂停等人批准
-# research / coding_agent:仅可经受控 OS 沙箱执行；当前 RC 后端未部署时
-#         fail-closed，绝不回退到宿主 CLI。
+# research / coding_agent:仅可经显式启用的受控本机 runner 执行；未启用时
+#         fail-closed。该 runner 是同用户进程，不是 OS 沙箱。
 NODE_TYPES = frozenset({"llm", "human", "research", "coding_agent"})
 _AGENT_TYPES = frozenset({"research", "coding_agent"})
 
@@ -26,6 +26,12 @@ _NODE_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
 _MODEL_REF_RE = re.compile(r"^[A-Za-z0-9_-]+:[A-Za-z0-9_.\-]+$")
 DEFAULT_ROUTE_FIELD = "verdict"
 DEFAULT_MAX_ITERATIONS = 3
+
+# YAML 先于业务校验接触不可信输入；这些固定上限约束 compose 的最坏成本。
+_MAX_YAML_BYTES = 1 * 1024 * 1024
+_MAX_COMPOSE_NODES = 20_000
+_MAX_YAML_DEPTH = 64
+_MAX_COLLECTION_ITEMS = 5_000
 
 
 def spec_fingerprint(spec: "WorkflowSpec") -> str:
@@ -82,8 +88,312 @@ def spec_from_snapshot(data: dict, *, source: str = "snapshot") -> "WorkflowSpec
     return spec
 
 
+def format_spec_error(message: str, *, path: str | None = None,
+                      line: int | None = None,
+                      column: int | None = None) -> str:
+    """统一渲染规格错误；调用方仍可单独读取结构化字段。"""
+    details = []
+    if path is not None:
+        details.append(f"path {path}")
+    if line is not None:
+        details.append(f"line {line}")
+    if column is not None:
+        details.append(f"column {column}")
+    return f"{message} ({', '.join(details)})" if details else message
+
+
 class SpecError(Exception):
     """图定义不合法。零成本拒绝:发生在任何事件与任何模型调用之前。"""
+
+    def __init__(self, message: str, path: str | None = None,
+                 line: int | None = None, column: int | None = None):
+        super().__init__(message)
+        self.message = message
+        self.path = path
+        self.line = line
+        self.column = column
+
+    def __str__(self) -> str:
+        return format_spec_error(self.message, path=self.path, line=self.line,
+                                 column=self.column)
+
+
+@dataclass(frozen=True)
+class _SourceLocation:
+    line: int
+    column: int
+
+
+_SourcePath = tuple[str | int, ...]
+_SourceMarks = dict[_SourcePath, _SourceLocation]
+
+
+def _canonical_path(path: _SourcePath) -> str:
+    if not path:
+        return "$"
+    rendered = ""
+    for part in path:
+        if isinstance(part, int):
+            rendered += f"[{part}]"
+        elif re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", part):
+            rendered += ("." if rendered else "") + part
+        else:
+            rendered += f"[{json.dumps(part, ensure_ascii=False)}]"
+    return rendered
+
+
+class _RestrictedSafeLoader(yaml.SafeLoader):
+    """不支持 anchor/alias，并在 compose 时限制节点数、深度和集合规模。"""
+
+    def __init__(self, stream):
+        super().__init__(stream)
+        self._compose_nodes = 0
+        self._compose_depth = 0
+
+    def compose_node(self, parent, index):
+        if self.check_event(yaml.events.AliasEvent):
+            event = self.peek_event()
+            raise SpecError(
+                "YAML alias 不受支持",
+                line=event.start_mark.line + 1,
+                column=event.start_mark.column + 1,
+            )
+        event = self.peek_event()
+        if event.anchor is not None:
+            raise SpecError(
+                "YAML anchor 不受支持",
+                line=event.start_mark.line + 1,
+                column=event.start_mark.column + 1,
+            )
+        self._compose_nodes += 1
+        if self._compose_nodes > _MAX_COMPOSE_NODES:
+            raise SpecError(
+                f"YAML compose 节点数超过上限 {_MAX_COMPOSE_NODES}",
+                line=event.start_mark.line + 1,
+                column=event.start_mark.column + 1,
+            )
+        self._compose_depth += 1
+        if self._compose_depth > _MAX_YAML_DEPTH:
+            raise SpecError(
+                f"YAML 嵌套深度超过上限 {_MAX_YAML_DEPTH}",
+                line=event.start_mark.line + 1,
+                column=event.start_mark.column + 1,
+            )
+        try:
+            return super().compose_node(parent, index)
+        finally:
+            self._compose_depth -= 1
+
+    def compose_sequence_node(self, anchor):
+        node = super().compose_sequence_node(anchor)
+        if len(node.value) > _MAX_COLLECTION_ITEMS:
+            raise SpecError(
+                f"YAML 集合规模超过上限 {_MAX_COLLECTION_ITEMS}",
+                line=node.start_mark.line + 1,
+                column=node.start_mark.column + 1,
+            )
+        return node
+
+    def compose_mapping_node(self, anchor):
+        node = super().compose_mapping_node(anchor)
+        if len(node.value) > _MAX_COLLECTION_ITEMS:
+            raise SpecError(
+                f"YAML 集合规模超过上限 {_MAX_COLLECTION_ITEMS}",
+                line=node.start_mark.line + 1,
+                column=node.start_mark.column + 1,
+            )
+        return node
+
+
+def _collect_source_marks(node: yaml.Node,
+                          loader: _RestrictedSafeLoader) -> _SourceMarks:
+    """校验 compose 树并建立本次解析私有的规范路径→源码位置旁路表。"""
+    marks: _SourceMarks = {}
+    stack: list[tuple[yaml.Node, _SourcePath]] = [(node, ())]
+    while stack:
+        current, path = stack.pop()
+        marks.setdefault(path, _SourceLocation(current.start_mark.line + 1,
+                                               current.start_mark.column + 1))
+        if isinstance(current, yaml.MappingNode):
+            seen: dict[object, yaml.Node] = {}
+            children = []
+            for key_node, value_node in current.value:
+                if (isinstance(key_node, yaml.ScalarNode)
+                        and (key_node.tag == "tag:yaml.org,2002:merge"
+                             or key_node.value == "<<")):
+                    raise SpecError(
+                        "YAML merge key '<<' 不受支持",
+                        path=_canonical_path(path + ("<<",)),
+                        line=key_node.start_mark.line + 1,
+                        column=key_node.start_mark.column + 1,
+                    )
+                try:
+                    key = loader.construct_object(key_node, deep=True)
+                    hash(key)
+                except (TypeError, ValueError, yaml.YAMLError):
+                    raise SpecError(
+                        "YAML mapping 的键必须是可比较的标量",
+                        path=_canonical_path(path),
+                        line=key_node.start_mark.line + 1,
+                        column=key_node.start_mark.column + 1,
+                    ) from None
+                if key in seen:
+                    key_part = (str(key_node.value) if isinstance(key_node, yaml.ScalarNode)
+                                else "<non-scalar-key>")
+                    raise SpecError(
+                        f"YAML mapping 包含重复键 {key_part!r}",
+                        path=_canonical_path(path + (key_part,)),
+                        line=key_node.start_mark.line + 1,
+                        column=key_node.start_mark.column + 1,
+                    )
+                seen[key] = key_node
+                if isinstance(key_node, yaml.ScalarNode):
+                    child = path + (str(key_node.value),)
+                    marks[child] = _SourceLocation(key_node.start_mark.line + 1,
+                                                   key_node.start_mark.column + 1)
+                    children.append((value_node, child))
+            stack.extend(reversed(children))
+        elif isinstance(current, yaml.SequenceNode):
+            stack.extend((value_node, path + (index,))
+                         for index, value_node in reversed(list(enumerate(current.value))))
+    return marks
+
+
+def _load_yaml_with_marks(text: str) -> tuple[object, _SourceMarks]:
+    """受限 SafeLoader 生命周期内构造值与 parse-local mark 旁路表。"""
+    try:
+        encoded = text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise SpecError(
+            "YAML 输入包含无法编码为 UTF-8 的 Unicode 字符",
+            line=text.count("\n", 0, exc.start) + 1,
+            column=exc.start - text.rfind("\n", 0, exc.start),
+        ) from None
+    size = len(encoded)
+    if size > _MAX_YAML_BYTES:
+        raise SpecError(f"YAML 输入超过字节上限 {_MAX_YAML_BYTES}")
+    loader = _RestrictedSafeLoader(text)
+    try:
+        node = loader.get_single_node()
+        if node is None:
+            return None, {}
+        marks = _collect_source_marks(node, loader)
+        return loader.construct_document(node), marks
+    finally:
+        loader.dispose()
+
+
+_NESTED_FIELDS = {
+    "output_schema": frozenset({"required"}),
+    "requires": frozenset({"workdir", "human_approval"}),
+}
+
+
+def _field_error_path(error: SpecError, raw: object,
+                      allowed: frozenset[str], base: _SourcePath) -> _SourcePath:
+    """不改旧消息的前提下，把字段级解析错误归到最具体的 YAML 路径。"""
+    if not isinstance(raw, dict):
+        return base
+    if "未知字段" in error.message:
+        unknown = sorted((key for key in raw if isinstance(key, str)
+                          and key not in allowed))
+        if unknown:
+            return base + (unknown[0],)
+    for field_name in sorted(allowed, key=len, reverse=True):
+        if field_name not in error.message:
+            continue
+        path = base + (field_name,)
+        nested = raw.get(field_name)
+        nested_allowed = _NESTED_FIELDS.get(field_name)
+        if isinstance(nested, dict) and nested_allowed is not None:
+            if "未知字段" in error.message:
+                unknown = sorted(key for key in nested
+                                 if isinstance(key, str)
+                                 and key not in nested_allowed)
+                if unknown:
+                    return path + (unknown[0],)
+            for nested_name in sorted(nested_allowed, key=len, reverse=True):
+                if f"{field_name}.{nested_name}" in error.message:
+                    return path + (nested_name,)
+        return path
+    return base
+
+
+def _node_error_path(error: SpecError, raw: object,
+                     base: _SourcePath) -> _SourcePath:
+    """节点嵌套块的错误落到具体键，数组元素错误继续落到具体下标。"""
+    if isinstance(raw, dict) and "未知字段" in error.message:
+        unknown = sorted(key for key in raw
+                         if isinstance(key, str) and key not in _NODE_FIELDS)
+        if unknown:
+            return base + (unknown[0],)
+    if isinstance(raw, dict) and "output_schema" in error.message:
+        schema = raw.get("output_schema")
+        schema_path = base + ("output_schema",)
+        if not isinstance(schema, dict):
+            return schema_path
+        if "未知字段" in error.message:
+            unknown = sorted(key for key in schema
+                             if isinstance(key, str) and key != "required")
+            if unknown:
+                return schema_path + (unknown[0],)
+        if "required" in error.message:
+            required = schema.get("required")
+            required_path = schema_path + ("required",)
+            if isinstance(required, list):
+                for index, value in enumerate(required):
+                    if not isinstance(value, str) or not value:
+                        return required_path + (index,)
+            return required_path
+        return schema_path
+    return _field_error_path(error, raw, _NODE_FIELDS, base)
+
+
+def _meta_error_path(error: SpecError, raw: object) -> _SourcePath:
+    """meta.requires 的形状、未知字段和值错误均定位到最深叶路径。"""
+    base = ("meta",)
+    if isinstance(raw, dict) and "meta.requires" in error.message:
+        requires = raw.get("requires")
+        requires_path = base + ("requires",)
+        if not isinstance(requires, dict):
+            return requires_path
+        if "未知字段" in error.message:
+            unknown = sorted(key for key in requires if isinstance(key, str)
+                             and key not in {"workdir", "human_approval"})
+            if unknown:
+                return requires_path + (unknown[0],)
+        for field_name in ("human_approval", "workdir"):
+            if field_name in error.message:
+                return requires_path + (field_name,)
+        return requires_path
+    return _field_error_path(error, raw, _META_FIELDS, base)
+
+
+def _located_error(message: str, path: _SourcePath | None,
+                   marks: _SourceMarks | None = None, *,
+                   use_mark: bool = True,
+                   fallback_paths: tuple[_SourcePath, ...] = ()) -> SpecError:
+    location = None
+    if use_mark and marks is not None:
+        for candidate in ((path,) if path is not None else ()) + fallback_paths:
+            location = marks.get(candidate)
+            if location is not None:
+                break
+    return SpecError(
+        message,
+        path=_canonical_path(path) if path is not None else None,
+        line=location.line if location is not None else None,
+        column=location.column if location is not None else None,
+    )
+
+
+def _relocate_error(error: SpecError, path: _SourcePath | None,
+                    marks: _SourceMarks | None = None, *,
+                    fallback_paths: tuple[_SourcePath, ...] = ()) -> SpecError:
+    if error.path is not None or error.line is not None or error.column is not None:
+        return error
+    return _located_error(error.message, path, marks,
+                          fallback_paths=fallback_paths)
 
 
 @dataclass(frozen=True)
@@ -116,6 +426,8 @@ class Guards:
     def from_dict(cls, d: dict | None) -> "Guards":
         if d is None:
             return cls()
+        if not isinstance(d, dict):
+            raise SpecError("guards 必须是映射")
         unknown = set(d) - {"max_iterations", "max_cost_usd", "timeout_s"}
         if unknown:
             raise SpecError(f"guards 里有未知字段:{sorted(unknown)}。"
@@ -161,8 +473,8 @@ class NodeSpec:
     temperature: float | None = None            # llm
     seed: int | None = None                     # llm:各家是否尊重未验证,勿承诺可复现
     writable: bool = True                       # coding_agent:False=只读且不采集改动
-    allow_web: bool | None = None               # agent:research 默认开,coding 默认关
-    allowed_paths: list[str] = field(default_factory=list)  # agent:附加只读目录
+    allow_web: bool | None = None               # agent:默认关，必须在 YAML 显式开启
+    allowed_paths: list[str] = field(default_factory=list)  # 仅不可写 agent:附加目录
     timeout_s: float | None = None              # 全部:节点级覆盖 guards.timeout_s
     retry: int = 0                              # 全部:同模型传输失败重试(与失败链正交)
 
@@ -325,50 +637,95 @@ class WorkflowSpec:
 # ─────────────────────────── YAML 解析 ───────────────────────────
 
 
+_TOP_FIELDS = frozenset({"name", "description", "entry", "nodes", "edges",
+                         "guards", "meta"})
+_NODE_FIELDS = frozenset({
+    "id", "type", "model", "prompt", "consumes", "output_schema", "fallback",
+    "route_field", "workdir", "max_turns", "max_output_tokens", "thinking",
+    "temperature", "seed", "writable", "allow_web", "allowed_paths",
+    "timeout_s", "retry",
+})
+_EDGE_FIELDS = frozenset({"from", "to", "when"})
+_GUARD_FIELDS = frozenset({"max_iterations", "max_cost_usd", "timeout_s"})
+_META_FIELDS = frozenset({"title", "description", "kind", "category", "tags",
+                          "estimated_calls", "requires", "example_task"})
+
+
 def spec_from_yaml(text: str, *, source: str = "YAML") -> WorkflowSpec:
     """YAML 文本 → 校验过的 WorkflowSpec。任何问题抛 SpecError,零成本。"""
     try:
-        raw = yaml.safe_load(text)
+        raw, marks = _load_yaml_with_marks(text)
     except yaml.YAMLError as e:
-        raise SpecError(f"{source} 不是合法 YAML:{e}") from e
+        mark = getattr(e, "problem_mark", None)
+        message = getattr(e, "problem", None) or str(e)
+        raise SpecError(
+            f"{source} 不是合法 YAML:{message}",
+            line=mark.line + 1 if mark is not None else None,
+            column=mark.column + 1 if mark is not None else None,
+        ) from e
     if not isinstance(raw, dict):
-        raise SpecError(f"{source} 的顶层必须是映射(键:name/nodes/edges 等),"
-                        f"实际是 {type(raw).__name__}")
-    unknown_top = set(raw) - {"name", "description", "entry", "nodes", "edges",
-                              "guards", "meta"}
+        raise _located_error(
+            f"{source} 的顶层必须是映射(键:name/nodes/edges 等),"
+            f"实际是 {type(raw).__name__}", (), marks)
+    unknown_top = set(raw) - _TOP_FIELDS
     if unknown_top:
-        raise SpecError(f"{source} 顶层有未知字段:{sorted(unknown_top)}。"
-                        f"可用:name/description/entry/nodes/edges/guards/meta")
+        field = sorted(unknown_top)[0]
+        raise _located_error(
+            f"{source} 顶层有未知字段:{sorted(unknown_top)}。"
+            f"可用:name/description/entry/nodes/edges/guards/meta",
+            (field,), marks)
 
     name = raw.get("name")
     if not isinstance(name, str) or not name.strip():
-        raise SpecError(f"{source} 缺少非空的 name")
+        raise _located_error(f"{source} 缺少非空的 name", ("name",), marks,
+                             fallback_paths=((),))
 
     raw_nodes = raw.get("nodes")
     if not isinstance(raw_nodes, list) or not raw_nodes:
-        raise SpecError(f"{source} 的 nodes 必须是非空数组")
+        raise _located_error(f"{source} 的 nodes 必须是非空数组",
+                             ("nodes",), marks)
 
     nodes: list[NodeSpec] = []
     for i, rn in enumerate(raw_nodes):
-        nodes.append(_parse_node(rn, where=f"{source} nodes[{i}]"))
+        base = ("nodes", i)
+        try:
+            nodes.append(_parse_node(rn, where=f"{source} nodes[{i}]"))
+        except SpecError as e:
+            path = _node_error_path(e, rn, base)
+            raise _relocate_error(e, path, marks, fallback_paths=(base,)) from e
 
     raw_edges = raw.get("edges", [])
     if not isinstance(raw_edges, list):
-        raise SpecError(f"{source} 的 edges 必须是数组")
+        raise _located_error(f"{source} 的 edges 必须是数组",
+                             ("edges",), marks)
     edges: list[EdgeSpec] = []
     for i, re_ in enumerate(raw_edges):
-        edges.append(_parse_edge(re_, where=f"{source} edges[{i}]"))
+        base = ("edges", i)
+        try:
+            edges.append(_parse_edge(re_, where=f"{source} edges[{i}]"))
+        except SpecError as e:
+            path = _field_error_path(e, re_, _EDGE_FIELDS, base)
+            raise _relocate_error(e, path, marks, fallback_paths=(base,)) from e
 
     # entry 接受单值或列表(多入口并行,PLAN-v2 M4)
     raw_entry = raw.get("entry", "")
     if isinstance(raw_entry, list):
         if not raw_entry:
-            raise SpecError(f"{source}:entry 列表不能为空")
+            raise _located_error(f"{source}:entry 列表不能为空",
+                                 ("entry",), marks)
         entries = tuple(str(e) for e in raw_entry)
         entry = entries[0]
     else:
         entry = str(raw_entry or "")
         entries = ()
+
+    try:
+        guards = Guards.from_dict(raw.get("guards"))
+    except SpecError as e:
+        path = _field_error_path(e, raw.get("guards"), _GUARD_FIELDS,
+                                 ("guards",))
+        raise _relocate_error(e, path, marks,
+                              fallback_paths=(("guards",),)) from e
 
     spec = WorkflowSpec(
         name=name.strip(),
@@ -376,13 +733,17 @@ def spec_from_yaml(text: str, *, source: str = "YAML") -> WorkflowSpec:
         nodes=nodes,
         edges=edges,
         entry=entry,
-        guards=Guards.from_dict(raw.get("guards")),
+        guards=guards,
         entries=entries,
     )
-    resolved = validate_spec(spec, source=source)
+    resolved = validate_spec(spec, source=source, _marks=marks)
     # meta 在结构校验之后解析:requires 的一致性检查需要先有 spec
-    meta = _parse_meta(raw.get("meta"), where=f"{source}(工作流 {name.strip()})",
-                       spec=spec)
+    try:
+        meta = _parse_meta(raw.get("meta"), where=f"{source}(工作流 {name.strip()})",
+                           spec=spec)
+    except SpecError as e:
+        path = _meta_error_path(e, raw.get("meta"))
+        raise _relocate_error(e, path, marks, fallback_paths=(("meta",),)) from e
     spec = WorkflowSpec(
         name=spec.name, description=spec.description, nodes=spec.nodes,
         edges=spec.edges, entry=spec.entry, guards=spec.guards,
@@ -549,11 +910,16 @@ def _parse_node(rn, *, where: str) -> NodeSpec:
         allow_web = False   # 网络能力必须在 YAML 中显式开启
 
     allowed_paths = rn.get("allowed_paths", [])
-    if allowed_paths:
+    if "allowed_paths" in rn:
         _only(_AGENT_TYPES, "allowed_paths")
         if not isinstance(allowed_paths, list) or not all(
                 isinstance(pp, str) and pp for pp in allowed_paths):
             raise SpecError(f"{where}(节点 {nid})的 allowed_paths 必须是路径数组")
+        if ntype == "coding_agent" and writable and allowed_paths:
+            raise SpecError(
+                f"{where}(节点 {nid}):writable: true 与 allowed_paths 不能同时使用;"
+                "Claude CLI 的 --add-dir 不是只读边界。请设 writable: false，"
+                "或删除 allowed_paths")
         from pathlib import Path as _P2
         for pp in allowed_paths:
             if not _P2(pp).is_dir():
@@ -684,19 +1050,30 @@ def _parse_edge(re_, *, where: str) -> EdgeSpec:
 # ─────────────────────────── 结构校验 ───────────────────────────
 
 
-def validate_spec(spec: WorkflowSpec, *, source: str = "spec") -> str:
+def validate_spec(spec: WorkflowSpec, *, source: str = "spec",
+                  _marks: _SourceMarks | None = None) -> str:
     """全部零成本。编程构造的 spec 同样要过这里(execute_graph 会调)。
 
+    ``_marks`` 只由本模块的 YAML 入口传入，不存进 spec；编程构造和快照恢复
+    仍得到相同的 path/message，只是不带源码 line/column。
     返回解析后的入口节点 id(显式声明优先,否则从「唯一无入边节点」推断)。
     """
     ids = [n.id for n in spec.nodes]
     if len(ids) != len(set(ids)):
         dupes = sorted({i for i in ids if ids.count(i) > 1})
-        raise SpecError(f"{source}:节点 id 重复:{dupes}")
+        raise _located_error(f"{source}:节点 id 重复:{dupes}",
+                             ("nodes",), _marks, use_mark=False)
     by_id = {n.id: n for n in spec.nodes}
+    node_indexes = {n.id: i for i, n in enumerate(spec.nodes)}
 
-    for n in spec.nodes:
-        for c in n.consumes:
+    for node_index, n in enumerate(spec.nodes):
+        if n.type == "coding_agent" and n.writable and n.allowed_paths:
+            raise _located_error(
+                f"{source}:节点 {n.id} 的 writable: true 与 allowed_paths 不能同时使用;"
+                "Claude CLI 的 --add-dir 不是只读边界",
+                ("nodes", node_index, "allowed_paths"), _marks,
+                fallback_paths=(("nodes", node_index),))
+        for consume_index, c in enumerate(n.consumes):
             if c == "task":
                 continue
             # 精确匹配 <节点id>.output / <节点id>.diff(coding_agent 的第二产物):
@@ -711,75 +1088,109 @@ def validate_spec(spec: WorkflowSpec, *, source: str = "spec") -> str:
                         ok = True
                     break
             if not ok:
-                raise SpecError(
+                raise _located_error(
                     f"{source}:节点 {n.id} 消费 {c!r},但不存在能产出它的节点。"
                     f"consumes 只能引用 'task'、'<节点id>.output' 或 "
-                    f"coding_agent 节点的 '<节点id>.diff'(已知节点:{sorted(ids)})"
+                    f"coding_agent 节点的 '<节点id>.diff'(已知节点:{sorted(ids)})",
+                    ("nodes", node_index, "consumes", consume_index), _marks,
+                    fallback_paths=(("nodes", node_index, "consumes"),
+                                    ("nodes", node_index)),
                 )
 
-    for e in spec.edges:
+    for edge_index, e in enumerate(spec.edges):
         if e.source not in by_id:
-            raise SpecError(f"{source}:边 {e.source!r} → {e.target!r} 的 from 不是任何节点")
+            raise _located_error(
+                f"{source}:边 {e.source!r} → {e.target!r} 的 from 不是任何节点",
+                ("edges", edge_index, "from"), _marks,
+                fallback_paths=(("edges", edge_index),))
         if e.target != "END" and e.target not in by_id:
-            raise SpecError(f"{source}:边 {e.source!r} → {e.target!r} 的 to 不是任何节点也不是 END")
+            raise _located_error(
+                f"{source}:边 {e.source!r} → {e.target!r} 的 to 不是任何节点也不是 END",
+                ("edges", edge_index, "to"), _marks,
+                fallback_paths=(("edges", edge_index),))
 
-    _check_edge_groups(spec, source=source, by_id=by_id)
-    entry = _resolve_entry(spec, source=source, by_id=by_id)
-    _check_reachable(spec, entry, source=source)
-    _check_cycles(spec, source=source, by_id=by_id)
+    _check_edge_groups(spec, source=source, by_id=by_id,
+                       node_indexes=node_indexes, marks=_marks)
+    entry = _resolve_entry(spec, source=source, by_id=by_id, marks=_marks)
+    _check_reachable(spec, entry, source=source, marks=_marks)
+    _check_cycles(spec, source=source, by_id=by_id, marks=_marks)
     return entry
 
 
-def _check_edge_groups(spec, *, source, by_id) -> None:
+def _check_edge_groups(spec, *, source, by_id, node_indexes,
+                       marks: _SourceMarks | None = None) -> None:
     """同一来源的出边:无条件边(可多条=并行扇出)与条件边(全部带 when,值互不相同)
     不可混用——混用的话「这条边走不走」没有可判定的答案。"""
-    out: dict[str, list[EdgeSpec]] = {}
-    for e in spec.edges:
-        out.setdefault(e.source, []).append(e)
-    for src, edges in out.items():
-        conditional = [e for e in edges if e.when is not None]
-        unconditional = [e for e in edges if e.when is None]
+    out: dict[str, list[tuple[int, EdgeSpec]]] = {}
+    for edge_index, e in enumerate(spec.edges):
+        out.setdefault(e.source, []).append((edge_index, e))
+    for src, indexed_edges in out.items():
+        conditional = [(i, e) for i, e in indexed_edges if e.when is not None]
+        unconditional = [(i, e) for i, e in indexed_edges if e.when is None]
         if conditional and unconditional:
-            raise SpecError(
+            edge_index = conditional[0][0]
+            raise _located_error(
                 f"{source}:节点 {src} 的出边混用了条件与无条件边。"
-                f"要么只写无条件边(多条=并行扇出),要么全部带 when"
-            )
-        whens = [e.when for e in conditional]
-        if len(whens) != len(set(whens)):
-            raise SpecError(f"{source}:节点 {src} 的条件边 when 值重复:{sorted(whens)}")
+                f"要么只写无条件边(多条=并行扇出),要么全部带 when",
+                ("edges", edge_index, "when"), marks,
+                fallback_paths=(("edges", edge_index),))
+        seen_whens: set[str] = set()
+        duplicate_index = None
+        for edge_index, edge in conditional:
+            if edge.when in seen_whens:
+                duplicate_index = edge_index
+                break
+            seen_whens.add(edge.when)
+        if duplicate_index is not None:
+            whens = [e.when for _, e in conditional]
+            raise _located_error(
+                f"{source}:节点 {src} 的条件边 when 值重复:{sorted(whens)}",
+                ("edges", duplicate_index, "when"), marks,
+                fallback_paths=(("edges", duplicate_index),))
         node = by_id[src]
         if conditional:
+            node_index = node_indexes[src]
             if node.required_fields is None:
-                raise SpecError(
+                raise _located_error(
                     f"{source}:节点 {src} 有条件出边,必须声明 output_schema.required"
-                    f"(路由字段 {node.route_field!r} 要在里面)"
-                )
+                    f"(路由字段 {node.route_field!r} 要在里面)",
+                    ("nodes", node_index, "output_schema", "required"), marks,
+                    fallback_paths=(("nodes", node_index),))
             if node.route_field not in node.required_fields:
-                raise SpecError(
+                raise _located_error(
                     f"{source}:节点 {src} 的路由字段 {node.route_field!r} "
                     f"不在 output_schema.required {node.required_fields} 里。"
-                    f"路由按这个字段的值查表,缺了它就没法路由"
+                    f"路由按这个字段的值查表,缺了它就没法路由",
+                    ("nodes", node_index, "output_schema", "required"), marks,
+                    fallback_paths=(("nodes", node_index, "route_field"),
+                                    ("nodes", node_index)),
                 )
 
 
-def _resolve_entry(spec, *, source, by_id) -> str:
+def _resolve_entry(spec, *, source, by_id,
+                   marks: _SourceMarks | None = None) -> str:
     """显式 entries(多入口)逐个校验;单 entry 兼容旧格式;
     都没有时推断——唯一根=入口;多根=多入口并行(M4 起合法);无根=全环,拒绝。"""
     if spec.entries:
-        for e in spec.entries:
+        for index, e in enumerate(spec.entries):
             if e not in by_id:
-                raise SpecError(f"{source}:entry {e!r} 不在节点清单里")
+                raise _located_error(f"{source}:entry {e!r} 不在节点清单里",
+                                     ("entry", index), marks,
+                                     fallback_paths=(("entry",),))
         return spec.entries[0]
     if spec.entry:
         if spec.entry not in by_id:
-            raise SpecError(f"{source}:entry {spec.entry!r} 不在节点清单里")
+            raise _located_error(
+                f"{source}:entry {spec.entry!r} 不在节点清单里",
+                ("entry",), marks)
         return spec.entry
     incoming = {e.target for e in spec.edges if e.target != "END"}
     roots = [nid for nid in by_id if nid not in incoming]
     if not roots:
-        raise SpecError(
+        raise _located_error(
             f"{source}:推断不出入口(每个节点都有入边,图里只有环)。"
-            f"请显式写 entry: <节点id>"
+            f"请显式写 entry: <节点id>",
+            ("entry",), marks, use_mark=False,
         )
     return roots[0]   # 多根 = 多入口并行,合法;spec_from_yaml 会把全部根写进 entries
 
@@ -789,7 +1200,8 @@ def _infer_roots(spec, by_id) -> list[str]:
     return [nid for nid in by_id if nid not in incoming]
 
 
-def _check_reachable(spec, entry, *, source) -> None:
+def _check_reachable(spec, entry, *, source,
+                     marks: _SourceMarks | None = None) -> None:
     # 起点优先级与 all_entries() 的执行起点严格一致:
     # 显式 entries → 显式单值 entry → 推断根(多根=多入口)。
     # 显式 entry: left 的多根图里,right 从 left 不可达 → 拒收,
@@ -814,9 +1226,11 @@ def _check_reachable(spec, entry, *, source) -> None:
         stack.extend(adj.get(cur, []))
     unreachable = sorted(set(n.id for n in spec.nodes) - seen)
     if unreachable:
-        raise SpecError(
+        # 多个节点/边共同导致，不把任意一个源码位置冒充根因。
+        raise _located_error(
             f"{source}:存在从入口 {starts!r} 不可达的节点:{unreachable}。"
-            f"不可达节点永远不会执行"
+            f"不可达节点永远不会执行",
+            ("nodes",), marks, use_mark=False,
         )
 
 
@@ -868,7 +1282,8 @@ def _tarjan_sccs(nodes: list[str], adj: dict[str, list[str]]) -> list[list[str]]
     return sccs
 
 
-def _check_cycles(spec, *, source, by_id) -> None:
+def _check_cycles(spec, *, source, by_id,
+                  marks: _SourceMarks | None = None) -> None:
     """死环 = 强连通分量里没有任何条件出口。有环必须显式设 max_iterations。
 
     注意判据是 SCC 级别的「存在 when 边通向环外或 END」,不是「环上节点
@@ -887,9 +1302,10 @@ def _check_cycles(spec, *, source, by_id) -> None:
         return
     if spec.guards.max_iterations is None:
         on_cycle = sorted(n for comp in cyclic_comps for n in comp)
-        raise SpecError(
+        raise _located_error(
             f"{source}:图里有环(节点 {on_cycle}),但 guards.max_iterations "
-            f"没有显式设置。不设上限的循环会烧钱到天荒地老"
+            f"没有显式设置。不设上限的循环会烧钱到天荒地老",
+            ("guards", "max_iterations"), marks, use_mark=False,
         )
     for comp in cyclic_comps:
         comp_set = set(comp)
@@ -898,7 +1314,9 @@ def _check_cycles(spec, *, source, by_id) -> None:
             if e.when is not None and (e.target == "END" or e.target not in comp_set)
         ]
         if not exits:
-            raise SpecError(
+            # 整个 SCC 和多条边共同导致死环，只有相关路径，没有唯一源码位置。
+            raise _located_error(
                 f"{source}:环 {sorted(comp)} 没有条件出口——死环,永远退不出去。"
-                f"环上至少要有一个带 when 的出边通向环外或 END"
+                f"环上至少要有一个带 when 的出边通向环外或 END",
+                ("edges",), marks, use_mark=False,
             )

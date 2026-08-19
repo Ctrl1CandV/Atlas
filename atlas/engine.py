@@ -539,8 +539,11 @@ def _make_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
             consumed=[r.as_dict() for r in consumed],
         )
         # 投影不花钱；每一次真实 retry/fallback 都在 adapter 钩子中独立预留。
-        # node_started 只能在预算预留成功后记录，不能把被守卫拦截误报为已派发。
+        # node_started 只能在预算预留成功并持久化后记录，不能把被守卫拦截误报为已派发。
         started_emitted = False
+        attempt = 0
+        attempt_by_reservation: dict[str, int] = {}
+        warned_reservations: set[str] = set()
 
         def _project_candidate(cand: str) -> float | None:
             output_cap = (node.max_output_tokens
@@ -548,20 +551,37 @@ def _make_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
             return compute_cost_usd(cand, len(projection) // 3, output_cap)
 
         def _reserve(cand: str):
-            nonlocal started_emitted
+            nonlocal attempt, started_emitted
+            attempt += 1
             projected = _project_candidate(cand)
             try:
-                reservation = ctx.cost_ledger.reserve(
-                    projected,
-                    description=f"节点 {node.id} 候选 {cand} 派发前检查")
+                if projected is None and spec.guards.max_cost_usd is not None:
+                    reservation = ctx.cost_ledger.reserve_remaining(
+                        description=f"节点 {node.id} 候选 {cand} 派发前检查")
+                else:
+                    reservation = ctx.cost_ledger.reserve(
+                        projected,
+                        description=f"节点 {node.id} 候选 {cand} 派发前检查")
             except CostLimitError as e:
                 raise CostExceeded(str(e)) from e
-            if (spec.guards.max_cost_usd is not None and projected is None
-                    and not ctx.warned_cost_unknown()):
+            reservation_id = (reservation.reservation_id
+                              if reservation is not None else None)
+            if reservation is not None:
+                attempt_by_reservation[reservation.reservation_id] = attempt
+                ctx.log.emit(
+                    "cost_reserved", node=node.id, iteration=iteration,
+                    attempt=attempt, model=cand,
+                    reservation_id=reservation.reservation_id,
+                    reserved_usd=reservation.amount,
+                )
+            if (projected is None and reservation_id is not None
+                    and reservation_id not in warned_reservations):
+                warned_reservations.add(reservation_id)
                 ctx.log.emit(
                     "cost_unknown", run_id=ctx.run_dir.name, models=[cand],
-                    reason="该候选没有确认费率，成本记 null；max_cost_usd 守卫"
-                           "无法覆盖本次调用。请先补充 config/pricing.json。",
+                    attempt=attempt, reservation_id=reservation_id,
+                    reason="该候选没有确认费率；有成本帽时按本次预留全额"
+                           "占用预算，直到结算获得可信费用。",
                 )
             if not started_emitted:
                 ctx.log.emit("node_started", node=node.id, iteration=iteration,
@@ -570,20 +590,41 @@ def _make_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
             return reservation
 
         def _settle(reservation, cand: str, usage):
+            current_attempt = (attempt_by_reservation.get(reservation.reservation_id)
+                               if reservation is not None else attempt)
             actual = compute_cost_usd(
                 cand,
                 usage.input_tokens if usage else None,
                 usage.output_tokens if usage else None)
+            unknown = actual is None
             exceeded = None
             try:
-                ctx.cost_ledger.settle(
+                accounted = ctx.cost_ledger.settle(
                     reservation, actual,
-                    description=f"节点 {node.id} 候选 {cand} 结算")
+                    description=f"节点 {node.id} 候选 {cand} 结算",
+                    unknown_as_reserved=unknown)
             except CostLimitError as e:
+                accounted = actual
                 exceeded = e
+            reservation_id = (reservation.reservation_id
+                              if reservation is not None else None)
+            if (unknown and reservation_id is not None
+                    and reservation_id not in warned_reservations):
+                warned_reservations.add(reservation_id)
+                ctx.log.emit(
+                    "cost_unknown", run_id=ctx.run_dir.name, models=[cand],
+                    attempt=current_attempt, reservation_id=reservation_id,
+                    reason="模型调用已派发但未返回可信费用；有成本帽时按本次"
+                           "预留全额计入 guarded/accounted 成本，不再释放重用。",
+                )
             # 实际调用已经发生，即使结算后发现超支也必须先把真实成本写入账本。
             ctx.log.emit(
-                "cost_settled", node=node.id, iteration=iteration, model=cand,
+                "cost_settled", node=node.id, iteration=iteration,
+                attempt=current_attempt, model=cand,
+                reservation_id=reservation_id,
+                actual_cost_usd=actual,
+                accounted_cost_usd=accounted,
+                cost_unknown=unknown,
                 cost_usd=actual,
                 input_tokens=usage.input_tokens if usage else None,
                 output_tokens=usage.output_tokens if usage else None,
@@ -913,6 +954,183 @@ def execute_graph(
         release_run_lock(run_id, runs_root=runs_root)
 
 
+def _validate_resume_snapshot(run_id: str, run_dir: Path,
+                              prepared: PreparedExecution) -> None:
+    snapshot_path = run_dir / "spec.snapshot.json"
+    if not snapshot_path.exists():
+        raise RunNotFoundError(f"run {run_id!r} 缺少 spec.snapshot.json,无法恢复")
+    try:
+        snapshot_data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        snapshot_spec = spec_from_snapshot(
+            snapshot_data, source=f"run {run_id!r} spec snapshot")
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, SpecError) as exc:
+        raise IntegrityError(f"run {run_id!r} 的 spec snapshot 无效:{exc}") from exc
+    if spec_fingerprint(snapshot_spec) != prepared.spec_sha256:
+        raise SpecError(f"run {run_id!r} 的 spec snapshot 与请求规格不符,拒绝继续")
+
+
+def _transient_checkpoint_error(exc: sqlite3.Error) -> bool:
+    """Only retry lock races and Windows post-kill WAL handle teardown."""
+    code = getattr(exc, "sqlite_errorcode", None)
+    if not isinstance(code, int):
+        return False
+    base = code & 0xFF
+    if base in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+        return True
+    return os.name == "nt" and code == getattr(
+        sqlite3, "SQLITE_IOERR_TRUNCATE", -1)
+
+
+def _validate_resume_checkpoint(run_id: str, run_dir: Path) -> None:
+    checkpoint_path = run_dir / "checkpoint.sqlite"
+    if not checkpoint_path.exists():
+        raise RunNotFoundError(f"run {run_id!r} 没有 checkpoint.sqlite,无法恢复")
+
+    deadline = time.monotonic() + 2.0
+    delay = 0.005
+    while True:
+        conn = None
+        try:
+            # 必须普通读写打开，让 SQLite 自己从 WAL 做崩溃恢复；不能删除
+            # -wal/-shm，它们可能持有主文件尚未 checkpoint 的唯一已提交状态。
+            conn = sqlite3.connect(checkpoint_path, timeout=0.25)
+            quick_check = conn.execute("PRAGMA quick_check").fetchone()
+            if quick_check != ("ok",):
+                raise IntegrityError(
+                    f"run {run_id!r} 的 checkpoint.sqlite 完整性检查失败:"
+                    f"{quick_check!r}")
+            tables = {
+                row[0] for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            if "checkpoints" not in tables:
+                raise IntegrityError(
+                    f"run {run_id!r} 的 checkpoint.sqlite 缺少 checkpoints 表")
+            columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(checkpoints)")
+            }
+            if "thread_id" not in columns:
+                raise IntegrityError(
+                    f"run {run_id!r} 的 checkpoint.sqlite 缺少 thread_id")
+            checkpoint = conn.execute(
+                "SELECT 1 FROM checkpoints WHERE thread_id = ? LIMIT 1", (run_id,)
+            ).fetchone()
+            if checkpoint is None:
+                raise RunNotFoundError(
+                    f"run {run_id!r} 的 checkpoint.sqlite 没有可恢复状态")
+            return
+        except sqlite3.Error as exc:
+            if not _transient_checkpoint_error(exc) \
+                    or time.monotonic() >= deadline:
+                name = getattr(exc, "sqlite_errorname", None)
+                detail = f"{name}: {exc}" if name else str(exc)
+                raise IntegrityError(
+                    f"run {run_id!r} 的 checkpoint.sqlite 无效:{detail}") from exc
+        finally:
+            if conn is not None:
+                conn.close()
+        time.sleep(delay)
+        delay = min(delay * 2, 0.1)
+
+
+def _resume_graph_locked(
+    run_id: str,
+    *,
+    spec: WorkflowSpec,
+    runs_root: Path,
+    prepared: PreparedExecution,
+    checkpoint: bool,
+    interrupted_only: bool,
+) -> RunResult:
+    """调用方持有 run lock 时校验并重放 checkpoint。"""
+    run_dir = Path(runs_root) / run_id
+    if not (run_dir / "events.jsonl").exists():
+        raise RunNotFoundError(f"run {run_id!r} 不存在(没有 events.jsonl)")
+    reader = EventReader(run_dir / "events.jsonl")
+    events = reader.all()
+    persisted_status = fold_events(events)["status"]
+    if interrupted_only and persisted_status != "running":
+        raise RunConflictError(
+            f"run {run_id!r} 不是可恢复的 interrupted 运行"
+            f"(账本状态 {persisted_status!r})")
+
+    started = next((e for e in events if e.get("type") == "run_started"), None)
+    legacy = _check_persisted_execution_identity(run_id, started, prepared)
+    if interrupted_only:
+        if started is None or not started.get("spec_sha256") or legacy:
+            raise SpecError(f"run {run_id!r} 缺少完整执行身份,拒绝恢复")
+        _validate_resume_snapshot(run_id, run_dir, prepared)
+        _validate_resume_checkpoint(run_id, run_dir)
+    elif not (run_dir / "checkpoint.sqlite").exists():
+        raise RunNotFoundError(f"run {run_id!r} 没有 checkpoint.sqlite,无法恢复")
+
+    # 所有 admission 校验均在 EventLog 构造前完成；拒绝不会截尾或追加账本。
+    log = EventLog(run_dir, continue_seq=True)
+    ctx = _NodeCtx(run_dir=run_dir, log=log, registry=prepared.registry,
+                   reader=reader, agent_runner=prepared.agent_runner,
+                   source_baseline_tokens=MappingProxyType({
+                       token.node_id: token
+                       for token in prepared.source_baseline_tokens
+                   }),
+                   timeout_s=spec.guards.timeout_s,
+                   cost_ledger=CostLedger(spec.guards.max_cost_usd,
+                                          spent=_settled_spent_usd(events)))
+    if legacy:
+        log.emit("legacy_execution_identity", run_id=run_id,
+                 reason="旧运行缺少 execution_sha256，按 spec-only 兼容继续")
+    log.emit("run_resumed", run_id=run_id)
+    return _invoke(spec, ctx, run_id, entry=prepared.entry,
+                   checkpoint=checkpoint, task_input=None)
+
+
+def _assert_interrupted_locked(run_id: str, *, runs_root: Path) -> None:
+    run_dir = Path(runs_root) / run_id
+    events_path = run_dir / "events.jsonl"
+    if not events_path.exists():
+        raise RunNotFoundError(f"run {run_id!r} 不存在(没有 events.jsonl)")
+    persisted_status = fold_events(EventReader(events_path).all())["status"]
+    if persisted_status != "running":
+        raise RunConflictError(
+            f"run {run_id!r} 不是可恢复的 interrupted 运行"
+            f"(账本状态 {persisted_status!r})")
+
+
+def lock_interrupted_run(
+    run_id: str,
+    *,
+    runs_root: Path,
+    active_controller: bool = False,
+) -> None:
+    """先按持久状态原子预占 interrupted run；成功后由调用方移交或释放锁。"""
+    if active_controller:
+        raise RunConflictError(f"run {run_id!r} 仍有活跃本地控制器,拒绝恢复")
+    acquire_run_lock(run_id, runs_root=runs_root)
+    try:
+        _assert_interrupted_locked(run_id, runs_root=runs_root)
+    except Exception:
+        release_run_lock(run_id, runs_root=runs_root)
+        raise
+
+
+def validate_interrupted_run_locked(
+    run_id: str,
+    *,
+    runs_root: Path,
+    prepared: PreparedExecution,
+) -> None:
+    """调用方持有 run lock 时校验恢复身份、快照与 checkpoint。"""
+    run_dir = Path(runs_root) / run_id
+    events = EventReader(run_dir / "events.jsonl").all()
+    if fold_events(events)["status"] != "running":
+        raise RunConflictError(f"run {run_id!r} 在恢复校验期间状态已改变")
+    started = next((e for e in events if e.get("type") == "run_started"), None)
+    legacy = _check_persisted_execution_identity(run_id, started, prepared)
+    if started is None or not started.get("spec_sha256") or legacy:
+        raise SpecError(f"run {run_id!r} 缺少完整执行身份,拒绝恢复")
+    _validate_resume_snapshot(run_id, run_dir, prepared)
+    _validate_resume_checkpoint(run_id, run_dir)
+
+
 def resume_graph(
     run_id: str,
     *,
@@ -922,36 +1140,45 @@ def resume_graph(
     checkpoint: bool = True,
     agent_runner=None,
     prepared: PreparedExecution | None = None,
+    active_controller: bool = False,
+    _lock_held: bool = False,
 ) -> RunResult:
-    """崩溃后续跑；锁内校验完整执行身份后才写续跑事件。"""
+    """仅准入动态判定为 interrupted 的运行，并原子取得锁后恢复。"""
+    if active_controller:
+        if _lock_held:
+            release_run_lock(run_id, runs_root=runs_root)
+        raise RunConflictError(f"run {run_id!r} 仍有活跃本地控制器,拒绝恢复")
+    if not _lock_held:
+        acquire_run_lock(run_id, runs_root=runs_root)
+    try:
+        _assert_interrupted_locked(run_id, runs_root=runs_root)
+        prepared = _use_prepared(spec, registry, agent_runner, prepared)
+        # 成功取得权威锁，连同 running fold 构成 interrupted 判定；
+        # 锁持续持有到重放结束，避免双重准入。
+        return _resume_graph_locked(
+            run_id, spec=spec, runs_root=runs_root, prepared=prepared,
+            checkpoint=checkpoint, interrupted_only=True)
+    finally:
+        release_run_lock(run_id, runs_root=runs_root)
+
+
+def _resume_graph_replay(
+    run_id: str,
+    *,
+    spec: WorkflowSpec,
+    runs_root: Path,
+    registry: AdapterRegistry | None = None,
+    checkpoint: bool = True,
+    agent_runner=None,
+    prepared: PreparedExecution | None = None,
+) -> RunResult:
+    """私有低层 checkpoint 重放；保留旧测试所需的非产品恢复语义。"""
     prepared = _use_prepared(spec, registry, agent_runner, prepared)
-    run_dir = Path(runs_root) / run_id
     acquire_run_lock(run_id, runs_root=runs_root)
     try:
-        if not (run_dir / "events.jsonl").exists():
-            raise RunNotFoundError(f"run {run_id!r} 不存在(没有 events.jsonl)")
-        if not (run_dir / "checkpoint.sqlite").exists():
-            raise RunNotFoundError(f"run {run_id!r} 没有 checkpoint.sqlite,无法恢复")
-        reader = EventReader(run_dir / "events.jsonl")
-        events = reader.all()
-        started = next((e for e in events if e["type"] == "run_started"), None)
-        legacy = _check_persisted_execution_identity(run_id, started, prepared)
-        log = EventLog(run_dir, continue_seq=True)
-        ctx = _NodeCtx(run_dir=run_dir, log=log, registry=prepared.registry,
-                       reader=reader, agent_runner=prepared.agent_runner,
-                       source_baseline_tokens=MappingProxyType({
-                           token.node_id: token
-                           for token in prepared.source_baseline_tokens
-                       }),
-                       timeout_s=spec.guards.timeout_s,
-                       cost_ledger=CostLedger(spec.guards.max_cost_usd,
-                                              spent=_settled_spent_usd(events)))
-        if legacy:
-            log.emit("legacy_execution_identity", run_id=run_id,
-                     reason="旧运行缺少 execution_sha256，按 spec-only 兼容继续")
-        log.emit("run_resumed", run_id=run_id)
-        return _invoke(spec, ctx, run_id, entry=prepared.entry,
-                       checkpoint=checkpoint, task_input=None)
+        return _resume_graph_locked(
+            run_id, spec=spec, runs_root=runs_root, prepared=prepared,
+            checkpoint=checkpoint, interrupted_only=False)
     finally:
         release_run_lock(run_id, runs_root=runs_root)
 

@@ -29,10 +29,12 @@ from atlas.costs import fold_cost_accounting
 from atlas.effective import build_effective_spec, provider_ids_for_spec
 from atlas.engine import (RunConflictError, RunNotFoundError, acquire_run_lock,
                           approve_run, execute_graph, lock_approval_run,
-                          new_run_id, prepare_execution,
+                          lock_interrupted_run, new_run_id, prepare_execution,
                           prepare_production_agent_runner,
-                          release_approval_run_lock, release_run_lock)
+                          release_approval_run_lock, release_run_lock,
+                          resume_graph, validate_interrupted_run_locked)
 from atlas.events import EventReader, fold_events
+from atlas.runs import derive_run_status
 from atlas.integrity import TASK_MAX_BYTES
 from atlas.spec import SpecError, spec_from_snapshot, spec_from_yaml_file
 from atlas.thinking import load_capabilities, model_capability
@@ -409,10 +411,13 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
             if not events:
                 continue
             folded = fold_events(events)
+            status = derive_run_status(
+                events, run_id=d.name, runs_root=runs_dir,
+                active_controller=d.name in _run_threads)
             items.append({
                 "run_id": d.name,
                 "graph": folded["graph"],
-                "status": folded["status"],
+                "status": status,
                 "nodes_done": len(folded["nodes_done"]),
                 "started": next((e["ts"] for e in events
                                  if e["type"] == "run_started"), None),
@@ -524,6 +529,9 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                                "cost_usd": None},
                     "failed_error": None}
         folded = fold_events(events)
+        dynamic_status = derive_run_status(
+            events, run_id=rid, runs_root=runs_dir,
+            active_controller=rid in _run_threads)
         # 每个节点的最新状态(循环的节点保留最后一次,attempts 全留)
         nodes: dict[str, dict] = {}
         run_failed = folded["status"] == "failed"
@@ -599,7 +607,7 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
         except HTTPException:
             # 历史旧 run 可能没有快照且对应 YAML 已删除；运行账本仍应可看。
             pass
-        return {"run_id": rid, **folded,
+        return {"run_id": rid, **folded, "status": dynamic_status,
                 "nodes": sorted(nodes.values(), key=lambda n: n["id"]),
                 "totals": totals,
                 "cost_warnings": cost_warnings,
@@ -642,9 +650,18 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                     # 防止中间层把空闲连接掐掉
                     if idle_rounds % 30 == 0:
                         yield ": keepalive\n\n"
-                    # 运行早已终止但账本里没有终态事件(进程被 kill):别无限挂
+                    # interrupted 是事件+实时锁派生视图，不写伪造账本事件，
+                    # 也不用持久事件的 seq 命名空间推进客户端游标。
+                    current = reader.all()
+                    if derive_run_status(
+                            current, run_id=rid, runs_root=runs_dir,
+                            active_controller=rid in _run_threads) == "interrupted":
+                        yield ('event: run_interrupted\n'
+                               'data: {"type": "run_interrupted"}\n\n')
+                        break
+                    # 无法确认状态时 fail-closed，但连接也不能无限占用。
                     if idle_rounds > 200:   # ~60s 无新事件
-                        yield 'data: {"type": "stream_closed"}\n\n'
+                        yield 'data: {"seq": -1, "ts": "", "type": "stream_closed"}\n\n'
                         break
                     time.sleep(0.3)
 
@@ -696,6 +713,56 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
             except SpecError:
                 continue
         raise HTTPException(404, f"workflows/ 里找不到名为 {graph!r} 的图")
+
+    @app.post("/api/runs/{rid}/resume", status_code=202)
+    def resume(rid: str):
+        """仅恢复动态判定为 interrupted 的运行；paused 仍只能审批。"""
+        _check_id(rid, "运行")
+        try:
+            lock_interrupted_run(
+                rid, runs_root=runs_dir,
+                active_controller=rid in _run_threads)
+        except RunConflictError as e:
+            raise HTTPException(409, str(e)) from e
+        except RunNotFoundError as e:
+            raise HTTPException(404, str(e)) from e
+
+        try:
+            spec = _spec_for_run(rid)
+            registry = _registry_factory(provider_ids_for_spec(spec))
+            agent_runner = _agent_runner_factory(spec)
+            prepared = prepare_execution(spec, registry, agent_runner=agent_runner)
+            validate_interrupted_run_locked(
+                rid, runs_root=runs_dir, prepared=prepared)
+        except SpecError as e:
+            release_run_lock(rid, runs_root=runs_dir)
+            raise HTTPException(409, str(e)) from e
+        except HTTPException:
+            release_run_lock(rid, runs_root=runs_dir)
+            raise
+        except Exception as e:
+            release_run_lock(rid, runs_root=runs_dir)
+            raise HTTPException(400, f"运行后端配置不通过:{e}") from e
+
+        def _execute_resume():
+            try:
+                resume_graph(
+                    rid, spec=spec, runs_root=runs_dir, prepared=prepared,
+                    _lock_held=True)
+            except Exception:
+                log.exception("run %s 后台恢复异常", rid)
+            finally:
+                _run_threads.pop(rid, None)
+
+        try:
+            thread = threading.Thread(target=_execute_resume, daemon=True)
+            _run_threads[rid] = thread
+            thread.start()
+        except Exception:
+            _run_threads.pop(rid, None)
+            release_run_lock(rid, runs_root=runs_dir)
+            raise
+        return {"run_id": rid, "status": "running"}
 
     @app.post("/api/runs/{rid}/approve")
     def approve(rid: str, body: dict):

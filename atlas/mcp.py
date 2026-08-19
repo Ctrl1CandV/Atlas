@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Atlas MCP 服务:5 个工具,刻意保持很小(架构第 7.1 节)。
+"""Atlas MCP 服务:6 个工具,刻意保持很小(架构第 7.1 节)。
 
 harness 里的 agent 是这套工具的用户:写 YAML → validate(零成本)→
 dry_run(零成本)→ run(真实调用才花钱)→ get_run 查账。
@@ -18,9 +18,12 @@ from atlas.adapters import build_real_registry
 from atlas.config import PROJECT_ROOT
 from atlas.costs import fold_cost_accounting
 from atlas.effective import build_effective_spec, provider_ids_for_spec
-from atlas.engine import (execute_graph, prepare_execution,
-                          prepare_production_agent_runner)
+from atlas.engine import (RunConflictError, RunNotFoundError, execute_graph,
+                          lock_interrupted_run, prepare_execution,
+                          prepare_production_agent_runner, release_run_lock,
+                          resume_graph, validate_interrupted_run_locked)
 from atlas.events import EventReader, fold_events
+from atlas.runs import derive_run_status
 from atlas.spec import (SpecError, spec_from_snapshot, spec_from_yaml,
                         spec_from_yaml_file, spec_to_snapshot)
 
@@ -404,6 +407,69 @@ def run_workflow_impl(workflow_id: str, task: str, dry_run: bool = False,
     return summary
 
 
+def resume_run_impl(run_id: str, registry_factory=None, *,
+                    providers_path: Path | None = None, env_store=None,
+                    agent_runner_factory=None) -> dict:
+    """同步恢复一个动态判定为 interrupted 的运行。"""
+    _check_id(run_id, "运行")
+    try:
+        lock_interrupted_run(run_id, runs_root=RUNS_DIR)
+    except RunConflictError as e:
+        return {"error": str(e),
+                "next": "只有 interrupted 可恢复;paused 请在 Web 审批,终态不能恢复"}
+    except RunNotFoundError as e:
+        return {"error": str(e), "next": "检查运行目录和 events.jsonl"}
+
+    run_dir = RUNS_DIR / run_id
+    snapshot = run_dir / "spec.snapshot.json"
+    lock_transferred = False
+    try:
+        if not snapshot.is_file():
+            return {"error": f"run {run_id!r} 缺少 spec.snapshot.json,无法恢复",
+                    "next": "只能恢复带完整规格快照和执行身份的新运行"}
+        try:
+            spec = spec_from_snapshot(
+                json.loads(snapshot.read_text(encoding="utf-8")), source=str(snapshot))
+        except Exception as e:
+            return {"error": f"有效规格快照损坏:{e}",
+                    "next": "保留运行目录并检查 spec.snapshot.json 完整性"}
+
+        factory = registry_factory or _registry_factory_default
+        try:
+            registry = factory(provider_ids_for_spec(spec))
+            prepare = agent_runner_factory or (
+                lambda workflow: prepare_production_agent_runner(
+                    workflow, providers_path=providers_path, env_store=env_store))
+            agent_runner = prepare(spec)
+            prepared = prepare_execution(spec, registry, agent_runner=agent_runner)
+            validate_interrupted_run_locked(
+                run_id, runs_root=RUNS_DIR, prepared=prepared)
+        except (RunConflictError, RunNotFoundError, SpecError) as e:
+            return {"error": str(e),
+                    "next": "当前执行配置、规格身份或 checkpoint 不允许恢复"}
+        except Exception as e:
+            return {"error": f"供应商或运行后端配置不通过,恢复未开始:{e}",
+                    "next": "恢复必须使用与原运行一致的供应商、凭据版本和 agent 后端"}
+
+        lock_transferred = True
+        try:
+            result = resume_graph(
+                run_id, spec=spec, runs_root=RUNS_DIR, prepared=prepared,
+                _lock_held=True)
+        except Exception as e:
+            return {"status": "failed", "error": f"{type(e).__name__}: {e}",
+                    "next": "查看 events.jsonl 中 run_resumed 之后的失败事件"}
+    finally:
+        if not lock_transferred:
+            release_run_lock(run_id, runs_root=RUNS_DIR)
+
+    summary = summarize_run(result.run_id)
+    if result.status == "paused":
+        summary["next"] = ("恢复后暂停在 human 节点:去 Web 界面批准或驳回,"
+                           "不能再次调用 atlas_resume_run 绕过审批")
+    return summary
+
+
 def summarize_run(run_id: str) -> dict:
     _check_id(run_id, "运行")
     path = RUNS_DIR / run_id / "events.jsonl"
@@ -411,6 +477,8 @@ def summarize_run(run_id: str) -> dict:
         return {"error": f"没有这个运行:{run_id}", "next": "用 atlas_list_workflows 查"}
     events = EventReader(path).all()
     folded = fold_events(events)
+    dynamic_status = derive_run_status(
+        events, run_id=run_id, runs_root=RUNS_DIR)
     nodes = {}
     for e in events:
         if e["type"] == "node_done":
@@ -438,7 +506,7 @@ def summarize_run(run_id: str) -> dict:
     accounting = fold_cost_accounting(events)
     return {
         "run_id": run_id,
-        "status": folded["status"],
+        "status": dynamic_status,
         "graph": folded["graph"],
         "nodes_done": folded["nodes_done"],
         "node_details": nodes,
@@ -477,7 +545,8 @@ def atlas_validate_workflow(yaml: str = "", workflow_id: str = "") -> str:
 
     检查:YAML 语法、节点类型封闭清单、边引用、条件边与路由字段、入口、
     可达性、死环、有环必须设 max_iterations、consumes 引用、异质性提示。
-    返回 JSON,校验不过时 error 里有具体哪一行哪个字段。
+    返回 JSON；校验不过时 error 会指出具体字段或图结构问题，并统一附带 YAML
+    path、line、column（整图聚合错误没有唯一坐标时只返回 path）。
     两个参数都传时以 yaml 全文为准。
     """
     try:
@@ -542,9 +611,18 @@ def atlas_list_workflows() -> str:
 
 @server.tool()
 def atlas_get_run(run_id: str) -> str:
-    """查某次运行的状态、每节点模型与 token、账本路径(零成本)。"""
+    """查某次运行的动态状态、每节点模型与 token、账本路径(零成本)。"""
     try:
         return _render(summarize_run(run_id))
+    except ValueError as e:
+        return _render({"error": str(e), "next": "id 不合法"})
+
+
+@server.tool()
+def atlas_resume_run(run_id: str) -> str:
+    """仅恢复动态判定为 interrupted 的运行；paused 必须在 Web 审批。"""
+    try:
+        return _render(resume_run_impl(run_id))
     except ValueError as e:
         return _render({"error": str(e), "next": "id 不合法"})
 

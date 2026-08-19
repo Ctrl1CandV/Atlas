@@ -14,7 +14,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from atlas.adapters import AllCandidatesFailed, FakeProvider
-from atlas.engine import execute_graph, resume_graph
+from atlas.engine import (_resume_graph_replay, execute_graph,
+                          resume_graph)
 from atlas.events import EventLog, EventReader
 from atlas.integrity import sha256_bytes
 from atlas.spec import SpecError, spec_from_yaml
@@ -46,7 +47,7 @@ def test_torn_tail_line_does_not_reset_seq(tmp_path):
     last_seq = before[-1]["seq"]
 
     fake.configure("other", text="第二稿(修复后)")
-    resumed = resume_graph(run_dir.name, spec=load_graph("three_node"),
+    resumed = _resume_graph_replay(run_dir.name, spec=load_graph("three_node"),
                            runs_root=tmp_path, registry=make_registry(fake))
 
     events = resumed.events.all()
@@ -84,7 +85,7 @@ def test_parallel_sibling_failure_resume_keeps_completed_sibling(tmp_path):
     first_bytes = open(first_path, "rb").read()
 
     fake.configure("right", text="右方向结论(修复后)")
-    resumed = resume_graph(run_dir.name, spec=load_graph("parallel"),
+    resumed = _resume_graph_replay(run_dir.name, spec=load_graph("parallel"),
                            runs_root=tmp_path, registry=make_registry(fake))
     assert resumed.folded()["status"] == "done"
 
@@ -189,7 +190,7 @@ def test_resume_rejects_modified_spec(tmp_path):
         nodes=[replace(n, prompt=n.prompt + " (改过)") if n.id == "node_c" else n
                for n in spec.nodes])
     with pytest.raises(SpecError, match="spec_sha256"):
-        resume_graph(run_dir.name, spec=modified,
+        _resume_graph_replay(run_dir.name, spec=modified,
                      runs_root=tmp_path, registry=make_registry(fake))
 
 
@@ -207,7 +208,7 @@ def test_resume_lock_prevents_concurrent_writers(tmp_path):
     try:
         fake.configure("third", text="ok")
         with pytest.raises(RunConflictError, match="运行锁"):
-            resume_graph(run_dir.name, spec=load_graph("three_node"),
+            _resume_graph_replay(run_dir.name, spec=load_graph("three_node"),
                          runs_root=tmp_path, registry=make_registry(fake))
     finally:
         release_run_lock(run_dir.name, runs_root=tmp_path)
@@ -228,7 +229,7 @@ def test_old_lock_mtime_neither_blocks_nor_grants_ownership(tmp_path):
     os.utime(lock, (old, old))
 
     fake.configure("third", text="ok")
-    resumed = resume_graph(run_dir.name, spec=load_graph("three_node"),
+    resumed = _resume_graph_replay(run_dir.name, spec=load_graph("three_node"),
                            runs_root=tmp_path, registry=make_registry(fake))
     assert resumed.folded()["status"] == "done"
     assert lock.is_file()

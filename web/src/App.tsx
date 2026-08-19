@@ -10,6 +10,7 @@ import {
   listRuns,
   listWorkflows,
   previewWorkflow,
+  resumeRun,
   startRun,
   subscribeRun,
 } from './api';
@@ -21,6 +22,7 @@ import { NodeDetail } from './NodeDetail';
 import { deriveModelOptions } from './modelOptions';
 import { SettingsPage } from './SettingsPage';
 import { hrefFor, useRoute } from './router';
+import { applyDeletedRuns } from './runCleanup';
 import type {
   AtlasEvent,
   NodeOverride,
@@ -79,6 +81,7 @@ const STATUS_LABEL: Record<string, string> = {
   paused: '等待批准',
   starting: '启动中',
   running: '运行中',
+  interrupted: '已中断',
   done: '已完成',
   failed: '失败',
 };
@@ -135,6 +138,7 @@ export default function App() {
   const [spec, setSpec] = useState<WorkflowSpec | null>(null);
   const [runs, setRuns] = useState<RunListItem[]>([]);
   const [runId, setRunId] = useState<string | null>(null);
+  const [runSubscriptionGeneration, setRunSubscriptionGeneration] = useState(0);
   const [summary, setSummary] = useState<RunSummary | null>(null);
   const [events, setEvents] = useState<AtlasEvent[]>([]);
   const [task, setTask] = useState('');
@@ -174,10 +178,10 @@ export default function App() {
   const [route, navigateHash] = useRoute();
   const view = route.view;
   const eventsRef = useRef<HTMLDivElement>(null);
+  const runSubscriptionRef = useRef<(() => void) | null>(null);
 
-  const refreshRuns = useCallback(() => {
-    listRuns().then(setRuns).catch((e: Error) => setError(e.message));
-  }, []);
+  const refreshRuns = useCallback(() =>
+    listRuns().then(setRuns).catch((e: Error) => setError(e.message)), []);
 
   const refreshModelOptions = useCallback(() => {
     return listProviders()
@@ -311,6 +315,12 @@ export default function App() {
       (e) => {
         if (!alive) return;
         setEvents((prev) => [...prev.slice(-199), e]);   // 状态截断,有环长跑不无限涨
+        if (e.type === 'run_interrupted') {
+          // 控制通知不会进入账本；立即刷新派生状态，当前订阅已由 subscribeRun 停止。
+          pull();
+          void refreshRuns();
+          return;
+        }
         if (['node_started', 'node_done', 'model_failed', 'output_truncated',
           'run_done', 'run_failed', 'run_resumed'].includes(e.type)) {
           if (timer) clearTimeout(timer);   // 150ms 合并:历史重放不打接口风暴
@@ -319,12 +329,18 @@ export default function App() {
       },
       () => refreshRuns(),
     );
-    return () => {
+    const stop = () => {
+      if (!alive) return;
       alive = false;
       if (timer) clearTimeout(timer);
       cancel();
     };
-  }, [runId, refreshRuns]);
+    runSubscriptionRef.current = stop;
+    return () => {
+      stop();
+      if (runSubscriptionRef.current === stop) runSubscriptionRef.current = null;
+    };
+  }, [runId, runSubscriptionGeneration, refreshRuns]);
 
   useEffect(() => {
     const el = eventsRef.current;
@@ -405,20 +421,31 @@ export default function App() {
     });
   }, [workflows, wfSearch, wfCategory]);
 
-  const clearDeletedSelection = useCallback((deletedIds: string[]) => {
-    if (!runId || !deletedIds.includes(runId)) return;
-    // runId 置空会触发订阅 effect cleanup，立即关闭当前 EventSource。
-    setRunId(null);
-    setSummary(null);
-    setEvents([]);
-    setSpec(null);
-    setInheritedSpec(null);
-    setSelectedNode(null);
-    setWorkspaceTarget(null);
-    setUnconfiguredNodes(null);
-    setParamDefaults(null);
-    navigateHash('#/observe');
-  }, [runId, navigateHash]);
+  const clearDeletedSelection = useCallback((deletedIds: string[]) => applyDeletedRuns(
+    runId,
+    deletedIds,
+    {
+      cancelSubscription: () => {
+        runSubscriptionRef.current?.();
+        runSubscriptionRef.current = null;
+      },
+      clearRunId: () => setRunId(null),
+      clearSummary: () => setSummary(null),
+      clearEvents: () => setEvents([]),
+      clearDetail: () => {
+        setSpec(null);
+        setInheritedSpec(null);
+      },
+      clearSelectedNode: () => setSelectedNode(null),
+      clearWorkspace: () => setWorkspaceTarget(null),
+      clearRunParameters: () => {
+        setUnconfiguredNodes(null);
+        setParamDefaults(null);
+      },
+      navigateToRuns: () => navigateHash('#/observe'),
+      refreshRuns,
+    },
+  ), [runId, navigateHash, refreshRuns]);
 
   const handleDeleteRun = async (run: RunListItem) => {
     if (!window.confirm(`删除运行 ${run.run_id}? 其产物、检查点和工作区副本都会永久删除。`)) {
@@ -429,7 +456,7 @@ export default function App() {
     try {
       await deleteRun(run.run_id);
       setRuns((current) => current.filter((item) => item.run_id !== run.run_id));
-      clearDeletedSelection([run.run_id]);
+      await clearDeletedSelection([run.run_id]);
     } catch (e) {
       setError((e as Error).message);
       refreshRuns();
@@ -445,6 +472,24 @@ export default function App() {
       setApprovalComment('');
     } catch (e) {
       setError((e as Error).message);
+    }
+  };
+
+  const handleResume = async () => {
+    if (!runId || summary?.status !== 'interrupted') return;
+    setBusy(true);
+    setError(null);
+    try {
+      await resumeRun(runId);
+      // interrupted 控制通知已明确结束旧订阅；恢复请求成功即为同一 runId 显式新建。
+      setRunSubscriptionGeneration((generation) => generation + 1);
+      const next = await getRun(runId);
+      setSummary(next);
+      await refreshRuns();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -513,10 +558,7 @@ export default function App() {
         <motion.div className="settings-wrap" {...enter(0.06)}>
           <SettingsPage
             onProvidersChanged={refreshModelOptions}
-            onRunsDeleted={(ids) => {
-              clearDeletedSelection(ids);
-              refreshRuns();
-            }}
+            onRunsDeleted={(ids) => { void clearDeletedSelection(ids); }}
           />
         </motion.div>
       ) : view === 'guide' ? (
@@ -607,6 +649,7 @@ export default function App() {
                 nodes={spec.nodes}
                 edges={spec.edges}
                 runNodes={runNodes}
+                runStatus={summary?.status}
                 selected={selectedNode}
                 onSelect={selectNode}
                 maxIterations={spec.guards.max_iterations}
@@ -619,6 +662,14 @@ export default function App() {
           {summary?.failed_error && (
             <div className="run-error" title={summary.failed_error}>
               失败:{summary.failed_error.slice(0, 200)}
+            </div>
+          )}
+          {summary?.status === 'interrupted' && (
+            <div className="approval-bar interrupted-bar">
+              <span>控制器已退出，运行停在最近一次持久化的节点边界。</span>
+              <button className="approve" disabled={busy} onClick={() => void handleResume()}>
+                {busy ? '恢复中…' : '恢复运行'}
+              </button>
             </div>
           )}
           {summary?.status === 'paused' && (

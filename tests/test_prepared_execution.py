@@ -10,8 +10,8 @@ from fastapi.testclient import TestClient
 from atlas import mcp as mcp_module
 from atlas.adapters import (AdapterRegistry, ConfigError, FakeProvider,
                             OpenAICompatAdapter)
-from atlas.engine import (approve_run, execute_graph, prepare_execution,
-                          resume_graph)
+from atlas.engine import (_resume_graph_replay, approve_run, execute_graph,
+                          prepare_execution, resume_graph)
 from atlas.events import EventReader
 from atlas.spec import SpecError, spec_from_yaml
 from atlas.web import create_app
@@ -119,7 +119,7 @@ def test_prepared_rejects_mutated_backend_and_partial_modern_identity(tmp_path):
     rows[0] = json.dumps(started, ensure_ascii=False)
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
     with pytest.raises(SpecError, match="身份字段不完整"):
-        resume_graph(run.run_id, spec=spec, runs_root=tmp_path / "partial",
+        _resume_graph_replay(run.run_id, spec=spec, runs_root=tmp_path / "partial",
                      prepared=stable)
 
 
@@ -230,6 +230,25 @@ def test_prepared_execution_skips_duplicate_preflight_and_rejects_spec_before_di
     assert not untouched.exists()
 
 
+def test_invalid_writable_allowed_paths_rejected_before_run_artifacts(tmp_path):
+    base = spec_from_yaml(SIMPLE_YAML)
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    invalid = replace(base, nodes=[replace(
+        base.nodes[0], type="coding_agent", workdir=str(tmp_path),
+        writable=True, allowed_paths=[str(extra)])])
+    untouched = tmp_path / "runs"
+
+    with pytest.raises(SpecError, match="writable.*allowed_paths"):
+        execute_graph(
+            invalid, task="x", runs_root=untouched,
+            registry=_registry(_successful_fake()),
+            agent_runner=lambda *args, **kwargs: "unused",
+        )
+
+    assert not untouched.exists()
+
+
 def test_web_preview_expected_execution_identity_rejects_before_run_artifacts(tmp_path):
     workflows, runs = tmp_path / "workflows", tmp_path / "runs"
     workflows.mkdir()
@@ -308,7 +327,7 @@ def test_resume_rejects_backend_drift_without_resume_events(tmp_path):
 
     drifted = prepare_execution(spec, _registry(_successful_fake("anthropic")))
     with pytest.raises(SpecError, match="backend_sha256|execution_sha256"):
-        resume_graph(run_dir.name, spec=spec, runs_root=tmp_path, prepared=drifted)
+        _resume_graph_replay(run_dir.name, spec=spec, runs_root=tmp_path, prepared=drifted)
     after = EventReader(run_dir / "events.jsonl").all()
     assert after == before
     assert not any(e["type"] == "run_resumed" for e in after)
@@ -347,7 +366,7 @@ def test_legacy_run_continues_spec_only_and_records_compatibility(tmp_path):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     fake.configure("third", text="恢复")
-    resumed = resume_graph(run_dir.name, spec=spec, runs_root=tmp_path,
+    resumed = _resume_graph_replay(run_dir.name, spec=spec, runs_root=tmp_path,
                            prepared=prepared)
     assert resumed.status == "done"
     assert resumed.events.find(type="legacy_execution_identity") is not None

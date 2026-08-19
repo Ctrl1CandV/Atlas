@@ -10,7 +10,7 @@ Web 服务必须留在 `127.0.0.1`。当前没有认证、多人协作或云部�
 
 Claude CLI 是当前用户身份下的宿主进程，不是 OS 沙箱。Atlas 不写原项目目录；对可写 coding agent，Atlas 冻结 baseline，并比较 baseline 与 agent 结果的普通文件字节清单，生成完整文本 unified diff。采集不执行 `git add`、filter、hook、attributes、textconv 或 external diff；二进制变更 fail-loud，审批证据绑定 `baseline_digest`、`result_digest` 与 `patch_digest`。同用户进程理论上仍可访问或攻击当前用户可访问的其他宿主路径，`workdir` 和 `allowed_paths` 不能隔离恶意代码。
 
-子进程环境只注入必要系统变量、所选供应商端点和当前供应商凭据。`allow_web` 默认 `false`，开启时只增加 `WebSearch` 与 `WebFetch`，并不建立 OS 网络边界；可写 coding agent 的 `Bash` 仍可能联网。`max_turns` 当前不映射 Claude CLI 硬参数，执行硬限制来自 deadline 和已配置预算。
+子进程环境只注入必要系统变量、所选供应商端点和当前供应商凭据。`allow_web` 默认 `false`，开启时只增加 `WebSearch` 与 `WebFetch`，并不建立 OS 网络边界；可写 coding agent 的 `Bash` 仍可能联网。`allowed_paths` 仅允许 `research` 或 `writable: false` 的 coding agent 使用；可写 coding 与 `allowed_paths` 的组合在创建 run 前失败，因为 Claude `--add-dir` 不是只读边界。`max_turns` 当前不映射 Claude CLI 硬参数，执行硬限制来自 deadline 和已配置预算。
 
 ## 密钥与隐私
 

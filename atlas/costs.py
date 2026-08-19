@@ -5,6 +5,7 @@
 等确认过的数字填进去,守卫自然生效)。
 """
 import json
+import math
 import threading
 import uuid
 from dataclasses import dataclass
@@ -26,9 +27,26 @@ def _load() -> dict:
     return _cache.get("prices", {})
 
 
+def _nonnegative_finite_number(value: object) -> float | None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) and number >= 0 else None
+
+
+def _valid_token_count(value: object) -> bool:
+    return value is None or (
+        isinstance(value, int) and not isinstance(value, bool) and value >= 0)
+
+
 def compute_cost_usd(model_ref: str, input_tokens: int | None,
                      output_tokens: int | None) -> float | None:
-    """按费率表算一次调用的成本。费率缺失或 token 缺失 → None(不猜)。"""
+    """按费率表算一次调用的成本。费率或 token 不可信 → None(不猜)。"""
+    if not _valid_token_count(input_tokens) or not _valid_token_count(output_tokens):
+        return None
     if input_tokens is None and output_tokens is None:
         return None
     prices = _load()
@@ -38,16 +56,16 @@ def compute_cost_usd(model_ref: str, input_tokens: int | None,
              or prices.get(provider))
     if not isinstance(entry, dict):
         return None
-    in_per_m = entry.get("input_per_m")
-    out_per_m = entry.get("output_per_m")
+    in_per_m = _nonnegative_finite_number(entry.get("input_per_m"))
+    out_per_m = _nonnegative_finite_number(entry.get("output_per_m"))
     if in_per_m is None or out_per_m is None:
         return None
-    cost = 0.0
-    if input_tokens:
-        cost += input_tokens / 1_000_000 * in_per_m
-    if output_tokens:
-        cost += output_tokens / 1_000_000 * out_per_m
-    return round(cost, 6)
+    try:
+        cost = ((input_tokens or 0) / 1_000_000 * in_per_m
+                + (output_tokens or 0) / 1_000_000 * out_per_m)
+    except OverflowError:
+        return None
+    return round(cost, 6) if math.isfinite(cost) else None
 
 
 class CostLimitError(Exception):
@@ -83,24 +101,34 @@ def fold_cost_accounting(events: list[dict]) -> CostAccounting:
         kind = event.get("type")
         reservation_id = event.get("reservation_id")
         if kind == "cost_reserved" and isinstance(reservation_id, str):
-            amount = event.get("reserved_usd")
-            if isinstance(amount, (int, float)) and not isinstance(amount, bool) \
-                    and amount >= 0 and reservation_id not in settled_ids:
-                pending.setdefault(reservation_id, float(amount))
+            amount = _nonnegative_finite_number(event.get("reserved_usd"))
+            if amount is not None and amount > 0 and reservation_id not in settled_ids:
+                pending.setdefault(reservation_id, amount)
         elif kind == "cost_settled":
-            # 新事件用 reservation_id 保证幂等；旧事件没有 id，仍按一条调用计。
+            raw_actual = event.get("actual_cost_usd", event.get("cost_usd"))
+            raw_guarded = event.get("accounted_cost_usd", raw_actual)
+            actual = _nonnegative_finite_number(raw_actual)
+            guarded = _nonnegative_finite_number(raw_guarded)
+            # 损坏的结算不得释放已持久化 reservation。actual 显式存在时
+            # 必须可信；未知结算则必须明确标记并携带有限非负 accounted。
+            valid_settlement = (
+                (raw_actual is not None and actual is not None
+                 and guarded is not None)
+                or (raw_actual is None and event.get("cost_unknown") is True
+                    and guarded is not None)
+            )
             if isinstance(reservation_id, str):
                 if reservation_id in settled_ids:
+                    continue
+                if not valid_settlement:
                     continue
                 settled_ids.add(reservation_id)
                 pending.pop(reservation_id, None)
             settled_nodes.add((event.get("node"), event.get("iteration")))
-            actual = event.get("actual_cost_usd", event.get("cost_usd"))
-            guarded = event.get("accounted_cost_usd", actual)
-            if isinstance(actual, (int, float)) and not isinstance(actual, bool):
-                known_actual += float(actual)
-            if isinstance(guarded, (int, float)) and not isinstance(guarded, bool):
-                accounted += float(guarded)
+            if actual is not None:
+                known_actual += actual
+            if guarded is not None:
+                accounted += guarded
             if event.get("cost_unknown") is True:
                 unknown_count += 1
         elif (kind == "cost_unknown"
@@ -116,10 +144,10 @@ def fold_cost_accounting(events: list[dict]) -> CostAccounting:
             continue
         if (event.get("node"), event.get("iteration")) in settled_nodes:
             continue
-        legacy = event.get("cost_usd")
-        if isinstance(legacy, (int, float)) and not isinstance(legacy, bool):
-            known_actual += float(legacy)
-            accounted += float(legacy)
+        legacy = _nonnegative_finite_number(event.get("cost_usd"))
+        if legacy is not None:
+            known_actual += legacy
+            accounted += legacy
 
     # 调用可能已抵达供应商但进程在 settlement 事件前崩溃；不得释放重用。
     outstanding = sum(pending.values())
@@ -137,8 +165,15 @@ class CostLedger:
     """线程安全的运行级成本预留—结算账本。"""
 
     def __init__(self, cap: float | None, *, spent: float = 0.0) -> None:
-        self.cap = cap
-        self._spent = spent
+        normalized_cap = (_nonnegative_finite_number(cap)
+                          if cap is not None else None)
+        normalized_spent = _nonnegative_finite_number(spent)
+        if cap is not None and (normalized_cap is None or normalized_cap == 0):
+            raise ValueError("成本上限必须是正的有限数")
+        if normalized_spent is None:
+            raise ValueError("已花费金额必须是非负有限数")
+        self.cap = normalized_cap
+        self._spent = normalized_spent
         self._pending: dict[str, float] = {}
         self._lock = threading.Lock()
 
@@ -150,15 +185,18 @@ class CostLedger:
     def reserve(self, projected: float | None, *, description: str) -> CostReservation | None:
         if self.cap is None or projected is None:
             return None
+        amount = _nonnegative_finite_number(projected)
+        if amount is None:
+            raise CostLimitError(f"{description}:本次预估成本不是非负有限数")
         with self._lock:
             reserved = sum(self._pending.values())
-            if self._spent + reserved + projected > self.cap:
+            if self._spent + reserved + amount > self.cap:
                 raise CostLimitError(
                     f"{description}:已花费 ${self._spent:.4f} + 已预留 "
-                    f"${reserved:.4f} + 本次预估 ${projected:.4f} > "
+                    f"${reserved:.4f} + 本次预估 ${amount:.4f} > "
                     f"guards.max_cost_usd=${self.cap}"
                 )
-            return self._new_reservation(projected)
+            return self._new_reservation(amount)
 
     def reserve_remaining(self, *, description: str) -> CostReservation | None:
         """原子预留当前全部剩余预算，供无法预估费用的 CLI 会话使用。"""
@@ -177,16 +215,23 @@ class CostLedger:
                actual: float | None, *, description: str,
                unknown_as_reserved: bool = False) -> float | None:
         """幂等结算并返回守卫计入金额；未知费用可按预留额保守结算。"""
+        valid_actual = (_nonnegative_finite_number(actual)
+                        if actual is not None else None)
         if self.cap is None:
-            return actual
+            return valid_actual
         with self._lock:
-            accounted = actual
+            accounted = valid_actual
             if reservation is not None:
-                amount = self._pending.pop(reservation.reservation_id, None)
+                amount = self._pending.get(reservation.reservation_id)
                 if amount is None:
                     return None
-                if unknown_as_reserved and accounted is None:
+                if actual is not None and valid_actual is None:
                     accounted = amount
+                elif unknown_as_reserved and accounted is None:
+                    accounted = amount
+                self._pending.pop(reservation.reservation_id, None)
+            elif actual is not None and valid_actual is None:
+                raise CostLimitError(f"{description}:实际成本不是非负有限数")
             if accounted is not None:
                 self._spent += accounted
                 if self._spent > self.cap:

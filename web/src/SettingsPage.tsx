@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { summarizeRunCleanup } from './runCleanup';
 import {
   acknowledgeInitialization,
   createProvider,
@@ -359,15 +360,7 @@ export function SettingsPage({ onProvidersChanged, onRunsDeleted }: {
 
       const result = await deleteCompletedRuns(runs);
       onRunsDeleted?.(result.deleted);
-      if (result.failed.length === 0) {
-        setCleanupMessage({ kind: 'ok', text: `已清理 ${result.deleted.length} 条运行记录。` });
-      } else {
-        const failures = result.failed.map((item) => `${item.runId}: ${item.error}`).join('；');
-        setCleanupMessage({
-          kind: 'err',
-          text: `已清理 ${result.deleted.length} 条，失败 ${result.failed.length} 条：${failures}`,
-        });
-      }
+      setCleanupMessage(summarizeRunCleanup(result));
     } catch (e) {
       setCleanupMessage({ kind: 'err', text: (e as Error).message });
     } finally {

@@ -17,8 +17,8 @@
 所有节点需要 `id`、封闭 `type`、非空 `prompt` 和 `consumes`。`consumes` 只接受 `task`、`<node>.output`、`<coding-node>.diff`。
 
 - `llm`：`model`、`fallback`、`thinking`、`max_output_tokens`、`temperature`、`seed`、`timeout_s`、`retry`、`output_schema`、`route_field`。
-- `research`：agent 模型与 `max_turns`、`allow_web`、`timeout_s`、`retry`。
-- `coding_agent`：agent 字段以及必填 `workdir`、`writable`、`allowed_paths`；可写节点比较冻结 baseline 与 agent 结果的普通文件字节清单，生成完整文本 unified diff。
+- `research`：agent 模型与 `max_turns`、`allow_web`、`allowed_paths`、`timeout_s`、`retry`。
+- `coding_agent`：agent 字段以及必填 `workdir`、`writable`；`allowed_paths` 仅在 `writable: false` 时合法。可写节点比较冻结 baseline 与 agent 结果的普通文件字节清单，生成完整文本 unified diff。
 - `human`：暂停并等待本机界面的批准或驳回。
 
 条件路由按 `route_field` 查找边的 `when`；该字段必须列入 `output_schema.required`，prompt 必须明确合法值。环必须有条件出口和 `max_iterations`。

@@ -8,7 +8,7 @@ Atlas is a local, auditable workflow engine. YAML defines the graph; MCP tools v
 
 ## Honest RC scope
 
-- Supported now: `llm`, `research`, and `coding_agent` workflows, bounded routing/loops, MCP validation and dry-run, local run inspection, and human approval gates.
+- Supported now: `llm`, `research`, and `coding_agent` workflows, bounded routing/loops, six MCP tools, YAML validation with source locations, local run inspection, interrupted-only checkpoint recovery, and human approval gates.
 - Production agent execution is opt-in: Atlas enables the Claude CLI runner only when `config/agents.json` explicitly sets `runner` to `local_cli`. Missing configuration and every unmet preflight requirement fail closed before a run is created.
 - Claude CLI runs as a same-user host process. Atlas does not write the original directory. For a writable `coding_agent`, it freezes a baseline and compares the ordinary-file byte manifests of that baseline and the agent result to generate a complete textual unified diff.
 - Diff collection does not run `git add`, filters, hooks, attributes, textconv, or external diff. Binary changes fail loudly, and approval evidence binds `baseline_digest`, `result_digest`, and `patch_digest`.
@@ -55,11 +55,11 @@ uv run atlas-mcp
 
 MCP can instead be configured directly in your harness; see [`docs/mcp.md`](docs/mcp.md) for ZCode, Cursor, and Claude Code stdio examples. Open <http://127.0.0.1:8321>. Keep the service on loopback; this RC has no multi-user authentication or remote-deployment security model.
 
-For each workflow: validate, dry-run, review model bindings/guards/cost, then explicitly request a real run. Validation and dry-run make no provider calls. Real runs may cost money; cost guards are reliable only for locally verified prices. Human nodes pause for a decision in the local UI.
+For each workflow: validate, dry-run, review model bindings/guards/cost, then explicitly request a real run. Validation and dry-run make no provider calls. Real runs may cost money. With `max_cost_usd`, unknown prices conservatively consume all remaining Atlas budget, but only locally verified prices can establish that the provider's actual charge stayed within the dollar cap. Human nodes pause for a decision in the local UI.
 
 `coding_agent.workdir` must name an existing directory. Atlas does not expand `${ATLAS_HOME}` inside YAML. The shipped example uses relative `demo-project`, which resolves only when Atlas starts from the source root; otherwise supply an existing absolute path through the supported run override.
 
-Agent child environments contain only required system variables plus the selected provider endpoint and credential. `allow_web` defaults to `false`; setting it to `true` adds only Claude CLI's `WebSearch` and `WebFetch` tools. It is not OS-level network isolation: a writable coding agent has `Bash`, which may still reach the network. `max_turns` remains a validated workflow/specification field, but the current Claude CLI has no hard turn-count parameter; hard limits come from deadlines and configured budgets.
+Agent child environments contain only required system variables plus the selected provider endpoint and credential. `allow_web` defaults to `false`; setting it to `true` adds only Claude CLI's `WebSearch` and `WebFetch` tools. It is not OS-level network isolation: a writable coding agent has `Bash`, which may still reach the network. `allowed_paths` is accepted only for `research` or `coding_agent` with `writable: false`; writable coding plus `allowed_paths` fails before run creation because Claude `--add-dir` is not a read-only boundary. `max_turns` remains a validated workflow/specification field, but the current Claude CLI has no hard turn-count parameter; hard limits come from deadlines and configured budgets.
 
 ## Security and privacy
 

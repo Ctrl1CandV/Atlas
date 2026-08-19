@@ -2,22 +2,21 @@
 
 All notable changes to Atlas are documented here. The format follows Keep a Changelog and versions follow Semantic Versioning, with Python's equivalent PEP 440 spelling noted explicitly.
 
-## Unreleased
+## 0.1.0-rc.1 - Pending
 
-### Changed
-- Synchronized the production agent documentation and shipped coding workflow with the opt-in Claude CLI runner: `config/agents.json` must explicitly set `runner` to `local_cli`, while missing configuration remains fail-closed.
-- Documented same-user worktree staging, original-directory write avoidance, frozen baseline/result ordinary-file byte-manifest comparison, complete textual unified diff generation without Git add/filter/hook/attributes/textconv/external-diff execution, binary fail-loud behavior, approval binding to `baseline_digest`/`result_digest`/`patch_digest`, minimal child environment, `anthropicBaseUrl`, `allow_web`, network limitations, and the current `max_turns` specification-only behavior.
-
-## 0.1.0-rc.1 - 2026-08-18
-
-Python package version: `0.1.0rc1`. Release tag: `v0.1.0-rc.1`.
+Python package version: `0.1.0rc1`. Expected release tag: `v0.1.0-rc.1`.
+The tag and GitHub prerelease have not been created yet.
 
 ### Added
-- Source-only Windows RC with YAML workflows, five MCP tools, local Web observation, human approval, and six model-neutral examples.
+- Source-only Windows RC with YAML workflows, six MCP tools, local Web observation, human approval, and six model-neutral examples.
+- Dynamic interrupted-run detection and checkpoint recovery through Web and `atlas_resume_run`; paused runs remain approval-only.
+- With `max_cost_usd`, persistent per-attempt LLM cost reservations use the projected amount when known and reserve the remaining budget when pricing is unknown, with conservative crash-window accounting; uncapped runs do not invent reservations or amounts.
+- YAML syntax and semantic validation errors with canonical field paths and one-based line/column locations when source marks are available.
 - Bounded routing and loops, explicit fallback visibility, structured output checks, append-only run events, effective-spec snapshots, and artifact hashes.
 - Windows CI, an advisory Ubuntu compatibility signal, workflow validate/preview checks, clean-source smoke checks, and opt-in real-provider discovery.
 - Release SHA256 checksums, SPDX SBOM generation, and GitHub build-provenance attestations.
-- Opt-in production `research` and `coding_agent` execution through the Claude CLI when `config/agents.json` explicitly selects `runner: local_cli`.
+- Opt-in production `research` and `coding_agent` execution through the Claude CLI when `config/agents.json` explicitly selects `runner: local_cli`; missing configuration remains fail-closed.
+- First-start configuration initialization and `atlas init`, terminal-run deletion, agent boundary visibility, and MCP harness setup documentation.
 
 ### Security
 - Web access remains loopback-only.

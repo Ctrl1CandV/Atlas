@@ -132,15 +132,19 @@ def test_allow_web_adds_only_web_tools(tmp_path, provider):
     projections.mkdir()
     attachment = projections / "projection.txt"
     attachment.write_text("x", encoding="utf-8")
+    extra = tmp_path / "read-only-input"
+    extra.mkdir()
     result = runner(
         attachment, node_type="research", max_turns=12,
-        writable=False, allow_web=True, allowed_paths=[], timeout_s=10,
+        writable=False, allow_web=True, allowed_paths=[str(extra)], timeout_s=10,
         model_ref="Stub:model-a", node_id="research")
     assert result.text == "stub report"
     record = next(tmp_path.glob("atlas-research-research-*/stub-record.json"))
     argv = json.loads(record.read_text(encoding="utf-8"))["argv"]
     assert "WebSearch" in argv and "WebFetch" in argv
     assert "Edit" not in argv and "Write" not in argv and "Bash" not in argv
+    add_dir = argv.index("--add-dir")
+    assert argv[add_dir + 1] == str(extra)
 
 
 def test_writable_agent_rejects_allowed_paths(tmp_path, provider):

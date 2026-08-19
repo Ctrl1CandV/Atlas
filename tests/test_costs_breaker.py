@@ -10,7 +10,7 @@ from atlas.costs import compute_cost_usd
 from atlas.engine import CostExceeded, execute_graph
 from atlas.events import EventReader
 from atlas.nodes.agent import AgentCliError
-from atlas.nodes.local_cli import AgentRunResult
+from atlas.nodes.local_cli import AgentRunResult, _parse_result
 from atlas.spec import (EdgeSpec, Guards, NodeSpec, WorkflowSpec,
                         spec_from_yaml)
 
@@ -46,6 +46,32 @@ def test_vendor_wildcard_pricing(monkeypatch):
     monkeypatch.setattr(costs, "_cache", {
         "prices": {"Fake:*": {"input_per_m": 0.5, "output_per_m": 0.5}}})
     assert compute_cost_usd("Fake:anything", 1_000_000, 0) == 0.5
+
+
+def test_compute_cost_rejects_malformed_numeric_values(monkeypatch):
+    monkeypatch.setattr(costs, "_cache", {
+        "prices": {"Fake:primary": {"input_per_m": 1.0, "output_per_m": 2.0}}})
+    for bad_tokens in (-1, 1.5, float("nan"), float("inf"), True):
+        assert compute_cost_usd("Fake:primary", bad_tokens, 1) is None
+        assert compute_cost_usd("Fake:primary", 1, bad_tokens) is None
+
+    for bad_price in (-1.0, float("nan"), float("inf"), True, "1.0"):
+        monkeypatch.setattr(costs, "_cache", {
+            "prices": {"Fake:primary": {
+                "input_per_m": bad_price, "output_per_m": 2.0}}})
+        assert compute_cost_usd("Fake:primary", 1, 1) is None
+
+
+def test_local_cli_numeric_parser_drops_invalid_cost_and_tokens():
+    result = _parse_result(
+        b'{"result":"ok","usage":{"input_tokens":-1,"output_tokens":true},'
+        b'"total_cost_usd":NaN}')
+    assert result.usage == Usage(None, None)
+    assert result.cost_usd is None
+
+    overflow = _parse_result(
+        ('{"result":"ok","total_cost_usd":' + "9" * 400 + "}").encode())
+    assert overflow.cost_usd is None
 
 
 # ── 成本守卫 ─────────────────────────────────────────────────
@@ -106,19 +132,159 @@ def test_cost_guard_first_done_second_blocked(tmp_path, monkeypatch):
     assert reader.find(type="node_started", node="node_b") is None    # 第二步没花钱
 
 
-def test_cost_unknown_warns_when_guard_set(tmp_path, monkeypatch):
+def test_unknown_price_with_cap_reserves_remaining_and_blocks_next_node(
+        tmp_path, monkeypatch):
     monkeypatch.setattr(costs, "_cache", {"prices": {}})   # 全部未知
     fake = FakeProvider()
     fake.configure("primary", text="第一步")
-    fake.configure("other", text="第二步")
+    fake.configure("other", text="不得派发")
 
-    run = execute_graph(_cost_guard(max_cost_usd=5.0), task=TASK_TEXT,
-                        runs_root=tmp_path, registry=make_registry(fake))
-    warn = run.events.find(type="cost_unknown")
-    assert warn is not None, "设了守卫但费率未知,必须记警告"
-    assert "Fake:primary" in warn["models"]
-    assert run.folded()["status"] == "done"   # 运行本身照常完成
-    assert run.events.find(type="node_done", node="node_a")["cost_usd"] is None
+    with pytest.raises(CostExceeded):
+        execute_graph(_cost_guard(max_cost_usd=5.0), task=TASK_TEXT,
+                      runs_root=tmp_path, registry=make_registry(fake))
+    events = EventReader(next(tmp_path.glob("*/events.jsonl"))).all()
+    reserved = next(e for e in events if e["type"] == "cost_reserved")
+    settled = next(e for e in events if e["type"] == "cost_settled")
+    warnings = [e for e in events if e["type"] == "cost_unknown"]
+
+    assert reserved["reserved_usd"] == 5.0
+    assert reserved["reserved_usd"] > 0
+    assert settled["reservation_id"] == reserved["reservation_id"]
+    assert settled["accounted_cost_usd"] == 5.0
+    assert len(warnings) == 1
+    assert warnings[0]["reservation_id"] == reserved["reservation_id"]
+    assert warnings[0]["attempt"] == reserved["attempt"] == settled["attempt"] == 1
+    assert [call["model"] for call in fake.calls] == ["primary"]
+
+
+def test_unknown_price_without_cap_does_not_invent_money(tmp_path, monkeypatch):
+    monkeypatch.setattr(costs, "_cache", {"prices": {}})
+    fake = FakeProvider()
+    fake.configure("primary", text="完成")
+    spec = WorkflowSpec(
+        name="no-cost-cap",
+        nodes=[NodeSpec(id="solo", type="llm", model="Fake:primary",
+                        prompt="执行", consumes=["task"])],
+        edges=[EdgeSpec("solo", "END")], entry="solo")
+
+    run = execute_graph(spec, task=TASK_TEXT, runs_root=tmp_path,
+                        registry=make_registry(fake))
+    events = run.events.all()
+    assert not any(e["type"] == "cost_reserved" for e in events)
+    settled = next(e for e in events if e["type"] == "cost_settled")
+    assert settled["reservation_id"] is None
+    assert settled["actual_cost_usd"] is None
+    assert settled["accounted_cost_usd"] is None
+    assert not any(e["type"] == "cost_unknown" for e in events)
+
+
+def _single_llm_cost_spec(*, fallback=None) -> WorkflowSpec:
+    return WorkflowSpec(
+        name="llm-cost-events",
+        nodes=[NodeSpec(
+            id="solo", type="llm", model="Fake:primary",
+            fallback=list(fallback or []), prompt="执行任务", consumes=["task"])],
+        edges=[EdgeSpec("solo", "END")], entry="solo",
+        guards=Guards(max_cost_usd=1.0),
+    )
+
+
+def test_llm_cost_reservation_is_persisted_before_dispatch(tmp_path, monkeypatch):
+    monkeypatch.setattr(costs, "_cache", {
+        "prices": {"Fake:*": {"input_per_m": 1.0, "output_per_m": 1.0}}})
+    fake = FakeProvider()
+    fake.configure("primary", text="完成", usage=Usage(12, 4))
+
+    run = execute_graph(
+        _single_llm_cost_spec(), task=TASK_TEXT,
+        runs_root=tmp_path, registry=make_registry(fake))
+    events = run.events.all()
+    reserved = next(e for e in events if e["type"] == "cost_reserved")
+    settled = next(e for e in events if e["type"] == "cost_settled")
+
+    assert reserved["reservation_id"]
+    assert reserved["attempt"] == 1
+    assert reserved["model"] == "Fake:primary"
+    assert settled["reservation_id"] == reserved["reservation_id"]
+    assert settled["attempt"] == 1
+    assert settled["actual_cost_usd"] == 0.000016
+    assert settled["accounted_cost_usd"] == 0.000016
+    assert settled["cost_unknown"] is False
+    assert settled["input_tokens"] == 12
+    assert settled["output_tokens"] == 4
+    kinds = [e["type"] for e in events]
+    assert kinds.index("cost_reserved") < kinds.index("node_started")
+    assert kinds.index("node_started") < kinds.index("cost_settled")
+    assert kinds.index("cost_settled") < kinds.index("node_done")
+
+
+def test_llm_unknown_usage_conservatively_settles_reservation(tmp_path, monkeypatch):
+    monkeypatch.setattr(costs, "_cache", {
+        "prices": {"Fake:*": {"input_per_m": 1.0, "output_per_m": 1.0}}})
+    fake = FakeProvider()
+    fake.configure("primary", text="完成", auto_usage=False)
+
+    run = execute_graph(
+        _single_llm_cost_spec(), task=TASK_TEXT,
+        runs_root=tmp_path, registry=make_registry(fake))
+    events = run.events.all()
+    reserved = next(e for e in events if e["type"] == "cost_reserved")
+    settled = next(e for e in events if e["type"] == "cost_settled")
+    warning = next(e for e in events if e["type"] == "cost_unknown")
+
+    assert settled["reservation_id"] == reserved["reservation_id"]
+    assert settled["actual_cost_usd"] is None
+    assert settled["accounted_cost_usd"] == reserved["reserved_usd"]
+    assert settled["cost_unknown"] is True
+    assert warning["attempt"] == 1
+    assert warning["reservation_id"] == reserved["reservation_id"]
+    accounting = costs.fold_cost_accounting(events)
+    assert accounting.accounted_usd == reserved["reserved_usd"]
+    assert accounting.unknown_count == 1
+    assert accounting.outstanding_reserved_usd == 0.0
+
+
+def test_llm_fallback_uses_independent_reservations(tmp_path, monkeypatch):
+    monkeypatch.setattr(costs, "_cache", {
+        "prices": {"Fake:*": {"input_per_m": 1.0, "output_per_m": 1.0}}})
+    fake = FakeProvider()
+    fake.configure("primary", transport_error="网关失败")
+    fake.configure("fallback", text="备用完成", usage=Usage(12, 4))
+
+    run = execute_graph(
+        _single_llm_cost_spec(fallback=["Fake:fallback"]), task=TASK_TEXT,
+        runs_root=tmp_path, registry=make_registry(fake))
+    events = run.events.all()
+    reserved = [e for e in events if e["type"] == "cost_reserved"]
+    settled = [e for e in events if e["type"] == "cost_settled"]
+
+    assert [e["attempt"] for e in reserved] == [1, 2]
+    assert [e["attempt"] for e in settled] == [1, 2]
+    assert len({e["reservation_id"] for e in reserved}) == 2
+    assert {e["reservation_id"] for e in settled} == {
+        e["reservation_id"] for e in reserved}
+    assert settled[0]["cost_unknown"] is True
+    assert settled[0]["accounted_cost_usd"] == reserved[0]["reserved_usd"]
+    assert settled[1]["actual_cost_usd"] == 0.000016
+
+
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf"),
+                                 float("-inf"), True])
+def test_cost_ledger_rejects_invalid_amounts_without_reducing_spent(bad):
+    ledger = costs.CostLedger(1.0, spent=0.25)
+    with pytest.raises(costs.CostLimitError):
+        ledger.reserve(bad, description="invalid projection")
+    reservation = ledger.reserve(0.5, description="valid projection")
+    assert reservation is not None
+    assert ledger.settle(reservation, bad, description="invalid actual") == 0.5
+    assert ledger.totals == (0.75, 0.0)
+
+
+@pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf"),
+                                 float("-inf"), True])
+def test_cost_ledger_rejects_invalid_initial_spent(bad):
+    with pytest.raises(ValueError):
+        costs.CostLedger(1.0, spent=bad)
 
 
 def test_cost_ledger_reservation_is_atomic_under_concurrency():
@@ -191,6 +357,22 @@ def test_cost_event_replay_accounts_crashed_pending_reservation():
     assert accounting.accounted_usd == 0.5
     assert accounting.unknown_count == 1
     assert accounting.outstanding_reserved_usd == 0.5
+
+
+def test_cost_event_replay_ignores_malformed_numeric_values():
+    accounting = costs.fold_cost_accounting([
+        {"type": "cost_reserved", "reservation_id": "r1",
+         "reserved_usd": 0.5},
+        {"type": "cost_settled", "reservation_id": "r1",
+         "actual_cost_usd": float("nan"), "accounted_cost_usd": -1.0,
+         "cost_unknown": False},
+        {"type": "node_done", "node": "legacy", "iteration": 1,
+         "cost_usd": float("inf")},
+    ])
+    assert accounting.known_actual_usd == 0.0
+    assert accounting.accounted_usd == 0.5
+    assert accounting.outstanding_reserved_usd == 0.5
+    assert accounting.unknown_count == 1
 
 
 def test_cost_event_replay_is_idempotent_by_reservation_id():

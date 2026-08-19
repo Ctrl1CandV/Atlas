@@ -370,6 +370,10 @@ input:focus, textarea:focus {
 }
 .atlas-node.status-done { border-color: color-mix(in srgb, var(--color-done) 60%, transparent); }
 .atlas-node.status-failed { border-color: color-mix(in srgb, var(--color-fail) 70%, transparent); }
+.atlas-node.status-interrupted {
+  border-color: var(--color-degraded);
+  border-style: dashed;
+}
 .atlas-node.unconfigured {
   border-style: dashed;
   border-color: color-mix(in srgb, var(--color-degraded) 70%, var(--color-line));
@@ -541,6 +545,13 @@ input:focus, textarea:focus {
 .approval-bar input { flex: 1; }
 .approval-bar .approve { background: var(--color-done); color: #08130d; border: none; border-radius: var(--radius-ctrl); padding: 6px 14px; font-weight: 600; }
 .approval-bar .reject { background: var(--color-fail); color: #fff; border: none; border-radius: var(--radius-ctrl); padding: 6px 14px; font-weight: 600; }
+.approval-bar .resume { background: var(--color-accent); color: var(--color-canvas); border: none; border-radius: var(--radius-ctrl); padding: 6px 14px; font-weight: 600; }
+.approval-bar .resume:disabled { opacity: 0.55; cursor: wait; }
+.approval-bar.interrupted {
+  background: color-mix(in srgb, var(--color-accent) 10%, var(--color-panel));
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
 
 .run-error {
   position: absolute; left: 12px; bottom: 12px; right: 12px;

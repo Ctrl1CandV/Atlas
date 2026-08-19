@@ -11,67 +11,38 @@ jobs:
   windows-supported:
     name: Windows supported platform
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
         with:
           version: "0.8.13"
           enable-cache: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.12.0"
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Sync locked Python dependencies
         run: uv sync --locked --all-groups
-      - name: Initialize generic test configuration
-        shell: pwsh
-        run: |
-          Copy-Item config/providers.example.json config/providers.json
-          Copy-Item config/models.reference.example.json config/models.reference.json
-          Copy-Item config/capabilities.example.json config/capabilities.json
-          Copy-Item config/pricing.example.json config/pricing.json
-          Copy-Item config/.env.example config/.env
-      - name: Install and build Web from lock
-        run: |
-          npm --prefix web ci
-          npm --prefix web run build
+      - name: Install Web dependencies from lock
+        run: npm --prefix web ci
       - name: Compile Python sources
-        run: uv run python -m compileall -q atlas
+        run: uv run python -m compileall -q atlas scripts
       - name: Run Python tests without real providers
         run: uv run pytest
-      - name: Validate and preview all six workflows
-        shell: pwsh
+      - name: Run offline workflow release gate
+        run: uv run python scripts/release_workflow_gate.py
+      - name: Run clean-init and MCP silence gate
+        run: uv run python scripts/release_clean_init_gate.py
+      - name: Test, lint, and build Web app once
         run: |
-          @'
-          from pathlib import Path
-          from atlas.mcp import dry_run_impl, validate_workflow_impl
-
-          files = sorted(Path("workflows").glob("*.yaml"))
-          if len(files) != 6:
-              raise SystemExit(f"expected 6 workflows, found {len(files)}")
-          for path in files:
-              workflow_id = path.stem
-              checked = validate_workflow_impl(workflow_id=workflow_id)
-              if not checked.get("valid"):
-                  raise SystemExit(f"{workflow_id} validation failed: {checked}")
-              preview = dry_run_impl(workflow_id, "CI static preview")
-              if preview.get("dry_run") is not True:
-                  raise SystemExit(f"{workflow_id} preview failed: {preview}")
-          print("validated and previewed:", ", ".join(path.stem for path in files))
-          '@ | uv run python -
-      - name: Lint Web app
-        working-directory: web
-        run: npm run lint
-      - name: Test diff parser
-        working-directory: web
-        run: npm run test:diff
-      - name: Build Web app
-        working-directory: web
-        run: npm run build
+          npm --prefix web test
+          npm --prefix web run lint
+          npm --prefix web run build
       - name: Scan release surfaces for secrets, private paths, and placeholders
         shell: pwsh
         run: |
@@ -87,7 +58,10 @@ jobs:
           )]
           for root in roots:
               files.extend(path for path in root.rglob("*") if path.is_file())
-          excluded = {"config/.env", "config/providers.json", "config/capabilities.json", "config/pricing.json", "config/models.reference.json"}
+          excluded = {
+              "config/.env", "config/providers.json", "config/capabilities.json",
+              "config/pricing.json", "config/models.reference.json", "config/agents.json",
+          }
           checks = {
               "GitHub placeholder": re.compile(r"(?:OWNER|ORG)/(?:REPOSITORY|REPO)|<atlas-" + r"repository-url>|https://github\.com/?(?:\s|$)"),
               "private Windows path": re.compile(r"(?<![A-Za-z])[A-Za-z]:[\\/](?![\\/])"),
@@ -111,66 +85,42 @@ jobs:
           '@ | uv run python -
       - name: Build source distribution only
         run: uv build --sdist
-      - name: Inspect source archive exclusions
-        shell: pwsh
-        run: |
-          @'
-          import tarfile
-          from pathlib import Path
-
-          archive = next(Path("dist").glob("*.tar.gz"))
-          names = [name.replace("\\", "/") for name in tarfile.open(archive, "r:gz").getnames()]
-          banned = ("/config/.env", "/config/providers.json", "/config/capabilities.json", "/config/pricing.json", "/config/models.reference.json", "/runs/", "/web/dist/")
-          leaked = [name for name in names if any(item in f"/{name}" for item in banned)]
-          if leaked:
-              raise SystemExit("private/generated files in sdist: " + ", ".join(leaked))
-          if any(name.endswith(".whl") for name in names):
-              raise SystemExit("wheel content unexpectedly present")
-          print(f"inspected {len(names)} archive entries")
-          '@ | uv run python -
-      - name: Smoke install source archive in a clean environment
-        shell: pwsh
-        run: |
-          $archive = (Get-ChildItem dist\*.tar.gz | Select-Object -First 1).FullName
-          if (-not $archive) { throw "Source archive not found" }
-          $venv = Join-Path $env:RUNNER_TEMP "atlas-sdist-smoke"
-          uv venv --python 3.12 $venv
-          $python = Join-Path $venv "Scripts\python.exe"
-          uv pip install --python $python $archive
-          & $python -c "import importlib.metadata; assert importlib.metadata.version('atlas') == '0.1.0rc1'"
+      - name: Scan and smoke-install source distribution
+        run: uv run python scripts/release_sdist_gate.py --dist-dir dist
 
   ubuntu-compatibility-signal:
     name: Ubuntu compatibility signal (unsupported)
     runs-on: ubuntu-latest
     continue-on-error: true
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
         with:
           version: "0.8.13"
           enable-cache: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22.12.0"
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Sync clean checkout
         run: uv sync --locked --all-groups
-      - name: Initialize generic test configuration
-        run: |
-          cp config/providers.example.json config/providers.json
-          cp config/models.reference.example.json config/models.reference.json
-          cp config/capabilities.example.json config/capabilities.json
-          cp config/pricing.example.json config/pricing.json
-          cp config/.env.example config/.env
-      - name: Build Web from clean checkout
-        run: |
-          npm --prefix web ci
-          npm --prefix web run build
+      - name: Install Web dependencies from lock
+        run: npm --prefix web ci
       - name: Compile and test compatibility
         run: |
-          uv run python -m compileall -q atlas
+          uv run python -m compileall -q atlas scripts
           uv run pytest
+      - name: Run shared offline release gates
+        run: |
+          uv run python scripts/release_workflow_gate.py
+          uv run python scripts/release_clean_init_gate.py
+      - name: Test, lint, and build Web app once
+        run: |
+          npm --prefix web test
+          npm --prefix web run lint
+          npm --prefix web run build

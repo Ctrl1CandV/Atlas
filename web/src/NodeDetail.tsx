@@ -8,6 +8,7 @@ import {
 } from '@phosphor-icons/react';
 import type { ArtifactViewTarget } from './ArtifactWorkSpace';
 import { fetchText, runArtifactUrl, runProjectionUrl } from './api';
+import { formatAgentExecution } from './nodeDetailPresentation';
 import type { NodeOverride, ParamDefaults, RunNode, WFNode } from './types';
 import { TextViewer } from './TextViewer';
 
@@ -382,6 +383,7 @@ export function NodeDetail({
   const inherited = inheritedSpec ?? spec;
   const isLlm = inherited.type === 'llm';
   const isAgent = inherited.type === 'research' || inherited.type === 'coding_agent';
+  const agentExecution = isAgent ? formatAgentExecution(run?.runner, spec.allow_web) : null;
   // human 节点也能覆盖职责文本(审批时问什么),但没有模型参数
   const canOverride = isLlm || isAgent || inherited.type === 'human';
   const hasOverride = (key: keyof NodeOverride) =>
@@ -408,12 +410,17 @@ export function NodeDetail({
           <span className="k">请求模型</span><span className="mono">{run?.model_requested ?? (spec.model || '未配置(待选择)')}</span>
           <span className="k">实际应答</span>
           <span className="mono">{run?.model_used ?? '—'}</span>
-          {isAgent && (
+          {agentExecution && (
             <>
               <span className="k">执行后端</span>
-              <span>{run?.runner === 'local_cli' ? '本机受控执行（目录隔离，非 OS 沙箱）' : (run?.runner ?? '运行前确定')}</span>
+              <span>{agentExecution.runnerLabel}</span>
+              {agentExecution.boundaryNote && (
+                <><span className="k">安全边界</span><span>{agentExecution.boundaryNote}</span></>
+              )}
               <span className="k">allow_web</span>
-              <span>{spec.allow_web === true ? '开启（WebSearch / WebFetch）' : '关闭（默认）'}</span>
+              <span>{agentExecution.allowWebLabel}</span>
+              <span className="k">联网边界</span>
+              <span>{agentExecution.allowWebNote}</span>
             </>
           )}
           {(run?.input_tokens != null || run?.output_tokens != null) && (

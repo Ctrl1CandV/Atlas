@@ -541,6 +541,8 @@ def test_sse_reads_incrementally_and_resets_idle(tmp_path, monkeypatch):
             return result
 
     monkeypatch.setattr(web_module, "EventReader", ScriptedReader)
+    monkeypatch.setattr(web_module, "derive_run_status",
+                        lambda *args, **kwargs: "running")
     monkeypatch.setattr(web_module.time, "sleep", lambda _: None)
     app = create_app(workflows_dir=tmp_path / "workflows", runs_dir=runs,
                      registry_factory=lambda _: make_registry(FakeProvider()),
@@ -552,6 +554,26 @@ def test_sse_reads_incrementally_and_resets_idle(tmp_path, monkeypatch):
     assert calls[200:] == [0, 11]
     assert '"type": "run_done"' in response.text
     assert "stream_closed" not in response.text
+
+
+def test_sse_interrupted_is_non_persistent_control_event(tmp_path):
+    runs = tmp_path / "runs"
+    run_dir = _write_run(runs, "interrupted-sse")
+    events_path = run_dir / "events.jsonl"
+    ledger_before = events_path.read_bytes()
+    app = create_app(workflows_dir=tmp_path / "workflows", runs_dir=runs,
+                     registry_factory=lambda _: make_registry(FakeProvider()),
+                     api_only=True)
+
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        response = client.get("/api/runs/interrupted-sse/events?after=1")
+
+    assert response.status_code == 200
+    assert response.text == (
+        'event: run_interrupted\n'
+        'data: {"type": "run_interrupted"}\n\n')
+    assert '"seq"' not in response.text
+    assert events_path.read_bytes() == ledger_before
 
 
 def test_missing_web_dist_fails_loudly_but_api_only_is_explicit(tmp_path):
@@ -608,3 +630,138 @@ def test_serve_refuses_non_localhost():
     from atlas.web import serve
     with pytest.raises(ValueError, match="127.0.0.1"):
         serve(host="0.0.0.0")
+
+
+def test_invalid_workflow_errors_are_strings_with_source_location(app):
+    expected = "path nodes[0].type, line 4, column 5"
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        item = next(item for item in client.get("/api/workflows").json()
+                    if item["id"] == "broken")
+        assert isinstance(item["error"], str)
+        assert expected in item["error"]
+
+        response = client.get("/api/workflows/broken")
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert isinstance(detail, str)
+        assert expected in detail
+
+
+def test_persisted_running_run_is_interrupted_only_while_lock_is_free(tmp_path):
+    runs = tmp_path / "runs"
+    _write_run(runs, "dynamic-run")
+    api = create_app(workflows_dir=tmp_path / "workflows", runs_dir=runs,
+                     registry_factory=lambda _: make_registry(FakeProvider()),
+                     api_only=True)
+
+    with TestClient(api, base_url="http://127.0.0.1") as client:
+        assert client.get("/api/runs/dynamic-run").json()["status"] == "interrupted"
+        listed = {item["run_id"]: item for item in client.get("/api/runs").json()}
+        assert listed["dynamic-run"]["status"] == "interrupted"
+
+        acquire_run_lock("dynamic-run", runs_root=runs)
+        try:
+            assert client.get("/api/runs/dynamic-run").json()["status"] == "running"
+            listed = {item["run_id"]: item
+                      for item in client.get("/api/runs").json()}
+            assert listed["dynamic-run"]["status"] == "running"
+        finally:
+            release_run_lock("dynamic-run", runs_root=runs)
+
+
+def test_web_resume_requires_header_and_rejects_terminal_runs(tmp_path):
+    workflows = tmp_path / "workflows"
+    workflows.mkdir()
+    (workflows / "demo.yaml").write_text(
+        "name: demo\nnodes:\n  - id: a\n    type: llm\n"
+        "    model: Fake:primary\n    prompt: p\n    consumes: [task]\n"
+        "edges:\n  - from: a\n    to: END\n", encoding="utf-8")
+    runs = tmp_path / "runs"
+    for rid, terminal in (("paused-run", "paused"),
+                          ("done-run", "run_done"),
+                          ("failed-run", "run_failed")):
+        _write_run(runs, rid, terminal)
+    def forbidden_registry(_):
+        raise AssertionError("终态 resume 不得预检当前后端")
+
+    api = create_app(workflows_dir=workflows, runs_dir=runs,
+                     registry_factory=forbidden_registry, api_only=True)
+
+    with TestClient(api, base_url="http://127.0.0.1") as client:
+        missing_header = client.post("/api/runs/done-run/resume")
+        assert missing_header.status_code == 403
+        assert "X-Atlas-Request" in missing_header.json()["detail"]
+
+        for rid, status in (("paused-run", "paused"), ("done-run", "done"),
+                            ("failed-run", "failed")):
+            response = client.post(f"/api/runs/{rid}/resume",
+                                   headers={"X-Atlas-Request": "1"})
+            assert response.status_code == 409
+            assert status in response.json()["detail"]
+
+
+def test_web_resume_accepts_interrupted_and_rejects_duplicate_live_resume(
+        tmp_path, monkeypatch):
+    from atlas.adapters import AllCandidatesFailed
+    from atlas.engine import prepare_execution
+    from atlas.events import EventReader
+    from conftest import standard_fake
+
+    runs = tmp_path / "runs"
+    spec = load_graph("three_node")
+    fake = standard_fake(100)
+    fake.configure("third", transport_error="simulated process loss")
+    registry = make_registry(fake)
+    prepared = prepare_execution(spec, registry)
+    with pytest.raises(AllCandidatesFailed):
+        execute_graph(spec, task=TASK_TEXT, runs_root=runs, prepared=prepared)
+    run_dir = next(runs.glob("*/events.jsonl")).parent
+    events_path = run_dir / "events.jsonl"
+    events = EventReader(events_path).all()
+    assert events[-1]["type"] == "run_failed"
+    events_path.write_text(
+        "".join(json.dumps(event, ensure_ascii=False) + "\n"
+                for event in events[:-1]), encoding="utf-8")
+    fake.configure("third", text="recovered")
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_resume = web_module.resume_graph
+
+    def blocking_resume(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        return real_resume(*args, **kwargs)
+
+    monkeypatch.setattr(web_module, "resume_graph", blocking_resume)
+    api = create_app(workflows_dir=tmp_path / "workflows", runs_dir=runs,
+                     registry_factory=lambda _: registry, api_only=True)
+    headers = {"X-Atlas-Request": "1"}
+    try:
+        with TestClient(api, base_url="http://127.0.0.1") as client:
+            accepted = client.post(f"/api/runs/{run_dir.name}/resume",
+                                   headers=headers)
+            assert accepted.status_code == 202
+            assert accepted.json() == {"run_id": run_dir.name,
+                                       "status": "running"}
+            assert entered.wait(timeout=2)
+
+            duplicate = client.post(f"/api/runs/{run_dir.name}/resume",
+                                    headers=headers)
+            assert duplicate.status_code == 409
+            assert "活跃本地控制器" in duplicate.json()["detail"]
+            release.set()
+
+            for _ in range(50):
+                summary = client.get(f"/api/runs/{run_dir.name}").json()
+                if summary["status"] in ("done", "failed"):
+                    break
+                time.sleep(0.1)
+            assert summary["status"] == "done", summary.get("failed_error")
+    finally:
+        release.set()
+
+    final_events = EventReader(events_path).all()
+    assert sum(event["type"] == "run_resumed" for event in final_events) == 1
+    assert sum(event.get("type") == "node_done" and event.get("node") == "node_a"
+               for event in final_events) == 1

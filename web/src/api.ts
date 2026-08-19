@@ -32,6 +32,9 @@ export const previewWorkflow = (id: string, nodeOverrides: NodeOverrides = {}) =
   });
 export const listRuns = () => get<RunListItem[]>('/api/runs');
 export const getRun = (rid: string) => get<RunSummary>(`/api/runs/${rid}`);
+export const resumeRun = (rid: string) =>
+  req<{ run_id: string; status: string }>(
+    `/api/runs/${encodeURIComponent(rid)}/resume`, 'POST');
 export const deleteRun = (rid: string) =>
   req<{ deleted: string }>(`/api/runs/${encodeURIComponent(rid)}`, 'DELETE');
 
@@ -179,7 +182,8 @@ export const setProviderModels = (pid: string, models: string[]) =>
   req<Provider>(`/api/providers/${pid}/models`, 'PUT', { models });
 
 /** 订阅运行事件流;断线自动用 ?after=<seq> 续听(架构 7.5:先拉全量再续听)。
- * 事件空窗可能掐断连接,所以 onerror 不放弃:重连直到收到终态事件。 */
+ * 事件空窗可能掐断连接,所以 onerror 不放弃:重连直到收到终态事件。
+ * run_interrupted 是非持久控制通知:保留账本游标并明确停止当前订阅。 */
 export function subscribeRun(
   rid: string,
   onEvent: (e: AtlasEvent) => void,
@@ -197,27 +201,47 @@ export function subscribeRun(
     onEnd();
   };
 
+  const handleInterrupted = (source: EventSource) => {
+    if (stopped || es !== source) return;
+    stopped = true;
+    source.close();
+    // 用当前持久游标构造 UI 信号，但绝不把控制通知写回 last。
+    onEvent({ seq: last, ts: '', type: 'run_interrupted' });
+  };
+
   const open = () => {
     if (stopped) return;
-    es = new EventSource(`/api/runs/${rid}/events?after=${last}`);
-    es.onmessage = (ev) => {
+    const source = new EventSource(`/api/runs/${rid}/events?after=${last}`);
+    es = source;
+    source.addEventListener('run_interrupted', () => handleInterrupted(source));
+    source.onmessage = (ev) => {
+      if (stopped || es !== source) return;
       const e = JSON.parse(ev.data) as AtlasEvent;
+      // 兼容短暂的新旧服务端混用；同样不能让旧版 seq:-1 污染游标。
+      if (e.type === 'run_interrupted') {
+        handleInterrupted(source);
+        return;
+      }
       if (e.type === 'stream_closed') {
         // 服务端安全阀关流(慢节点可能长时间无事件):不是终态,重连续听
-        es?.close();
+        source.close();
+        if (es === source) es = null;
         if (!stopped) setTimeout(open, 1000);
         return;
       }
+      if (!Number.isSafeInteger(e.seq) || e.seq <= last) return;
       last = e.seq;
       retries = 0;   // 收到事件说明链路活着,重连预算重置
       onEvent(e);
       if (e.type === 'run_done' || e.type === 'run_failed') finish();
     };
-    es.onerror = () => {
-      es?.close();
-      if (!stopped && ++retries <= MAX_RETRIES) {
+    source.onerror = () => {
+      if (stopped || es !== source) return;
+      source.close();
+      es = null;
+      if (++retries <= MAX_RETRIES) {
         setTimeout(open, Math.min(1000 * 2 ** (retries - 1), 15000));  // 指数退避
-      } else if (!stopped) {
+      } else {
         onEvent({ seq: -1, ts: '', type: 'stream_lost' } as AtlasEvent);
       }
     };

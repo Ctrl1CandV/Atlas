@@ -161,10 +161,19 @@ export interface WorkflowSpec {
   meta?: WorkflowMeta;
 }
 
+export type RunStatus =
+  | 'pending'
+  | 'starting'
+  | 'running'
+  | 'interrupted'
+  | 'paused'
+  | 'done'
+  | 'failed';
+
 export interface RunListItem {
   run_id: string;
   graph: string | null;
-  status: string;
+  status: RunStatus;
   nodes_done: number;
   started: string | null;
 }
@@ -202,7 +211,7 @@ export interface RunNode {
 export interface RunSummary {
   run_id: string;
   graph: string | null;
-  status: string;
+  status: RunStatus;
   nodes_done: string[];
   artifacts: Record<string, { name: string; path: string; sha256: string }>;
   nodes: RunNode[];

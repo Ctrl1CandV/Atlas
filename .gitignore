@@ -1,6 +1,10 @@
 # Credentials and private machine configuration
 config/.env
 .env
+.env.*
+!.env.example
+.mcp.json
+.cursor/
 *.key
 *.pem
 config/providers.json
@@ -19,6 +23,9 @@ runs/
 *.sqlite-wal
 *.sqlite-shm
 *.db
+*.db-wal
+*.db-shm
+*.log
 logs*.txt
 
 # Python
@@ -31,6 +38,9 @@ venv/
 .ruff_cache/
 .mypy_cache/
 .coverage
+.coverage.*
+coverage/
+coverage.xml
 htmlcov/
 build/
 

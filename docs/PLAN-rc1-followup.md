@@ -1,46 +1,57 @@
-# Atlas v0.1.0-rc.1 收尾计划(设计定稿)
+# Atlas v0.1.0-rc.1 收尾计划（当前事实与发布闸门）
 
-状态:**实施中（当前阶段 A：Worktree Runner）**。本文档定稿于 2026-08-18,承接 `.zcode/plans/` 中的
-rc.1 发布准备计划,覆盖从当前代码状态到"可日常使用的首个版本"的全部剩余设计、
-方案与阶段划分。实施过程如需偏离本文,先改本文再改代码。
+状态：**阶段 A、B、C 与精简批次一已于 2026-08-19 在本地收口；首轮 reviewer
+发现的成本、SSE、YAML、resume 准入与文档 blocker 均已修复，最终本地闸门与
+REVIEW-004 独立复核通过。** 本文最初定稿于 2026-08-18，并于 2026-08-19 按当前源码重新审计。
+剩余发布工作是远端 CI、tag、产物上传、provenance 与阶段 D；阶段 D 仍须
+所有者重新确认时点和预算，阶段 E 不在本轮。
+实施过程如需偏离本文，先改本文再改代码。
 
 ---
 
 ## 1. 目的与范围
 
-rc.1 的发布准备(安全守卫、契约、双语文档、CI、发布链)已完成并全量验证。
-本计划补上最后一块能力缺口与配套体验:
+本计划记录 rc.1 从既有工作流引擎到可日常使用版本的最后交付。2026-08-19
+复核确认：A 的生产 agent 后端与安全修订、B1–B5 的功能主体已经落地；C 与
+精简批次一的本地 preview、clean-init、前端测试、sdist smoke 和浏览器验收已经收口，
+首轮 reviewer 指出的成本、SSE、YAML、resume 准入和文档 blocker 已完成修复，
+最终本地闸门与 REVIEW-004 独立复核通过；这不代表远端发布已经完成。
+本文补齐以下能力与证据:
 
 1. **coding/research agent 的真实执行后端**(阶段 A)——所有者已确认:首版必须
    具备在隔离副本内创建、删除、修改文件的能力;
 2. 配套功能与文档批次(阶段 B);
 3. 回归闸门(阶段 C);
-4. 真实花销实测(阶段 D,所有者已授权使用 SuperAI/Kiro/Deepseek);
-5. 后续批次立项(阶段 E,不在本轮实施)。
+4. 真实花销实测（阶段 D，授权保留但执行时点已推迟）；
+5. 后续批次立项（阶段 E，不在本轮实施）。
 
 不在范围:PyPI/wheel 分发、Linux/macOS 支持、多用户认证、Web 远程暴露。
 
-## 2. 现状基线(2026-08-18)
+## 2. 当前基线（2026-08-19 复核）
 
-已实现并验证:
+已实现并已有无付费证据：
 
-- 后端 223 项测试通过(两轮);前端 13 项测试、lint 0 错误、构建成功;
-- 强守卫:成本预留-结算、整图 deadline、审批同步锁 409、run 404、SSE 增量、
-  资源上限全部 fail-loud;
-- 隔离基础设施:worktree 完整拷贝(拒 symlink/junction)、原目录只读、
-  git diff 回收(非零退出码/超限即失败)、产物 sha256 完整性;
-- 演示运行 `20260818-172341-e3850e` 端到端验证:agent 在副本改 3 文件 →
-  diff 工作区逐行展示 → 人工批准 → done;
-- 双语 README、9 章指南、CI(clean-clone/secret 扫描)、release 链
-  (sdist+SHA256+SBOM,不含 PyPI);
-- sdist 干净树扫描:无真实密钥、无本机绝对路径。
+- 显式启用的 Claude `local_cli` 生产 runner；缺配置、CLI、兼容端点、模型或凭据时
+  在创建 run 前 fail-closed；
+- coding agent 冻结源基线，在副本内执行，并比较 baseline/result 的普通文件字节
+  manifest 生成完整文本 unified diff；采集不执行 Git filter/hook/attributes；
+- `PreparedExecution` 冻结 spec、后端和非秘密凭据代际身份；run/approve/resume/delete
+  使用稳定 `.locks` OS 锁；审批绑定 baseline/result/patch 三摘要；
+- agent 成本在有 `max_cost_usd` 时采用持久 reservation 与保守未知费用结算；无 cap
+  不虚构 reservation 或金额；初始化通知采用跨进程 journal/queue/CAS；Web 与 MCP 共用
+  task 和执行预检契约；
+- 最终本地闸门：Python 3.14.6 与隔离 Python 3.12.9 均为 **425 passed、1 skipped、
+  5 real_api deselected**；前端 **22 passed**、lint 0、build 成功；六工作流和 clean-init
+  闸门全绿；最终 sdist **173 条目、0 发现**，Python 3.12 离线安装与六 MCP 工具探针通过。
 
-已知缺口:
+当前发布缺口：
 
-- **agent 生产执行 fail-closed**(无后端):Windows Sandbox 无官方无人值守 API,
-  真 OS 沙箱本轮不可行——阶段 A 以"受控本机 runner"补能力,OS 级强化列入阶段 E;
-- 浏览器矩阵遗留:主题切换、键盘调栏、200% 缩放仅有实现+单测覆盖,未实测;
-- README 产品截图未落盘;release 归档不含已构建前端(使用者仍需 Node)。
+- 首轮 reviewer blocker 已全部修复并通过最终本地闸门与 REVIEW-004 独立复核；
+- 远端 GitHub Actions 尚未运行，tag 尚未创建，发布产物、校验和、SBOM 与 provenance
+  尚未上传/验证，下载后 smoke 也待发布后执行；
+- 阶段 D 真实供应商调用尚未授权启动；
+- 浏览器矩阵遗留：主题切换、键盘调栏、200% 缩放仍未实测；
+- README 产品截图未落盘；release 归档不含已构建前端（使用者仍需 Node）。
 
 工具链决定(已确认):uv 必须;Git 必须;Node ≥22.12 + npm 仅在需要构建
 `web/dist` 时必须(源码 clone 与 sdist 均不含 dist)。纯使用者免 Node 的
@@ -50,17 +61,19 @@ release 归档列入阶段 E。
 
 | 阶段 | 内容 | 规模 | 依赖 |
 |---|---|---|---|
-| A | Worktree Runner(agent 执行后端) | L | 无 |
-| B1 | 删除运行记录(API+UI) | S | 无 |
-| B2 | 首次启动自动初始化 + `atlas init` | S | 无 |
-| B3 | allow_web 在节点详情可见(YAML 为真相) | S | A 语义落地后更有意义,可并行 |
-| B4 | MCP harness 接入文档 | S | 无 |
-| B5 | skill 边界章节更新 | S | A |
-| C | 全量回归 + 发布闸门 | M | A、B1–B5 |
-| D | 真实花销实测(SuperAI/Kiro/Deepseek) | M | C 全绿 + 所有者预算确认 |
-| E | 后续批次(见 §8) | — | D 之后 |
+| A | Worktree Runner（agent 执行后端） | L | **实现完成** |
+| B1 | 删除运行记录（API+UI） | S | **实现完成，C 中补交互证据** |
+| B2 | 首次启动自动初始化 + `atlas init` | S | **实现完成，C 中补 clean-checkout** |
+| B3 | allow_web 在节点详情可见（YAML 为真相） | S | **完成** |
+| B4 | MCP harness 接入文档 | S | **完成** |
+| B5 | skill 边界章节更新 | S | **完成** |
+| C | 全量回归 + 发布闸门 | M | **本地收口且 REVIEW-004 通过；远端 CI 待 push** |
+| D | 真实花销实测（SuperAI/Kiro/Deepseek） | M | **精简批次一已本地全绿；待所有者重新确认时点与预算** |
+| E | 后续批次（见 §8） | — | 本轮不实施 |
 
-实施顺序:A → B1 → B2 → B3 → B4 → B5 → C → D。E 仅立项不实施。
+当前实施顺序：C 与精简批次一（P0min + P1 + P6）已本地收口且独立复核通过 →
+运行远端 CI，并完成 tag/upload/provenance → 所有者重新确认后执行 D → 发布 v0.1.0 →
+保留的发布后优化与阶段 E 并轨。D/E 未在本轮执行。
 
 ---
 
@@ -74,9 +87,10 @@ release 归档列入阶段 E。
 
 边界等级声明:**目录隔离 + 进程约束,不是 OS 级沙箱。**
 
-- 消除的风险:原项目目录被写(副本隔离)、无关环境变量与多余密钥泄漏
-  (显式 allowlist)、无界网络工具(allow_web 默认关)、无界文件访问
-  (cwd 锁定 + allowed_paths)、不可审计的改动(git diff + sha256)。
+- 降低的风险：原项目目录被写（副本隔离）、无关环境变量与多余密钥泄漏
+  （显式 allowlist）、默认开放 WebSearch/WebFetch（`allow_web` 默认关）、
+  不可审计的改动（冻结 baseline/result 普通文件字节 manifest + SHA-256）。
+  `workdir`、`allowed_paths` 与工具清单都不是 OS 访问控制边界。
 - 残留的风险(明示):agent 进程以当前用户权限运行,理论上仍可读取宿主
   用户目录;这是 v1 为换取能力接受的取舍,由所有者签字接受。
 - 绝不回退的既有红线:runner 未启用/CLI 缺失/供应商不兼容时**显式失败**,
@@ -102,7 +116,8 @@ release 归档列入阶段 E。
 - `runner: "local_cli"`:启用本机 CLI 后端;
 - `cli.kind` v1 仅 `"claude"`(Anthropic `claude` CLI);其他值显式报
   "未知 CLI 后端";
-- `command` 可覆盖为绝对路径;`extra_args` 透传(文档标注风险自担)。
+- `command` 可覆盖为绝对路径；`extra_args` 仅允许经过审计的安全白名单
+  （当前仅 `--verbose`），会改变模型、权限、输出格式或执行边界的参数一律拒绝。
 
 供应商兼容性契约:agent 节点的 `model: <provider>:<model_id>` 必须解析到
 **暴露 Anthropic 兼容端点**的供应商(claude CLI 走 `ANTHROPIC_BASE_URL`/
@@ -113,20 +128,23 @@ release 归档列入阶段 E。
 
 1. **前置校验**(花钱/落盘之前,复用既有 `validate_executable_spec` 门):
    agents.json 配置合法、CLI 在 PATH、模型解析成功、供应商端点兼容;
-2. coding_agent:复用既有 `_prepare_worktree`(完整拷贝含 .git、体积上限、
-   symlink 拒绝);research:无 workdir,只读运行;
+2. writable coding agent 在真正执行前复核源 HEAD/index/clean，冻结一次 baseline，
+   每次 retry 只从该 baseline 派生副本；普通文件枚举拒绝 reparse point、hardlink、
+   ADS/设备名/大小写冲突等危险形态；research 无用户 workdir，以只读工具运行；
 3. 投影附件(task + 声明的上游产物)写入临时 prompt 文件;
 4. 子进程启动:
    - `cwd` = worktree(或 research 时的空临时目录);
    - 环境为**显式 allowlist**:仅注入所选供应商的密钥变量与 base_url、
      必要的 PATH/SYSTEMROOT/TEMP 等系统变量;不继承其余 `os.environ`;
-   - `--model <model_id>`;`max_turns` 映射 CLI 对应参数;
-   - `allow_web: false`(默认):CLI 工具配置禁用 WebSearch/WebFetch;
-     `allow_web: true`:放行;`allowed_paths` 传入 CLI 的权限配置;
+   - `--model <model_id>`；当前 Claude CLI 没有硬 `max_turns` 参数，该字段仅作为
+     已校验规格元数据，硬边界来自节点/整图 deadline 与可用预算；
+   - `allow_web: false`（默认）不授予 WebSearch/WebFetch；`true` 才授予；
+     `allowed_paths` 仅允许 research 或 `writable: false` 的 coding agent 使用，
+     通过 `--add-dir` 提供附加目录，但它不是只读或安全隔离边界；
    - 超时 = min(节点 timeout_s, 图剩余 deadline),子进程超时即终止并失败;
-5. 输出契约(复用既有实现):退出码非零一律失败(stdout 摘要入失败账本);
-   stdout 作为执行报告产物落盘;writable 节点回收 git diff(既有
-   `_collect_diff`,非零/超限失败);
+5. 输出契约：退出码非零一律失败（脱敏 stdout/stderr 摘要进入失败账本）；
+   stdout JSON 中的报告作为产物落盘；writable 节点比较冻结 baseline/result 的
+   普通文件字节 manifest，生成完整文本 unified diff；二进制与资源超限 fail-loud；
 6. 事件标记:`node_started`/`node_done` 增加 `runner: "local_cli"` 字段,
    NodeDetail 显示"本机受控执行(目录隔离)";成本/预算走既有预留-结算。
 
@@ -154,18 +172,18 @@ SECURITY.md 边界措辞、README/README.zh-CN"当前不能执行"章节、指�
 
 ### B1 删除运行记录
 
-- `DELETE /api/runs/{rid}`:仅允许终态(`done`/`failed`);
-  `paused`(待审批)与 `running` 拒绝并说明原因;RUN.lock 存在且未过期时拒绝;
-  删除整个 run 目录(artifacts/projections/checkpoint/worktrees);
+- `DELETE /api/runs/{rid}`：仅允许终态（`done`/`failed`）；`paused` 与
+  `running` 拒绝；所有运行操作共用 `runs/.locks/<rid>.lock` 的稳定 OS 锁，
+  绝不按 mtime/TTL 抢占；删除先同卷 rename 为 tombstone，再 no-follow 清理；
 - UI:运行记录条目加删除按钮 + 确认弹窗;设置区加"清理全部已完成"
   (逐条套用同一 API,汇总结果);
 - 测试:终态可删、paused 拒绝、锁保护、目录确实消失、SSE/列表刷新。
 
 ### B2 首次启动自动初始化
 
-- `atlas.web`/`atlas.mcp` 启动时:providers/capabilities/pricing/
-  models.reference 四个真实 JSON 缺失且对应 example 存在 → 从 example
-  复制;`config/.env` 缺失 → 写入注释模板(来自 .env.example);
+- `atlas.web`/`atlas.mcp`/`atlas init` 启动时：providers、models.reference、
+  capabilities、pricing、agents 五个 JSON 与 `.env` 缺失且模板存在时，按模板
+  原子 create-if-absent；`agents.json` 默认 `runner: fail_closed`；
   **任何已存在文件一律不动**;
 - Web 设置页在发生过初始化时显示一次性提示"已从模板初始化默认配置";
 - 新增 `atlas init` 控制台命令:执行同样动作并打印结果与下一步指引;
@@ -196,7 +214,7 @@ SECURITY.md 边界措辞、README/README.zh-CN"当前不能执行"章节、指�
 - `skill/SKILL.md`:"RC agent boundary" 节改写为 Worktree Runner 事实
   (可执行、边界等级、allow_web、供应商兼容要求);
 - 六个示例清单中 code-change 条目去掉"preview-only"标注;
-- 保持无本机路径、五工具语义不变。
+- 保持无本机路径；当时为五工具语义（历史记录）。当前 P1 新增 `atlas_resume_run` 后为六工具。
 
 ---
 
@@ -211,10 +229,15 @@ SECURITY.md 边界措辞、README/README.zh-CN"当前不能执行"章节、指�
 6. 更新 RELEASE_CHECKLIST 与 CHANGELOG;
 7. 输出闸门结果;任何失败项修复后重跑对应项。
 
-## 7. 阶段 D:真实花销实测(授权已获)
+## 7. 阶段 D：真实花销实测（授权保留，执行已推迟）
 
-前置:A–C 全绿,且所有者再次确认预算上限(默认总帽 **$2.00**,
-单 run `guards.max_cost_usd` ≤ $0.50,可由所有者上调)。
+所有者于 2026-08-19 决定并同日收窄：阶段 D 在 `PLAN-benchmark-optimizations.md`
+**精简批次一（P0min + P1 + P6，约 13–20 人日：最小 LLM 预留持久化、崩溃恢复/
+`interrupted` 产品入口、YAML 语义错误行列）全绿后**启动；P2/P3/P4/P7/P9/P10/
+P11/P13 与阶段 E 一样延后到 v0.1.0 发布后按需实施，P5/P8/P12/P14 已移除。
+启动 D 时仍需所有者重新确认时点和预算，
+并坚持每条真实运行先 preview/dry-run。历史建议帽为总计 **$2.00**、单 run
+`guards.max_cost_usd` ≤ $0.50；它不是本轮授权。
 
 流程(每条 run 先 preview/dry_run,红线):
 
@@ -233,7 +256,7 @@ SECURITY.md 边界措辞、README/README.zh-CN"当前不能执行"章节、指�
 
 | 项 | 一句话设计 | 前置 |
 |---|---|---|
-| llm 节点 web_search | 供应商 tool-calling + 可插拔搜索后端(Brave/Tavily,可选 key,无 key 即功能关闭并明示);结果带来源落产物;条数与成本上限;allow_web 运行时覆盖一并评估 | D 结论 |
+| llm 节点 web_search | 供应商 tool-calling + 可插拔搜索后端；结果带来源落产物；条数与成本上限；allow_web 运行时覆盖一并评估 | benchmark 核心阶段与 D 结论 |
 | release 归档含已构建前端 | release 工作流归档时附 `web/dist`,纯使用者免 Node;Git 仍不含 dist | 无 |
 | 运行报告打包 | run 导出自包含 HTML(时间线+产物+diff+成本+完整性哈希)或 ZIP+manifest;可选 llm 叙述摘要 | D 之后调研出 RFC |
 | OS 级沙箱强化 | Windows Sandbox(.wsb 脚本化)或 WSL 后端调研,替换/并列 local_cli | A 落地后 |
@@ -257,7 +280,10 @@ SECURITY.md 边界措辞、README/README.zh-CN"当前不能执行"章节、指�
 | 2026-08-18 | 首次启动自动初始化配置,quickstart 去 Copy-Item | 所有者要求简化 |
 | 2026-08-18 | llm 节点联网搜索放后续批次;v1 仅落实 agent 的 allow_web 语义与可见性 | 所有者同意分两步 |
 | 2026-08-18 | MCP 以 harness 配置片段接入,不改 server | 所有者建议 |
-| 2026-08-18 | 授权 SuperAI/Kiro/Deepseek 真实花销实测,排在全部修正之后 | 所有者授权 |
+| 2026-08-18 | 授权 SuperAI/Kiro/Deepseek 真实花销实测，排在全部修正之后 | 所有者授权 |
+| 2026-08-19 | 阶段 D 推迟到 benchmark 计划的核心能力完成之后；本轮不执行 D/E | 所有者决定 |
+| 2026-08-19 | 收窄 benchmark：D 前只实施 P0min + P1 + P6（约 13–20 人日）；P2/P3/P4/P7/P9/P10/P11/P13 发布后按需实施；P5/P8/P12/P14 移除 | 所有者决定 |
+| 2026-08-19 | `allowed_paths` 仅允许不可写 agent；`--add-dir` 不冒充只读边界 | 当前 Claude CLI 契约与安全复核 |
 
 ## 11. 实施记录
 
@@ -343,11 +369,56 @@ SECURITY.md 边界措辞、README/README.zh-CN"当前不能执行"章节、指�
 - 最终裁决：**通过**（REVIEW-003 关闭）。重要②确认关闭，上轮全部已关闭项无回归，无新的致命/重要发现。阶段 C 发布闸门与阶段 D 前置中的"独立复核"要求就 REVIEW-003 而言已满足；D 仍须待所有者预算确认与 preview/dry-run 红线。
 - 回流：memory-keeper 核验本记录与关闭状态归档。
 
+### REVIEW-004 · 2026-08-19 · 发布前实施复盘（reviewer）
+- 审查对象：实施结果（P0min、P1、P6、首轮发布 blocker 修复与最终发布闸门）。
+- 产出复述：有成本帽的未知费率 LLM attempt 在派发前保守预留全部剩余额度；SSE 控制通知不污染持久游标并拒绝旧连接迟到回调；YAML 拒绝重复键、anchor/alias/merge、资源炸弹与非法 Unicode；resume 在权威锁内先判持久状态再准备后端；发布工作流、sdist 扫描、harness 忽略规则和文档合同已同步。
+- 四维结果：正确性、完整性、回归性与优越性均通过；未发现可复现的致命或重要发布 blocker。
+- 已验证：同一工作树下 Python 3.14.6 与隔离 Python 3.12.9 均 425 passed、1 skipped、5 real_api deselected；前端 22 passed、lint 0、build 成功；六工作流离线闸门与 clean-init 全绿；sdist 173 条目、0 发现，Python 3.12 离线安装与六 MCP 工具探针通过。
+- 问题汇总：无致命/重要问题。远端 GitHub Actions、受保护 release environment、tag、上传、SHA256SUMS、SBOM、provenance 与下载后验证仍属于尚未执行的操作性闸门；阶段 D 仍未授权。
+- 决策路径：无需回流。
+- 最终裁决：**GO，可进入远端 RC 发布流程**；不得在远端闸门完成前宣称发布完成，也不得自动启动阶段 D。
+- 回流：developer 形成可复现提交并推送；远端闸门结果再同步检查单。
+
 ### 2026-08-19 · 阶段 A/B 修复 · REVIEW-003 关闭里程碑（developer）
 - 实际改动：REVIEW-002/003 全部 blocker 经三轮路径 A 修复关闭——`2c30560`（审批投影证据交叉验证 + LLM credentialRevision）、`5cd4c5d`（diff 补丁 git 惯例头，修复前端 0 文件解析）、`fc190ae`（diff 校验触发锚改投影证据、role 降级/伪造 sha256 拒绝）、`56be2fe`（投影证据键集完整覆盖、consumed 摘除/改名拒绝）。仓库初始化为本地 Git（`9d1ed48` 基线，白名单审计 163 文件 0 禁项），5 commit 归因链完整。
 - 验证证据：后端 331 passed/1 skipped/5 real_api deselected；前端 16 passed/lint 0/build 成功；sdist 重建 161 文件禁项 0、绝对路径 0；浏览器验收：diff 工作区三文件渲染、审批条、fail-closed 错误展示、守卫计入成本显示、初始化提示确认；HTTP 删除含 tombstone。REVIEW-003 最终关闭复核独立红队 19/19 断言通过。
 - 计划偏差：无。阶段 C 的"独立复核"要求已满足；阶段 D 待所有者预算确认。
 - 遗留问题：次要①consumed 追加/重复条目可造成 approved 列表冗余（无证据丢失，后续批次）；credentialRevision 离线猜测与账本无哈希链为已裁定残余边界。
+
+### 2026-08-19 · 阶段 C · 本地发布闸门关闭（developer）
+
+- 实际改动：
+  - `allowed_paths` 契约固化为三层拒绝（YAML/spec 结构校验、快照恢复校验、生产 preflight/runner 纵深），并修正 `NodeSpec.allow_web` 注释漂移（默认关）；六个用户可见表面（README×2、SECURITY、skill、指南 concepts/safety）同步，文档契约测试锁定。
+  - 新增三个共享无付费发布闸门脚本并由 CI/release 共用：`scripts/release_workflow_gate.py`（严格六图 validate+dry-run：显式假模型覆盖、6 次 registry/6 次 runner 预检计数、`execution_sha256` 非空、0 供应商调用、0 agent 调用、0 run 目录、网络审计钩子）、`scripts/release_clean_init_gate.py`（无 active config 起、两次真实 `atlas init`、模板逐字节、二次幂等、`agents.runner=fail_closed`、MCP stdout 0 字节）、`scripts/release_sdist_gate.py`（168 项归档扫描含禁项/占位符/私有路径、Python 3.12 离线安装完整锁定依赖、核心模块导入、最小 spec 解析、五 MCP 工具、配置初始化）。
+  - CI/release 工作流删除手工 active config 复制与重复 web 安装/构建，前端闸门改为完整 `npm test`/lint/build 一次；Hatch 排除清单扩充（agents.json、初始化状态、缓存、构建产物、密钥类文件）。
+  - B1/B3 前端可重放测试：`runCleanup.ts`（删除当前 run 后取消订阅→清空详情/事件/选中/工作区→回观测台→刷新列表的受测顺序）、`nodeDetailPresentation.ts`（runner/allow_web/同用户非 OS 沙箱边界文案），App/Settings 接线，单条删除等待清理完成；21 项前端测试。
+  - MCP 工具文档撤回“错误带行号”的过度承诺（行列定位属 benchmark P6）。
+- 验证证据（同一工作树，未提交，基于 HEAD `8c71b6b`）：
+  - `uv lock --check` 通过；`compileall atlas scripts` 通过。
+  - `uv run pytest`（Python 3.14.6）：**343 passed, 1 skipped, 5 real_api deselected**；`uv run --isolated --python 3.12 pytest`（Python 3.12.9）：**343 passed, 1 skipped, 5 deselected**。
+  - `uv run python scripts/release_workflow_gate.py`：6/6 通过，registry/runner 预检各 6，provider_calls=0，agent_calls=0，run_directories=0。
+  - `uv run python scripts/release_clean_init_gate.py`：两次 init 退出码 0，六文件逐字节一致，幂等，fail_closed，MCP stdout 0 字节。
+  - `uv build --sdist` + sdist gate：当时归档 168 条目、0 发现；Python 3.12 离线安装锁定依赖成功，版本/入口/当时五工具（P1 前历史证据）/spec 解析/初始化全部通过。此数字仅为该次历史重建，不作为当前最终发布条目数。
+  - 前端：`npm test` 21 passed、oxlint 0/0、build 成功（仅既有 chunk 大小提示）。
+  - 浏览器 GUI 验收（隔离临时数据+假 runner，无供应商调用）：①implementer 详情执行后端/同用户非 OS 沙箱/allow_web 关闭/联网边界 + diff 工作区（1 文件 +1/−1、sha256 校验、文件树、逐行 old→fixed）DOM+截图证据通过；②gui-paused 审批材料（四项消费产物哈希校验、三摘要 prompt、批准/驳回+必填说明）DOM 证据通过——截图通道在会话后段故障，视觉证据不可用，如实记录；③单条删除确认→取消保持选中、确认→列表移除/详情清空/URL 回 `#/observe`、暂停态无删除按钮；④设置页批量清理遇真实 OS 锁：`已清理 1 条，失败 1 条：gui-locked 正被其他操作占用(.locks)`。
+  - 隔离测试数据与临时服务已全部删除。
+- 计划偏差：远端 GitHub Actions、tag `v0.1.0-rc.1`、发布产物上传与 provenance 未执行（本地仅验证工作流 YAML 与共享脚本）；fresh-clone README 全程走查未做（以 clean-init gate + sdist 冒烟覆盖其自动化部分）——RELEASE_CHECKLIST 中对应项保持未勾。阶段 D 按所有者决定推迟。
+- 遗留问题：无新增致命/重要。GUI 验收测试点②③④的截图证据缺失（工具通道故障，DOM 证据完整）。
+- 补充（同日）：补做 fresh-source README 全路径走查——隔离复制当前树（剔除 .venv/node_modules/.git/runs/dist/活动配置）后按 README 执行 `uv sync --locked --all-groups`（73 包）、`npm --prefix web ci`（0 漏洞）、`npm --prefix web run build`；升级路径二次 sync 幂等；`python -m atlas.web` 服务 `/api/workflows` 返回 200/6 工作流，六个活动配置由真实入口自动创建且 `agents.runner=fail_closed`。RELEASE_CHECKLIST 对应项已勾。至此阶段 C 的全部本地项收口；仅剩远端 CI、tag 与发布产物上传（等待所有者 push 决定）。
+
+### 2026-08-19 · benchmark 精简批次一（P0min + P1 + P6）· 本地关闭
+
+- 实际改动：LLM 在存在 `max_cost_usd` 时按 projected 预留；费率未知时调用 `reserve_remaining` 预留全部剩余额度，并持久化独立 `cost_reserved`，以同一 reservation id 结算 actual/accounted/unknown/usage；未知费用和崩溃窗口按预留额保守占用。无 cap 时不创建 reservation、不写预留事件或虚构金额。新增动态 `interrupted` 状态、Web 恢复按钮与 `POST /api/runs/{rid}/resume`、MCP `atlas_resume_run`；Web/MCP 共享 `derive_run_status` 与领域级锁内 resume 准入，恢复在稳定 OS run lock 内复核事件状态、规格快照、完整执行身份和 checkpoint，paused/终态/活跃运行均拒绝且不追加账本。共享 launcher、MCP 异步与同构 summary 未纳入 P1，留给发布后 P4。YAML 解析增加 parse-local 路径到 mark 旁路表，`SpecError` 统一携带 path/一基 line/column，位置不进入快照或指纹。
+- 故障修复：真实 Windows 子进程强杀暴露 SQLite WAL 句柄退出后的短暂 `SQLITE_IOERR_TRUNCATE`。恢复准入仅在已经持有权威 run lock 时，对该明确瞬态错误及 busy/locked 做有界的新连接重试；不删除 WAL/SHM，不重试 CORRUPT/NOTADB/其他 I/O 错误，损坏 checkpoint 继续 fail-closed。
+- 验证证据：Python 3.14.6 与隔离 Python 3.12.9 均为 **374 passed、1 skipped、5 real_api deselected**；真实子进程强杀恢复连续三次通过，已完成节点没有重跑，事件 seq 单调且有 cap 的 reservation 重放保守；无 cap 不生成 reservation/金额的分支有回归。Web/MCP 跨入口、paused/终态/重复恢复拒绝、YAML 行列返回均有回归。前端 21 passed、oxlint 0/0、build 成功。六工作流离线闸门 6/6、0 provider/agent 调用、0 run 目录；clean-init 两次成功且幂等；当时重建的 sdist 扫描为 0 发现，Python 3.12 离线安装、核心导入、六 MCP 工具、spec 解析和配置初始化通过。此后仍有文件变化，最终条目数以发布前最终重建扫描结果为准，不沿用旧数字。
+- 未执行事项：未读取真实密钥，未调用真实供应商或产生付费；远端 GitHub Actions、tag、上传与 provenance 未执行。阶段 D 不因本地前置收口而自动启动，仍须所有者重新确认时点、预算，并逐条先 preview/dry-run。本轮 reviewer 文档 blocker 正在修复，待最终复核，不能据此宣称最终完成。
+
+
+### 2026-08-19 · 文档事实漂移 blocker · 修复进行中
+- 实际改动：校正 P0min cap/reservation 分支、P1 已完成边界、P3/P8 关系、真实 agent 结果说明、阶段 C/精简批次/剩余发布工作、B5 五→六工具历史口径与最终 sdist 口径；仅修改文档。
+- 验证证据：`uv run pytest tests/test_docs_agent_contract.py tests/test_mcp_docs_contract.py tests/test_release_gates.py` 为 32 passed；目标文档 `git diff --check` 通过；陈旧事实扫描无命中（保留的命中均是否定“最终完成”或明确留给 P4 的正确表述）。reviewer 最终复核尚未发生。
+- 计划偏差：无功能范围变化；只纠正文档事实漂移。本文已超过 400 行，已触发膨胀阈值，回流 project-planner 评估是否拆分后继 PLAN，本轮不自行拆分。
+- 遗留问题：developer 修复与自审已完成，reviewer blocker 仍待最终复核，不能宣称最终关闭；远端 CI、tag、upload、provenance 与阶段 D 尚未执行。
 
 ## 13. 计划修订
 

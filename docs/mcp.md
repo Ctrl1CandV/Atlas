@@ -1,8 +1,8 @@
 # MCP harness setup / MCP harness 接入
 
-Atlas exposes its five MCP tools over stdio. Configure the server in your harness so it starts and stops with the client; running it manually remains supported.
+Atlas exposes its six MCP tools over stdio. Configure the server in your harness so it starts and stops with the client; running it manually remains supported. `atlas_resume_run` resumes only a dynamically confirmed interrupted run; a paused human gate must still be approved or rejected in Web.
 
-Atlas 通过 stdio 暴露五个 MCP 工具。建议把 server 配置进 harness，由客户端按需启动和停止；仍可保留手动启动方式。
+Atlas 通过 stdio 暴露六个 MCP 工具。建议把 server 配置进 harness，由客户端按需启动和停止；仍可保留手动启动方式。`atlas_resume_run` 只恢复动态确认的 interrupted 运行；暂停在 human gate 的运行仍必须在 Web 中批准或驳回。
 
 All three configurations below represent the same command:
 
@@ -34,9 +34,9 @@ Add the server to the workspace file `.zcode/config.json`, or use the same `mcp.
 }
 ```
 
-Restart the session, then check **Settings → MCP** for the `atlas` connection and its five tools.
+Restart the session, then check **Settings → MCP** for the `atlas` connection and its six tools.
 
-重启会话后，在 **Settings → MCP** 检查 `atlas` 连接及五个工具。
+重启会话后，在 **Settings → MCP** 检查 `atlas` 连接及六个工具。
 
 ## Claude Code
 

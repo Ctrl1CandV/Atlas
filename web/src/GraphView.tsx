@@ -20,6 +20,7 @@ import {
 import {
   CheckCircle,
   CircleNotch,
+  PauseCircle,
   WarningCircle,
 } from '@phosphor-icons/react';
 import { getLoopBackGeometry } from './loopBackGeometry';
@@ -35,6 +36,7 @@ type AtlasNodeData = {
   thinking?: string | null;
   isEnd: boolean;
   run?: RunNode;
+  runInterrupted?: boolean;
 };
 
 type AtlasFlowNode = Node<AtlasNodeData, 'atlas'>;
@@ -46,12 +48,16 @@ function StatusIcon({ status }: { status: string }) {
     return <CheckCircle size={12} weight="fill" />;
   if (status === 'failed')
     return <WarningCircle size={12} weight="fill" />;
+  if (status === 'interrupted')
+    return <PauseCircle size={12} weight="fill" />;
   return null;
 }
 
 function AtlasNode({ data }: NodeProps<AtlasFlowNode>) {
-  const { run, model, thinking, isEnd, id } = data;
-  const status = isEnd ? 'end' : (run?.status ?? 'pending');
+  const { run, model, thinking, isEnd, id, runInterrupted } = data;
+  const status = isEnd
+    ? 'end'
+    : (runInterrupted && run?.status === 'running' ? 'interrupted' : (run?.status ?? 'pending'));
   const degraded = run?.degraded;
   const truncated = run?.output_truncated;
   const attempts = run?.attempts?.length ?? 0;
@@ -121,6 +127,7 @@ function AtlasNode({ data }: NodeProps<AtlasFlowNode>) {
       {!isEnd && (
         <div className="atlas-node-meta num">
           {status === 'running' && '执行中…'}
+          {status === 'interrupted' && '控制器已中断'}
           {status === 'done' && run?.duration_s !== undefined && `${run.duration_s.toFixed(1)}s`}
           {status === 'done' && run?.output_tokens != null && ` · ${run.output_tokens.toLocaleString()} tok`}
           {status === 'failed' && '失败'}
@@ -207,11 +214,12 @@ function minimapNodeColor(n: Node, theme: 'dark' | 'light'): string {
 }
 
 export function GraphView({
-  nodes, edges, runNodes, selected, onSelect, maxIterations, theme,
+  nodes, edges, runNodes, runStatus, selected, onSelect, maxIterations, theme,
 }: {
   nodes: WFNode[];
   edges: WFEdge[];
   runNodes: Record<string, RunNode>;
+  runStatus?: string;
   selected: string | null;
   onSelect: (id: string) => void;
   maxIterations?: number | null;
@@ -256,7 +264,7 @@ export function GraphView({
         data: {
           id, model: isEnd ? '' : (nodes.find((n) => n.id === id)?.model ?? ''),
           thinking: nodes.find((n) => n.id === id)?.thinking,
-          isEnd, run: runNodes[id],
+          isEnd, run: runNodes[id], runInterrupted: runStatus === 'interrupted',
         },
         selected: selected === id,
       };
@@ -318,7 +326,7 @@ export function GraphView({
       };
     });
     return { flowNodes, flowEdges };
-  }, [nodes, edges, runNodes, selected, backEdges, maxIterations]);
+  }, [nodes, edges, runNodes, selected, backEdges, maxIterations, runStatus]);
 
   return (
     <ReactFlow

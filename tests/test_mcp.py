@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""MCP 五工具:全部走内部实现(与工具封装同一份代码),假供应商,零花费。"""
+"""MCP 六工具:全部走内部实现(与工具封装同一份代码),假供应商,零花费。"""
+import json
 import shutil
 from pathlib import Path
 
@@ -112,7 +113,7 @@ def test_run_failure_visible(env):
 
 
 def test_tool_wrappers_registered():
-    # 5 个工具都注册上了(MCPServer 2.x;M6 增加 save)
+    # 6 个工具都注册上了；resume 只接受动态 interrupted 运行。
     import asyncio
     from mcp.server.mcpserver.server import MCPServer
 
@@ -121,4 +122,109 @@ def test_tool_wrappers_registered():
     names = {t.name for t in asyncio.run(tools())}
     assert names == {"atlas_validate_workflow", "atlas_save_workflow",
                      "atlas_run_workflow", "atlas_list_workflows",
-                     "atlas_get_run"}, names
+                     "atlas_get_run", "atlas_resume_run"}, names
+
+
+def test_validate_and_save_errors_remain_strings_with_source_location(env):
+    bad_yaml = (
+        "name: bad\nnodes:\n  - id: a\n    type: magic\n"
+        "    model: Fake:x\n    prompt: p\n    consumes: [task]\n")
+    expected = "path nodes[0].type, line 4, column 5"
+
+    validation = m.validate_workflow_impl(yaml_text=bad_yaml)
+    assert validation["valid"] is False
+    assert isinstance(validation["error"], str)
+    assert expected in validation["error"]
+
+    saved = m.save_workflow_impl(
+        "bad-location", bad_yaml, workflows_dir=env["workflows"])
+    assert saved["saved"] is False
+    assert isinstance(saved["error"], str)
+    assert expected in saved["error"]
+    assert not (env["workflows"] / "bad-location.yaml").exists()
+
+
+def test_summarize_run_reports_interrupted_but_held_lock_reports_running(env):
+    from atlas.engine import acquire_run_lock, release_run_lock
+
+    run_id = "dynamic-run"
+    run_dir = env["runs"] / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "events.jsonl").write_text(
+        json.dumps({"seq": 1, "ts": "t", "type": "run_started",
+                    "run_id": run_id, "graph": "demo"}) + "\n",
+        encoding="utf-8")
+
+    assert m.summarize_run(run_id)["status"] == "interrupted"
+    acquire_run_lock(run_id, runs_root=env["runs"])
+    try:
+        assert m.summarize_run(run_id)["status"] == "running"
+    finally:
+        release_run_lock(run_id, runs_root=env["runs"])
+
+
+def test_resume_run_impl_rejects_invalid_missing_paused_and_done(env):
+    from conftest import load_graph, standard_fake
+    from atlas.engine import execute_graph, prepare_execution
+
+    with pytest.raises(ValueError, match="id 只允许"):
+        m.resume_run_impl("../invalid")
+
+    fake = standard_fake(100)
+    registry = make_registry(fake)
+    paused_spec = load_graph("human_gate")
+    paused = execute_graph(
+        paused_spec, task=TASK_TEXT, runs_root=env["runs"],
+        prepared=prepare_execution(paused_spec, registry))
+    assert paused.status == "paused"
+
+    done_spec = load_graph("two_node")
+    done = execute_graph(
+        done_spec, task=TASK_TEXT, runs_root=env["runs"],
+        prepared=prepare_execution(done_spec, registry))
+    assert done.status == "done"
+
+    def forbidden_factory(_):
+        raise AssertionError("终态 resume 不得预检当前后端")
+
+    missing = m.resume_run_impl("missing-run", registry_factory=forbidden_factory)
+    paused_error = m.resume_run_impl(paused.run_id, registry_factory=forbidden_factory)
+    done_error = m.resume_run_impl(done.run_id, registry_factory=forbidden_factory)
+
+    for result in (missing, paused_error, done_error):
+        assert isinstance(result["error"], str)
+    assert "不存在(没有 events.jsonl)" in missing["error"]
+    assert "paused" in paused_error["error"]
+    assert "done" in done_error["error"]
+
+
+def test_resume_run_impl_completes_interrupted_checkpointed_run(env):
+    from atlas.adapters import AllCandidatesFailed
+    from atlas.engine import execute_graph, prepare_execution
+    from atlas.events import EventReader
+    from conftest import load_graph, standard_fake
+
+    spec = load_graph("three_node")
+    fake = standard_fake(100)
+    fake.configure("third", transport_error="simulated process loss")
+    registry = make_registry(fake)
+    prepared = prepare_execution(spec, registry)
+    with pytest.raises(AllCandidatesFailed):
+        execute_graph(spec, task=TASK_TEXT, runs_root=env["runs"],
+                      prepared=prepared)
+    run_dir = next(env["runs"].glob("*/events.jsonl")).parent
+    events_path = run_dir / "events.jsonl"
+    events = EventReader(events_path).all()
+    assert events[-1]["type"] == "run_failed"
+    events_path.write_text(
+        "".join(json.dumps(event, ensure_ascii=False) + "\n"
+                for event in events[:-1]), encoding="utf-8")
+    fake.configure("third", text="recovered")
+
+    resumed = m.resume_run_impl(
+        run_dir.name, registry_factory=lambda _: registry)
+    assert resumed["status"] == "done", resumed.get("failed_error")
+    final_events = EventReader(events_path).all()
+    assert sum(event["type"] == "run_resumed" for event in final_events) == 1
+    assert sum(event.get("type") == "node_done"
+               and event.get("node") == "node_a" for event in final_events) == 1

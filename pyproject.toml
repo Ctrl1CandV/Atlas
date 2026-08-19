@@ -41,7 +41,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.sdist]
@@ -77,17 +77,34 @@ include = [
 ]
 exclude = [
     "**/.git/**",
+    "**/.zcode/**",
+    "**/.cursor/**",
+    "**/.mcp.json",
     "**/__pycache__/**",
-    "/.zcode",
+    "**/.pytest_cache/**",
+    "**/.ruff_cache/**",
+    "**/.mypy_cache/**",
+    "**/node_modules/**",
+    "**/*.egg-info/**",
+    "**/*.py[cod]",
+    "**/*.key",
+    "**/*.pem",
+    "**/*.sqlite*",
+    "**/*.db",
+    "/.coverage",
+    "/.venv",
+    "/venv",
+    "/build",
+    "/dist",
     "/config/.env",
     "/config/providers.json",
     "/config/models.reference.json",
     "/config/capabilities.json",
     "/config/pricing.json",
     "/config/agents.json",
+    "/config/.atlas-init-*",
     "/runs",
     "/web/dist",
-    "*.pyc",
 ]
 
 [tool.hatch.build.targets.wheel]

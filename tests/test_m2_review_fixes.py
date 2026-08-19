@@ -25,6 +25,27 @@ from atlas.spec import SpecError, spec_from_snapshot, spec_to_snapshot
 from conftest import TASK_TEXT, load_graph, make_registry
 
 
+def test_snapshot_rejects_writable_coding_agent_with_allowed_paths(tmp_path):
+    project = tmp_path / "project"
+    extra = tmp_path / "extra"
+    project.mkdir()
+    extra.mkdir()
+    snapshot = {
+        "name": "bad-snapshot",
+        "nodes": [{
+            "id": "coder", "type": "coding_agent", "model": "",
+            "prompt": "p", "consumes": ["task"],
+            "workdir": str(project), "writable": True,
+            "allowed_paths": [str(extra)],
+        }],
+        "edges": [],
+        "entry": "coder",
+        "guards": {},
+    }
+    with pytest.raises(SpecError, match="writable.*allowed_paths"):
+        spec_from_snapshot(snapshot, source="tampered snapshot")
+
+
 def test_agent_runner_defaults_to_sandbox(tmp_path):
     """生产默认 runner 只能是 fail-closed OS 沙箱入口。"""
     log = EventLog(tmp_path)

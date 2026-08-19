@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -251,11 +252,21 @@ def _parse_result(data: bytes) -> AgentRunResult:
     if isinstance(raw_usage, dict):
         inp = raw_usage.get("input_tokens")
         out = raw_usage.get("output_tokens")
-        usage = Usage(input_tokens=inp if isinstance(inp, int) else None,
-                      output_tokens=out if isinstance(out, int) else None)
+        usage = Usage(
+            input_tokens=(inp if isinstance(inp, int) and not isinstance(inp, bool)
+                          and inp >= 0 else None),
+            output_tokens=(out if isinstance(out, int) and not isinstance(out, bool)
+                           and out >= 0 else None),
+        )
     raw_cost = payload.get("total_cost_usd")
-    cost = (float(raw_cost) if isinstance(raw_cost, (int, float))
-            and not isinstance(raw_cost, bool) and raw_cost >= 0 else None)
+    cost = None
+    if isinstance(raw_cost, (int, float)) and not isinstance(raw_cost, bool):
+        try:
+            candidate = float(raw_cost)
+        except (OverflowError, ValueError):
+            candidate = None
+        if candidate is not None and math.isfinite(candidate) and candidate >= 0:
+            cost = candidate
     return AgentRunResult(text=text, usage=usage, cost_usd=cost)
 
 
@@ -338,7 +349,8 @@ class LocalCliRunner:
             raise AgentCliError(
                 f"供应商 {provider.id!r} 的凭据未在 PreparedExecution 预检中冻结")
         paths = list(allowed_paths or [])
-        if writable and paths:
+        effective_writable = node_type == "coding_agent" and writable
+        if effective_writable and paths:
             raise AgentCliError(
                 "writable coding_agent 暂不接受 allowed_paths;--add-dir 不是只读边界")
 
@@ -441,7 +453,7 @@ def preflight_agent_nodes(nodes, runner: LocalCliRunner) -> tuple[SourceBaseline
             raise ConfigError(
                 f"供应商 {provider.id!r} 的凭据 {provider.api_key_env} 未配置")
         pending_credentials[provider.id] = secret
-        if node.writable and node.allowed_paths:
+        if node.type == "coding_agent" and node.writable and node.allowed_paths:
             raise ConfigError(
                 f"agent 节点 {node.id}:writable 与 allowed_paths 不能同时使用;"
                 "--add-dir 不是只读边界")

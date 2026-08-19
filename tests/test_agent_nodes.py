@@ -135,7 +135,7 @@ edges:
     worktrees = list((run.dir / "worktrees").iterdir())
     assert len(worktrees) == 1
     assert "+ 1" in (worktrees[0] / "app.py").read_text(encoding="utf-8")
-    # diff 是第二产物,git diff 抓到了改动
+    # diff 是第二产物，由冻结 baseline/result 的普通文件字节清单生成
     diff_path = Path(done["diff_path"])
     assert diff_path.exists()
     assert "app.py" in diff_path.read_text(encoding="utf-8")
