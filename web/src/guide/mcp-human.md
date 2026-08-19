@@ -2,7 +2,7 @@
 
 ## 接入 harness
 
-建议把 Atlas 的 stdio server 直接配置进 harness，由客户端按需启动。ZCode、Cursor 与 Claude Code 的完整配置见 `docs/mcp.md`，三者统一使用：
+建议把 Atlas 的 stdio server 直接配置进 harness，由客户端按需启动。仓库根目录自带 `.mcp.json`，Claude Code 等读取项目级 MCP 配置的客户端会自动加载；ZCode 与 Cursor 的等价配置见 README 的「MCP in your harness」章节。三者统一使用：
 
 ```text
 uv --directory <ATLAS_HOME> run atlas-mcp
