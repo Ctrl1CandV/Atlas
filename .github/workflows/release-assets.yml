@@ -50,6 +50,9 @@ jobs:
           format: spdx-json
           output-file: dist/atlas-v0.1.0.spdx.json
           upload-artifact: false
+      - name: Drop sbom-action scratch file
+        shell: pwsh
+        run: Remove-Item dist/default.gitignore -Force -ErrorAction SilentlyContinue
       - name: Generate and verify SHA256 manifest
         shell: pwsh
         run: |
