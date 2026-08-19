@@ -20,6 +20,6 @@ Windows 是必需支持信号。Ubuntu job 只提供兼容性信息。CI 还会�
 
 ## 发布产物
 
-Tag 必须是 `v0.1.0-rc.1`，与 Python `0.1.0rc1` 的 PEP 440→SemVer 转换一致。发布仅上传源码 sdist、SHA256 与 SPDX SBOM；不构建 wheel、不发布 PyPI。GitHub provenance attestation 失败会阻断发布，不能把未生成的证明描述为成功。
+Tag 必须是 `v0.1.0`，与 Python 包版本 `0.1.0` 一致。发布仅上传源码 sdist、SHA256 与 SPDX SBOM；不构建 wheel、不发布 PyPI。GitHub provenance attestation 失败会阻断发布，不能把未生成的证明描述为成功。
 
 → [回到概览](#/guide/overview)

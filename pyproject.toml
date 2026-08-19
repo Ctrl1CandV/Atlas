@@ -1,6 +1,6 @@
 [project]
 name = "atlas"
-version = "0.1.0rc1"
+version = "0.1.0"
 description = "Local, auditable multi-model workflows defined in YAML"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -2,10 +2,10 @@
 
 All notable changes to Atlas are documented here. The format follows Keep a Changelog and versions follow Semantic Versioning, with Python's equivalent PEP 440 spelling noted explicitly.
 
-## 0.1.0-rc.1 - Pending
+## 0.1.0 - 2026-08-19
 
-Python package version: `0.1.0rc1`. Expected release tag: `v0.1.0-rc.1`.
-The tag and GitHub prerelease have not been created yet.
+Python package version: `0.1.0`. Release tag: `v0.1.0`.
+This is the first official release; the RC candidate content ships as 0.1.0 without a separate RC tag.
 
 ### Added
 - Source-only Windows RC with YAML workflows, six MCP tools, local Web observation, human approval, and six model-neutral examples.
@@ -39,4 +39,4 @@ The tag and GitHub prerelease have not been created yet.
 - Model aliases, reasoning controls, usage, prices, and seed behavior depend on local configuration and provider behavior.
 - Multi-user, cloud, and network-exposed deployments are unsupported.
 
-Repository comparison links are intentionally omitted until a verified repository URL is available.
+Repository: https://github.com/Ctrl1CandV/Atlas

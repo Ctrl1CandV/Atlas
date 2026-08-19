@@ -6,7 +6,7 @@ Atlas is a source-only release candidate for Windows 10/11 x64. Security fixes a
 
 | Version | Product/tag | Supported |
 |---|---|---|
-| Python `0.1.0rc1` | `0.1.0-rc.1` / `v0.1.0-rc.1` | Yes |
+| Python `0.1.0` | `0.1.0` / `v0.1.0` | Yes |
 | Earlier snapshots | — | No |
 
 ## Reporting a vulnerability

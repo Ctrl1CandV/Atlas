@@ -5,7 +5,7 @@ description: Operate Atlas when orchestration adds value. Use its six MCP tools 
 
 # Atlas workflow orchestration
 
-Atlas `0.1.0-rc.1` is a local, source-only Windows RC. `${ATLAS_HOME}` means the user's absolute source root; this document contains no machine-specific path. The observer runs at `http://127.0.0.1:8321` after the user starts it.
+Atlas `0.1.0` is a local, source-only Windows release. `${ATLAS_HOME}` means the user's absolute source root; this document contains no machine-specific path. The observer runs at `http://127.0.0.1:8321` after the user starts it.
 
 Use a single model call for simple one-step work. Use Atlas for explicit graph structure, bounded review loops, independent model perspectives, coding-agent worktree changes, or human approval.
 

@@ -58,3 +58,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# local archived run history (stage D evidence etc.)
+runs-archive/

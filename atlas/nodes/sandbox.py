@@ -41,7 +41,7 @@ def detect_windows_sandbox() -> SandboxCapability:
     if os.name != "nt":
         return SandboxCapability(
             False, "UNSUPPORTED_PLATFORM",
-            "Atlas v0.1.0-rc.1 的 agent 沙箱仅支持 Windows 10/11 x64。",
+            "Atlas v0.1.0 的 agent 沙箱仅支持 Windows 10/11 x64。",
             os_build=platform.version())
     if platform.machine().lower() not in {"amd64", "x86_64"}:
         return SandboxCapability(
@@ -62,7 +62,7 @@ def detect_windows_sandbox() -> SandboxCapability:
     # 可写 marker 不能成为授权依据；在这些能力真正实现并审计前始终 fail-closed。
     return SandboxCapability(
         False, "SANDBOX_BACKEND_NOT_PROVISIONED",
-        "检测到 Windows Sandbox launcher，但 Atlas v0.1.0-rc.1 尚未提供经审计的 "
+        "检测到 Windows Sandbox launcher，但 Atlas v0.1.0 尚未提供经审计的 "
         "guest toolchain、一次性模型代理和可靠 mailbox runner。",
         launcher=launcher, os_build=platform.version())
 

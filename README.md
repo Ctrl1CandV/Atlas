@@ -4,7 +4,7 @@
 
 Atlas is a local, auditable workflow engine. YAML defines the graph; MCP tools validate, preview, and run it; the loopback Web UI shows recorded node inputs, outputs, failures, and artifacts.
 
-> **Release candidate:** Python package version `0.1.0rc1`, product/release version `0.1.0-rc.1`, Git tag `v0.1.0-rc.1`. This is a Windows 10/11, source-only prerelease. It is not published to PyPI and has no prebuilt installer.
+> **Stable release:** Python package version `0.1.0`, Git tag `v0.1.0`. This is a Windows 10/11, source-only release. It is not published to PyPI and has no prebuilt installer.
 
 ## Honest RC scope
 

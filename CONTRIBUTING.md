@@ -1,6 +1,6 @@
 # Contributing to Atlas
 
-Atlas uses Python version `0.1.0rc1`, product version `0.1.0-rc.1`, and release tag `v0.1.0-rc.1`. This RC is Windows-supported, source-only, and not published to PyPI.
+Atlas uses Python version `0.1.0` and release tag `v0.1.0`. This release is Windows-supported, source-only, and not published to PyPI.
 
 ## Source setup
 
