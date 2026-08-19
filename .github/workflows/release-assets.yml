@@ -50,13 +50,20 @@ jobs:
           format: spdx-json
           output-file: dist/atlas-v0.1.0.spdx.json
           upload-artifact: false
-      - name: Drop sbom-action scratch file
+      - name: Keep only release artifacts in dist
         shell: pwsh
-        run: Remove-Item dist/default.gitignore -Force -ErrorAction SilentlyContinue
+        run: |
+          $keep = @('atlas-0.1.0.tar.gz', 'atlas-v0.1.0.spdx.json')
+          Get-ChildItem dist -File -Force | Where-Object { $_.Name -notin $keep } |
+            Remove-Item -Force
+          if (-not (Test-Path dist/atlas-v0.1.0.tar.gz) -or
+              -not (Test-Path dist/atlas-v0.1.0.spdx.json)) {
+            throw "Expected release artifacts missing after cleanup"
+          }
       - name: Generate and verify SHA256 manifest
         shell: pwsh
         run: |
-          $files = Get-ChildItem dist -File | Where-Object { $_.Name -ne 'SHA256SUMS' } | Sort-Object Name
+          $files = Get-ChildItem dist -File -Force | Sort-Object Name
           if (-not $files) { throw "No release artifacts found" }
           $lines = foreach ($file in $files) {
             $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
@@ -74,5 +81,8 @@ jobs:
           tag_name: v0.1.0
           prerelease: false
           generate_release_notes: true
-          files: dist/*
+          files: |
+            dist/atlas-0.1.0.tar.gz
+            dist/atlas-v0.1.0.spdx.json
+            dist/SHA256SUMS
           fail_on_unmatched_files: true
