@@ -53,12 +53,22 @@ jobs:
       - name: Keep only release artifacts in dist
         shell: pwsh
         run: |
+          Write-Host '::group::dist before cleanup'
+          Get-ChildItem dist -Force | Format-Table Name, Length | Out-String | Write-Host
+          Write-Host '::endgroup::'
           $keep = @('atlas-0.1.0.tar.gz', 'atlas-v0.1.0.spdx.json')
           Get-ChildItem dist -File -Force | Where-Object { $_.Name -notin $keep } |
             Remove-Item -Force
-          if (-not (Test-Path dist/atlas-v0.1.0.tar.gz) -or
-              -not (Test-Path dist/atlas-v0.1.0.spdx.json)) {
-            throw "Expected release artifacts missing after cleanup"
+          Write-Host '::group::dist after cleanup'
+          Get-ChildItem dist -Force | Format-Table Name, Length | Out-String | Write-Host
+          Write-Host '::endgroup::'
+          if (-not (Test-Path dist/atlas-0.1.0.tar.gz)) {
+            throw "sdist missing from dist after cleanup"
+          }
+          if (-not (Test-Path dist/atlas-v0.1.0.spdx.json)) {
+            Get-ChildItem . -Filter '*.spdx.json' -Recurse -Depth 3 |
+              Format-Table FullName | Out-String | Write-Host
+            throw "SBOM missing from dist after cleanup"
           }
       - name: Generate and verify SHA256 manifest
         shell: pwsh
