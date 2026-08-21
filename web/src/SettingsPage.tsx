@@ -80,10 +80,13 @@ function ProviderCard({ p, caps, onChanged }: {
         setCandidates(r.models);
         setMsg({ kind: 'ok', text: `拉到 ${r.models.length} 个可见模型,勾选要用的` });
       } else {
-        setMsg({ kind: 'err', text: r.message || '拉取失败' });
+        // 拉取失败也要能手动填模型:候选区以已配置清单兜底打开
+        setCandidates((prev) => prev ?? p.models);
+        setMsg({ kind: 'err', text: `${r.message || '拉取失败'}——仍可在下方手动添加模型 id` });
       }
     } catch (e) {
-      setMsg({ kind: 'err', text: (e as Error).message });
+      setCandidates((prev) => prev ?? p.models);
+      setMsg({ kind: 'err', text: `${(e as Error).message}——仍可在下方手动添加模型 id` });
     } finally {
       setBusy('');
     }
@@ -197,6 +200,9 @@ function ProviderCard({ p, caps, onChanged }: {
                 勾选要用的模型(已选 {checked.size}/{candidates.length};
                 拉取结果只是候选,不等于都要配)
               </div>
+              {ordered.length === 0 && (
+                <div className="dim">没有候选模型——用下方输入框手动添加。</div>
+              )}
               {ordered.map((m) => (
                 <label key={m} className="model-row">
                   <input
