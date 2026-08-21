@@ -29,12 +29,12 @@ uv run atlas init
 ## 启动
 
 ```powershell
-uv run python -m atlas.web
-# 在 Atlas 源码目录手动启动 MCP 的备用方式
-uv run atlas-mcp
+uv run atlas-web
 ```
 
-也可把 MCP 直接配置进 harness：仓库根目录自带 `.mcp.json`，Claude Code 等读取项目级 MCP 配置的客户端会自动加载它；ZCode 与 Cursor 的等价配置见 README 的「MCP in your harness」章节。打开 `http://127.0.0.1:8321`，不要绑定或代理到外部接口。
+一条命令同时提供 Web 界面（`http://127.0.0.1:8321`）与 MCP streamable-http 端点（`http://127.0.0.1:8321/mcp`）。harness 里填该 URL 即可连接六个 MCP 工具，无需另开终端。
+
+备用方式：仓库根目录自带 `.mcp.json`，Claude Code 等读取项目级 MCP 配置的客户端会通过 stdio 自动拉起 `atlas-mcp` 子进程。不要绑定或代理到外部接口。
 
 ## 第一次预演
 

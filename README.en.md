@@ -4,43 +4,58 @@
 
 ![version](https://img.shields.io/github/v/tag/Ctrl1CandV/Atlas) ![license](https://img.shields.io/badge/license-Apache--2.0-green) ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey) ![python](https://img.shields.io/badge/python-3.12-blue)
 
-Atlas is a **local, auditable multi-model workflow engine**. YAML defines the graph; models from different vendors collaborate — parallel research, cross-examination debates, code implementation, human approval — while the loopback Web UI records every node's full input and output.
+Atlas is a multi-model workflow engine that runs on your local Windows machine: you describe a directed graph in YAML, different vendors' models play different roles — parallel research, cross review, code changes, human sign-off — and the complete input and output of every node lands on your own disk in real time.
 
-> **Release scope:** the current stable version is `v0.1.0`, supports Windows 10/11 x64 only, and ships as a source sdist. It is not published to PyPI and has no prebuilt installer. A Git clone and the release sdist do not contain exactly the same files; see the install notes below.
+It addresses one concrete problem: when you chain multiple LLM calls into a pipeline, "looks successful" and "is successful" are different things. Atlas runs fake-success detection on every call (empty output, truncation, and missing fields all fail), hash assertions on every artifact, and bookkeeping on every cent spent. When something breaks, you can see which step, which model, and why.
 
 ![Atlas run view](assets/observe-run.png)
 
-Open any node to inspect its full input and output, the model actually used, tokens, and duration:
+## What it looks like
 
-![Atlas node detail](assets/observe-node.png)
+A graph = one YAML file. For example, three perspectives analyzed in parallel, synthesized, handed to a coding agent, then approved by a human:
 
-## Why Atlas
+```yaml
+name: stage-d-custom
+nodes:
+  - { id: left,  type: llm, model: Deepseek:deepseek-v4-flash,
+      prompt: "Give one aspect of the task", consumes: [task] }
+  - { id: mid,   type: llm, model: Deepseek:deepseek-v4-flash,
+      prompt: "Give another aspect",         consumes: [task] }
+  - { id: right, type: llm, model: Deepseek:deepseek-v4-flash,
+      prompt: "Give a third aspect",         consumes: [task] }
+  - { id: joiner, type: llm, model: Deepseek:deepseek-v4-flash,
+      prompt: "Synthesize into an executive summary",
+      consumes: [task, left.output, mid.output, right.output] }
+  - { id: coder,  type: coding_agent, workdir: demo-project,
+      prompt: "Implement per the summary and self-test", consumes: [task, joiner.output] }
+  - { id: checker, type: llm, model: Deepseek:deepseek-v4-flash,
+      prompt: "Verify the diff matches the task, output verdict", consumes: [task, coder.diff] }
+  - { id: gate, type: human, prompt: "Review the change and verdict, approve or reject" }
+edges:
+  - { from: left,  to: joiner }
+  - { from: mid,   to: joiner }
+  - { from: right, to: joiner }
+  - { from: joiner, to: coder }
+  - { from: coder,  to: checker }
+  - { from: checker, to: gate }
+  - { from: gate, to: END }
+guards:
+  timeout_s: 1800
+```
 
-- **Multi-model collaboration**: cross-vendor fallback chains, debate adjudication, parallel sharding, bounded repair loops. Six MCP tools form the control plane, so your AI assistant (Claude Code and others) can write, validate, preview, and run graphs for you.
-- **Preview before you pay**: `validate` and `dry_run` are zero-cost; fake-success detection rejects empty output, truncation, and missing required fields — a model that just answers "OK" does not pass.
-- **Auditable end to end**: append-only event ledger, write-once artifacts with hash assertions, and approval evidence bound to baseline/result/patch digests.
-- **Crash-recoverable**: a killed controller leaves the run dynamically marked interrupted; checkpoint resume completes only unfinished nodes and never re-opens the budget.
-- **Human in the loop**: `human` nodes pause the graph in the Web UI until you review the real artifacts and approve or reject.
-- **Local first**: the Web UI binds to loopback only, credentials stay in local `config/.env`, and Atlas has no hosted control plane or built-in telemetry. Real runs may still call the remote model providers you configure.
+This is a record of a real run (2026-08-19, DeepSeek deepseek-v4-flash): all 7 nodes completed, the coding agent appended exactly the requested line to the demo project's README, the diff review returned pass, and the run finished after human approval. Total time 4m44s, known cost **$0.0442** — every node's tokens, duration, and cost are itemized in the ledger.
 
-## Honest scope
+## Real case studies
 
-- Supported now: `llm`, `research`, and `coding_agent` workflows, bounded routing/loops, six MCP tools, YAML validation with source locations, local run inspection, interrupted-only checkpoint recovery, and human approval gates.
-- Production agent execution is opt-in: Atlas enables the Claude CLI runner only when `config/agents.json` explicitly sets `runner` to `local_cli`. Missing configuration and every unmet preflight requirement fail closed before a run is created.
-- Claude CLI runs as a same-user host process. Atlas does not write the original directory. For a writable `coding_agent`, it freezes a baseline and compares the ordinary-file byte manifests of that baseline and the agent result to generate a complete textual unified diff.
-- Diff collection does not run `git add`, filters, hooks, attributes, textconv, or external diff. Binary changes fail loudly, and approval evidence binds `baseline_digest`, `result_digest`, and `patch_digest`.
-- The worktree copy is **not an OS sandbox**. The process can theoretically access any host path available to the current user. `allowed_paths`, tool selection, and loopback binding are not security boundaries.
-- Six model-neutral examples are included (parallel research synthesis, multi-vendor debate, map-reduce analysis, repair loop, approval pipeline, code-change review). Names such as “multi-vendor” describe the intended topology only; opinions are independent only after you bind genuinely distinct providers/models.
+All come from real provider API runs before release — including failures, because failures are part of the record too.
 
-## Requirements
+**Repair loop + code review + human gate** (the `code-change-review-approve` example, SuperAI doubao-seed-2.0-lite). Task: "fix the sample bug in demo-project and self-test". Round one: the implementer fixed the fizzbuzz ordering bug but also created two unrelated files and never actually ran the tests; the reviewer returned a structured `repair` verdict with an issue list. Round two: the implementer cleaned up; the reviewer returned `pass`. Human approval ended the run. Two rounds cost $0.96 total, with both diffs archived as downloadable artifacts.
 
-- Windows 10 or 11 x64 (the supported runtime)
-- Python 3.12 and [uv](https://docs.astral.sh/uv/)
-- Node.js 22.12 or newer and npm, for the private Web build
-- Git, for source development and coding-agent source HEAD/clean-state preflight (diff generation itself does not execute Git)
-- Claude Code 2.1.0 or newer, only when enabling production agent execution
+**Honestly recorded failures**. The same test matrix also produced: reasoning models burning their entire output budget on thinking, leaving visible text empty (caught by the empty-output check); a prompt only 1% delivered (caught by the truncation sentinel); and an agent attempt self-reporting ~$10.50 whose automatic retry was manually killed — that incident directly motivated today's cost reservation mechanism and the rule that every real agent run must carry a budget. The full matrix is documented in [`docs/STATUS.md`](docs/STATUS.md).
 
-## Install or upgrade from source
+## Quick start
+
+Requires Windows 10/11 x64, Python 3.12, [uv](https://docs.astral.sh/uv/), and Node.js 22.12+ (to build the frontend once).
 
 ```powershell
 git clone https://github.com/Ctrl1CandV/Atlas.git
@@ -48,61 +63,51 @@ cd Atlas
 uv sync --locked --all-groups
 npm --prefix web ci
 npm --prefix web run build
+uv run atlas-web
 ```
 
-You can also download the Atlas source sdist from the [v0.1.0 release](https://github.com/Ctrl1CandV/Atlas/releases/tag/v0.1.0), alongside `SHA256SUMS` and build provenance. GitHub's generated Source code archive, a Git clone, and this custom sdist are three different inputs. The published `v0.1.0` sdist does not contain the project-level `.mcp.json`, the English README, or the screenshots; prefer a Git clone for automatic MCP setup, or configure `atlas-mcp` manually. The current branch fixes the next release's sdist manifest without silently replacing existing `v0.1.0` assets.
+One command starts both the Web UI (<http://127.0.0.1:8321>) and the MCP endpoint (`http://127.0.0.1:8321/mcp`). Point Claude Code / ZCode / Cursor at that URL and your AI assistant can write graphs, validate, preview, and run for you; alternatively use the repo's `.mcp.json` for zero-config stdio. Setup details in [`docs/mcp.md`](docs/mcp.md).
 
-For an upgrade, update the source, review `CHANGELOG.md`, then repeat the locked sync and clean Web install. Runtime configuration remains local; compare new `config/*.example.json` files before changing active files.
+First start generates local configuration from templates (never overwriting existing files); credentials live only in `config/.env`. The six bundled examples (parallel synthesis, debate judge, map-reduce, repair loop, human approval pipeline, code-change review) validate and preview out of the box; bind your configured models before any real run.
 
-On first `atlas-web` or `atlas-mcp` startup, Atlas creates only missing local configuration files from the generic examples. Existing files are never overwritten. To initialize explicitly instead, run:
+## Design principles
 
-```powershell
-uv run atlas init
-```
+- **Preview before paying**: `validate` and `dry_run` are free; dry-run renders the exact effective spec a real run would use, bound by hash.
+- **Integrity first**: artifacts travel by reference (file + SHA-256) with read-back assertion; missing inputs fail loudly instead of feeding downstream nodes empty strings; oversized input errors out rather than truncating.
+- **Fake success degrades**: HTTP 200 is not success. Empty output, truncation, or missing required fields trigger a cross-vendor fallback chain, with degradation explicitly labeled.
+- **Auditable end to end**: an append-only JSONL event ledger is the single source of truth; everything the UI shows can be traced to it; approval evidence binds baseline/result/patch digests.
+- **Crash-recoverable**: if the controller dies, the run becomes interrupted; resuming re-executes only unfinished nodes without double-counting reserved budget.
+- **Human in the loop**: `human` nodes pause the graph in the UI until you have reviewed the real artifacts.
 
-Edit only the ignored runtime files. Put credentials only in `config/.env`; do not commit or share active provider, agent, capability, pricing, run, prompt, or output data. Unknown prices stay `null`.
+## Capabilities and limits (stated plainly)
 
-Agent execution remains disabled until `config/agents.json` explicitly contains `"runner": "local_cli"`. Each selected agent model must belong to a configured provider with `anthropicBaseUrl`, an allowlisted model id, and its current provider credential in `config/.env`. See [`config/README.md`](config/README.md).
+- Windows 10/11 x64 only; distributed as a source sdist, not on PyPI, no prebuilt installer. Current stable version `v0.1.0`; Git clone and sdist contents differ slightly (see the [release notes](https://github.com/Ctrl1CandV/Atlas/releases/tag/v0.1.0)).
+- The Web binds to loopback only, with no multi-user auth; do not expose it.
+- Coding agents run through Claude CLI as a **same-user host process** (requires explicit `"runner": "local_cli"` in `config/agents.json`; the provider must supply `anthropicBaseUrl` and credentials). A directory copy is not an OS sandbox: the process can theoretically reach every host path available to that user. `allowed_paths` and loopback binding are not security boundaries. Atlas does not write the original directory; diffs are complete textual unified diffs generated from frozen-baseline ordinary-file byte manifests, and binary changes fail loudly. Approval evidence binds `baseline_digest`, `result_digest`, and `patch_digest`.
+- `allow_web: false` only withholds Claude CLI's WebSearch/WebFetch tools; a writable agent has Bash and may still reach the network. `max_turns` remains a validated spec field, but the current Claude CLI has no hard turn-count parameter; hard limits come from deadlines and configured budgets.
+- Cost caps are exact only where prices are known; unknown prices conservatively consume remaining budget locally but cannot prove the provider's actual bill stayed under the cap.
+- Names like "multi-vendor debate" describe topology only; opinions are independent only when genuinely distinct providers are bound.
 
-## Run locally
+## Testing and verification
 
-```powershell
-uv run python -m atlas.web   # equivalent: uv run atlas-web
-```
+2026-08-19 release baseline: Python tests **427 passed** (plus 5 real-provider tests excluded by default — opt-in and possibly billable); Web tests 22 passed, lint clean, production build OK; strict offline validate/dry-run of all six example workflows with 0 provider calls; release sdist scanned at 100 entries with 0 findings. These numbers describe that source state; see [`docs/STATUS.md`](docs/STATUS.md).
 
-Open <http://127.0.0.1:8321>. Keep the service on loopback; there is no multi-user authentication or remote-deployment security model.
-
-### MCP in your harness
-
-A Git clone ships [`.mcp.json`](.mcp.json). Open the cloned Atlas repository in Claude Code (or another harness that reads project-level MCP config) and the six Atlas MCP tools start automatically over stdio — no manual terminal required. The config runs `uv --directory . run atlas-mcp` from the repository root after `uv sync --locked --all-groups`. The published `v0.1.0` sdist does not include this file; the next-release sdist manifest now does.
-
-For each workflow: validate, dry-run, review model bindings/guards/cost, then explicitly request a real run. Validation and dry-run make no provider calls. Real runs may cost money. With `max_cost_usd`, unknown prices conservatively consume all remaining Atlas budget, but only locally verified prices can establish that the provider's actual charge stayed within the dollar cap. Human nodes pause for a decision in the local UI.
-
-`coding_agent.workdir` must name an existing directory. Atlas does not expand `${ATLAS_HOME}` inside YAML. The shipped example uses relative `demo-project`, which resolves only when Atlas starts from the source root; otherwise supply an existing absolute path through the supported run override.
-
-Agent child environments contain only required system variables plus the selected provider endpoint and credential. `allow_web` defaults to `false`; setting it to `true` adds only Claude CLI's `WebSearch` and `WebFetch` tools. It is not OS-level network isolation: a writable coding agent has `Bash`, which may still reach the network. `allowed_paths` is accepted only for `research` or `coding_agent` with `writable: false`; writable coding plus `allowed_paths` fails before run creation because Claude `--add-dir` is not a read-only boundary. `max_turns` remains a validated workflow/specification field, but the current Claude CLI has no hard turn-count parameter; hard limits come from deadlines and configured budgets.
-
-## Security and privacy
-
-- Treat tasks, Web content, repositories, and model output as untrusted data.
-- `runs/` may contain complete prompts, source, outputs, diffs, hashes, and approval records. Git ignore is not encryption or retention management.
-- Never expose `config/.env`, active configuration, or run artifacts in issues or CI artifacts.
-- Do not treat directory copying, path allowlists, tool lists, `allow_web`, or loopback binding as an OS security boundary.
-
-Read [`SECURITY.md`](SECURITY.md) before using real credentials. Workflow fields and MCP usage are documented in [`skill/SKILL.md`](skill/SKILL.md) and the built-in guide.
-
-## Developer validation
+Development checks:
 
 ```powershell
 uv lock --check
 uv run python -m compileall -q atlas
-npm --prefix web test
-npm --prefix web run lint
-npm --prefix web run build
-uv build --sdist
+uv run pytest
+npm --prefix web test && npm --prefix web run lint && npm --prefix web run build
 ```
 
-Real-provider tests are opt-in, billable, and excluded by default. See [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CHANGELOG.md`](CHANGELOG.md).
+## Documentation
+
+- [`docs/STATUS.md`](docs/STATUS.md) — entry point for current product and release facts
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — unimplemented features and sequencing
+- [`docs/mcp.md`](docs/mcp.md) — harness setup configs
+- [`skill/SKILL.md`](skill/SKILL.md) — operating manual for AI assistants
+- [`SECURITY.md`](SECURITY.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`CHANGELOG.md`](CHANGELOG.md)
 
 ## License
 

@@ -4,43 +4,57 @@
 
 ![version](https://img.shields.io/github/v/tag/Ctrl1CandV/Atlas) ![license](https://img.shields.io/badge/license-Apache--2.0-green) ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey) ![python](https://img.shields.io/badge/python-3.12-blue)
 
-Atlas 是一个**本地、可审计的多模型工作流引擎**。用 YAML 定义图，让不同厂商的模型分工协作——并行调研、交叉辩论、代码实施、人工审批——你在本机 Web 界面实时看到每个节点的完整输入与输出。
+Atlas 是一个跑在本机 Windows 上的多模型工作流引擎：用 YAML 画一张有向图，让不同厂商的模型各司其职——并行调研、交叉审查、改代码、人工拍板——每个节点的完整输入输出都实时落在你自己的磁盘上。
 
-> **发布范围：** 当前正式版本是 `v0.1.0`，仅支持 Windows 10/11 x64，以源码 sdist 发布；尚未发布到 PyPI，也没有预编译安装器。Git clone 与发布 sdist 的内容并不完全相同，见下方安装说明。
+它解决一个具体的问题：把多个 LLM 调用串成一条可靠流水线时，"看起来成功了"和"真的成功了"是两回事。Atlas 对每一次调用做假成功检测（空输出、截断、缺字段都过不了关），对每一份产物做哈希断言，对每一笔花销记账。出问题时你能看到是哪一步、哪个模型、为什么。
 
 ![Atlas 运行视图](assets/observe-run.png)
 
-点开任意节点，可以看到它的完整输入与输出、实际使用的模型、token 与耗时：
+## 它长什么样
 
-![Atlas 节点详情](assets/observe-node.png)
+一张图 = 一个 YAML 文件。比如让三个视角并行分析、汇总后交给编程 agent 改代码、再由人审批：
 
-## 为什么是 Atlas
+```yaml
+name: stage-d-custom
+nodes:
+  - { id: left,  type: llm, model: Deepseek:deepseek-v4-flash,
+      prompt: "给出任务的一个侧面要点", consumes: [task] }
+  - { id: mid,   type: llm, model: Deepseek:deepseek-v4-flash,
+      prompt: "给出另一个侧面要点",     consumes: [task] }
+  - { id: right, type: llm, model: Deepseek:deepseek-v4-flash,
+      prompt: "给出第三个侧面要点",     consumes: [task] }
+  - { id: joiner, type: llm, model: Deepseek:deepseek-v4-flash,
+      prompt: "汇总三个要点为执行摘要", consumes: [task, left.output, mid.output, right.output] }
+  - { id: coder,  type: coding_agent, workdir: demo-project,
+      prompt: "按摘要实施改动并自测", consumes: [task, joiner.output] }
+  - { id: checker, type: llm, model: Deepseek:deepseek-v4-flash,
+      prompt: "核对 diff 是否精确完成任务,输出 verdict", consumes: [task, coder.diff] }
+  - { id: gate, type: human, prompt: "审阅改动与核对结论后批准或驳回" }
+edges:
+  - { from: left,  to: joiner }
+  - { from: mid,   to: joiner }
+  - { from: right, to: joiner }
+  - { from: joiner, to: coder }
+  - { from: coder,  to: checker }
+  - { from: checker, to: gate }
+  - { from: gate, to: END }
+guards:
+  timeout_s: 1800
+```
 
-- **多模型协作**：跨厂商 fallback 链、辩论裁决、并行分片、有界修复循环；六个 MCP 工具构成控制面，你的 AI 助手（Claude Code 等）可以直接替你写图、校验、预演、运行。
-- **先预演后付费**：`validate` 与 `dry_run` 零成本；假成功检测会拦下空输出、截断和缺必填字段的"成功"——模型只回一句 OK 也过不了关。
-- **全程可审计**：append-only 事件账本、write-once 产物与哈希断言、审批证据绑定 baseline/result/patch 三摘要。
-- **崩溃可恢复**：控制器被杀后运行自动判定为 interrupted，checkpoint 续跑只补未完成节点，成本预留不重算预算。
-- **人工在环**：`human` 节点把图暂停在 Web 界面，等你审阅真实产物后批准或驳回。
-- **本地优先**：Web 仅绑回环地址，凭据只存本机 `config/.env`，Atlas 没有托管控制面或内置遥测；真实运行仍可能调用你配置的远程模型供应商。
+这是一次真实运行的记录（2026-08-19，DeepSeek deepseek-v4-flash）：7 个节点全部完成，编程 agent 精确地在 demo 项目 README 追加了要求的一行文本，diff 审查判定 pass，人工批准后结束。全程 4 分 44 秒，已知成本 **$0.0442**——账本里每个节点的 token 数、耗时、费用逐条可查。
 
-## 能力与边界（如实说明）
+## 真实案例
 
-- 当前可用：`llm`、`research` 和 `coding_agent` 工作流、有界路由/循环、六个 MCP 工具、带源码位置的 YAML 校验、本机运行查看、仅 interrupted 运行的 checkpoint 恢复、人工审批门。
-- 生产 agent 执行必须显式启用：只有 `config/agents.json` 明确设置 `runner` 为 `local_cli` 时，Atlas 才启用 Claude CLI runner。缺少配置或任一预检条件不满足时，都会在创建 run 前 fail-closed。
-- Claude CLI 是当前用户身份下的宿主进程。Atlas 不写原目录；对可写 `coding_agent`，Atlas 冻结 baseline，并比较该 baseline 与 agent 结果的普通文件字节清单，生成完整文本 unified diff。
-- Diff 采集不执行 `git add`、filter、hook、attributes、textconv 或 external diff。二进制变更 fail-loud，审批证据绑定 `baseline_digest`、`result_digest` 与 `patch_digest`。
-- Worktree 副本**不是 OS 沙箱**。进程理论上可访问当前用户有权访问的任意宿主路径；`allowed_paths`、工具选择和回环绑定都不是安全边界。
-- 随附六个与具体模型无关的示例（并行调研综合、多厂商辩论裁决、map-reduce 分析、修复循环、人工审批管线、代码实施审查）。“多厂商”等名称只表达预期拓扑；只有你明确绑定真实不同的供应商/模型后，意见才可称为独立。
+以下均来自发布前用真实供应商 API 跑过的运行，包括失败的（失败也是记录的一部分）。
 
-## 环境要求
+**修复循环 + 代码审查 + 人工门**（`code-change-review-approve` 示例，SuperAI doubao-seed-2.0-lite）。任务："修复 demo-project 中的示例错误并自测"。第一轮：implementer 修好了 fizzbuzz 的判断顺序错误，但顺手多建了两个无关文件，也没真正跑测试；reviewer 输出结构化判定 `repair`，列出问题清单。第二轮：implementer 清理了多余文件，reviewer 判定 `pass`。人工批准，结束。两轮共 $0.96，两次 diff 都作为产物留档可下载。
 
-- Windows 10 或 11 x64（支持的运行平台）
-- Python 3.12 与 [uv](https://docs.astral.sh/uv/)
-- Node.js 22.12 或更新版本及 npm，用于私有 Web 构建
-- Git，用于源码开发和 coding-agent 源目录 HEAD/clean 状态预检（diff 生成本身不执行 Git）
-- Claude Code 2.1.0 或更新版本，仅在启用生产 agent 执行时需要
+**诚实记录的失败**。同一测试矩阵里也出现过：推理型模型把输出预算烧在思考上导致可见文本为空（被空输出检查拦下）、prompt 只送达 1%（被截断哨兵抓到）、agent 首次尝试自报约 $10.5 后自动 retry 被人工终止——这次事故直接催生了现在的成本预留机制和"所有真实 agent 运行必须配预算"的纪律。完整矩阵见 [`docs/STATUS.md`](docs/STATUS.md)。
 
-## 从源码安装或升级
+## 快速开始
+
+需要 Windows 10/11 x64、Python 3.12、[uv](https://docs.astral.sh/uv/)、Node.js 22.12+（构建前端一次）。
 
 ```powershell
 git clone https://github.com/Ctrl1CandV/Atlas.git
@@ -48,61 +62,52 @@ cd Atlas
 uv sync --locked --all-groups
 npm --prefix web ci
 npm --prefix web run build
+uv run atlas-web
 ```
 
-也可以从 [v0.1.0 Release](https://github.com/Ctrl1CandV/Atlas/releases/tag/v0.1.0) 下载 Atlas 自定义源码 sdist（附 `SHA256SUMS` 与构建来源证明）。GitHub 自动生成的 Source code 归档、Git clone 和该 sdist 是三种不同输入；`v0.1.0` sdist 不含项目级 `.mcp.json`、英文 README 与页面截图，使用 MCP 时应优先 clone 仓库或手动配置 `atlas-mcp`。当前分支已修正下一版 sdist 的内容清单，但不会静默替换既有 `v0.1.0` 资产。
+一条命令同时启动 Web 界面（<http://127.0.0.1:8321>）和 MCP 端点（`http://127.0.0.1:8321/mcp`）。在 Claude Code / ZCode / Cursor 里把 MCP server 指向该 URL，你的 AI 助手就能替你写图、校验、预演、运行；也可以直接用仓库自带的 `.mcp.json` 走 stdio 自动拉起。配置细节见 [`docs/mcp.md`](docs/mcp.md)。
 
-升级时先更新源码并阅读 `CHANGELOG.md`，再重复锁定依赖同步和 Web 全新安装。运行配置保留在本机；修改活动配置前先比较新版 `config/*.example.json`。
+首次启动会从模板生成本机配置（不覆盖已有文件），凭据只放 `config/.env`。六个随附示例（并行综合、辩论裁决、map-reduce、修复循环、人工审批管线、代码实施审查）开箱即可校验和预演；真实运行前给每个节点绑定你配置好的模型。
 
-首次启动 `atlas-web` 或 `atlas-mcp` 时，Atlas 会从通用模板创建缺失的本机配置，任何已有文件都不会被覆盖。也可以显式初始化：
+## 设计原则
 
-```powershell
-uv run atlas init
-```
+- **先预演后付费**：`validate` 和 `dry_run` 零成本，dry-run 与真跑使用同一份有效规格，可用哈希绑定两者身份。
+- **完整性优先**：产物按引用传递（文件 + SHA-256），读取时断言哈希；缺失产物显式失败，绝不给下游喂空串；超长不截断而是报错。
+- **假成功即降级**：HTTP 200 不算成功。空输出、截断、缺必填字段都会触发跨厂商 fallback 链，降级在界面上显式标注。
+- **全程可审计**：append-only JSONL 事件账本是唯一真相，界面显示的一切都能在账本里找到出处；审批证据绑定 baseline/result/patch 三摘要。
+- **崩溃可恢复**：控制器被杀后运行自动判定 interrupted，恢复只补未完成节点，成本预留不重算预算。
+- **人在环**：`human` 节点把图暂停在界面里，等你看过真实产物再决定。
 
-只编辑被忽略的运行文件。凭据只放 `config/.env`；不要提交或分享活动供应商、agent、能力、价格、运行、prompt 或输出数据。未知价格保持 `null`。
+## 能力边界（如实说明）
 
-Agent 执行默认关闭，直至 `config/agents.json` 显式包含 `"runner": "local_cli"`。每个选定的 agent 模型必须属于已配置供应商，该供应商需提供 `anthropicBaseUrl`、模型 allowlist 和 `config/.env` 中当前供应商的凭据。详见 [`config/README.md`](config/README.md)。
+- 仅支持 Windows 10/11 x64；以源码 sdist 发布，未上 PyPI，无预编译安装器。当前正式版本 `v0.1.0`，Git clone 与 sdist 内容略有差异（见 [Release 说明](https://github.com/Ctrl1CandV/Atlas/releases/tag/v0.1.0)）。
+- Web 只绑回环地址，没有多用户认证；不要暴露到网络。
+- 编程 agent 通过 Claude CLI 以**当前用户身份下的宿主进程**运行（需 `config/agents.json` 显式 `"runner": "local_cli"`，供应商须提供 `anthropicBaseUrl` 与凭据）。目录副本不是 OS 沙箱：进程理论上能访问当前用户有权访问的任何路径。`allowed_paths`、回环绑定都不是安全边界。Atlas 不写原目录，diff 由冻结 baseline 的普通文件字节清单生成完整文本 unified diff，二进制变更大声失败。
+- `allow_web: false` 只是不授予 Claude CLI 的 WebSearch/WebFetch 工具；可写 agent 有 Bash，仍可能联网。`max_turns` 是校验过的规格字段，但当前 Claude CLI 没有硬轮次参数，硬限制来自 deadline 与已配置预算。
+- 成本帽只在费率已知的调用上精确生效；费率未知时保守占满剩余预算，但不能证明供应商实际账单没超。
+- "多厂商辩论"等名称只表达拓扑；只有绑定了真实不同的供应商，意见才独立。
+- 审批证据绑定 `baseline_digest`、`result_digest` 与 `patch_digest` 三摘要；可写 coding agent 与 `allowed_paths` 的组合会在创建 run 前被拒绝（Claude `--add-dir` 不是只读边界）。
 
-## 本机运行
+## 测试与验证
 
-```powershell
-uv run python -m atlas.web   # 等价：uv run atlas-web
-```
+2026-08-19 发布基线：Python 测试 **427 passed**（另有 5 个真实供应商测试默认排除、需主动运行且可能收费）；Web 测试 22 passed、lint 0 告警、生产构建通过；六个示例工作流严格离线 validate/dry-run，0 次供应商调用；发布 sdist 100 个条目、0 扫描发现。数字对应当时的源状态，详见 [`docs/STATUS.md`](docs/STATUS.md)。
 
-打开 <http://127.0.0.1:8321>。服务必须留在回环地址；当前没有多用户认证或远程部署安全模型。
-
-### 在 harness 中使用 MCP
-
-Git clone 自带 [`.mcp.json`](.mcp.json)。用 Claude Code（或其他支持项目级 MCP 配置的 harness）打开克隆下来的 Atlas 仓库，六个 MCP 工具会通过 stdio 自动启动，无需手动开终端。配置执行的是 `uv --directory . run atlas-mcp`，以仓库根目录为工作目录，只要先完成 `uv sync --locked --all-groups` 即可使用。已发布的 `v0.1.0` sdist 不含该文件；下一版 sdist 内容清单已补入。
-
-每个工作流都应先校验、再 dry-run，检查模型绑定、守卫和费用后，才明确请求真实运行。校验和 dry-run 不调用供应商；真实运行可能收费。已确认费率时美元帽按预估与实际费用结算；费率未知但设置了成本帽时，Atlas 会保守占满本次剩余预算以阻止后续复用，但无法证明供应商实际账单未超过该帽。`human` 节点在本机界面等待决定。
-
-`coding_agent.workdir` 必须指向已存在目录。Atlas 不会在 YAML 中展开 `${ATLAS_HOME}`。随附示例使用相对路径 `demo-project`，仅当从 Atlas 源码根目录启动时才按预期解析；否则应通过受支持的本次运行覆盖传入已存在的绝对路径。
-
-Agent 子进程环境只包含必要系统变量、所选供应商端点和当前供应商凭据。`allow_web` 默认 `false`；设为 `true` 只会增加 Claude CLI 的 `WebSearch` 与 `WebFetch` 工具。它不是 OS 级网络隔离：可写 coding agent 拥有 `Bash`，仍可能联网。`allowed_paths` 仅适用于 `research` 或 `writable: false` 的 `coding_agent`；可写 coding 与 `allowed_paths` 的组合会在创建 run 前失败，因为 Claude `--add-dir` 不是只读边界。`max_turns` 仍是经过校验的工作流/规格字段，但当前 Claude CLI 没有硬轮次参数；硬限制由 deadline 和已配置预算承担。
-
-## 安全与隐私
-
-- 把任务、网页内容、仓库和模型输出都视为不可信数据。
-- `runs/` 可能包含完整 prompt、源码、输出、diff、哈希与审批记录。Git 忽略不等于加密或留存管理。
-- 不要在 issue 或 CI 产物中暴露 `config/.env`、活动配置或运行产物。
-- 不要把目录副本、路径白名单、工具列表、`allow_web` 或回环绑定当作 OS 安全边界。
-
-使用真实凭据前阅读 [`SECURITY.md`](SECURITY.md)。工作流字段和 MCP 用法见 [`skill/SKILL.md`](skill/SKILL.md) 与内置指南。
-
-## 开发验证
+开发验证：
 
 ```powershell
 uv lock --check
 uv run python -m compileall -q atlas
-npm --prefix web test
-npm --prefix web run lint
-npm --prefix web run build
-uv build --sdist
+uv run pytest
+npm --prefix web test && npm --prefix web run lint && npm --prefix web run build
 ```
 
-真实供应商测试默认排除、可能收费且必须主动运行。参见 [`CONTRIBUTING.md`](CONTRIBUTING.md) 与 [`CHANGELOG.md`](CHANGELOG.md)。
+## 文档
+
+- [`docs/STATUS.md`](docs/STATUS.md) — 当前产品与发布事实的入口
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — 未实施功能与排序
+- [`docs/mcp.md`](docs/mcp.md) — harness 接入配置
+- [`skill/SKILL.md`](skill/SKILL.md) — 给 AI 助手看的操作手册
+- [`SECURITY.md`](SECURITY.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`CHANGELOG.md`](CHANGELOG.md)
 
 ## 许可证
 
