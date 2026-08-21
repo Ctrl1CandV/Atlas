@@ -95,7 +95,8 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                agent_runner_factory=None,
                *,
                api_only: bool = False,
-               web_dist_dir: Path | None = None) -> FastAPI:
+               web_dist_dir: Path | None = None,
+               mount_mcp: bool = True) -> FastAPI:
     """registry_factory(provider_ids) → AdapterRegistry。
 
     生产环境不传(用 build_real_registry,真实密钥);测试注入假供应商,
@@ -103,6 +104,7 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
     providers_path / env_store 同理:配置面 API 的注入点。
     ``api_only`` 只供明确不测试静态界面的 API 测试使用；生产默认仍要求
     已构建的 web/dist。``web_dist_dir`` 用于隔离该启动契约的测试。
+    ``mount_mcp`` 把 MCP streamable-http 端点挂到 /mcp;测试可关闭。
     """
     app = FastAPI(title="Atlas 观测界面", version=__version__)
     workflows_dir = Path(workflows_dir)
@@ -125,12 +127,20 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
 
     @app.middleware("http")
     async def _local_only(request: Request, call_next):
-        host = (request.headers.get("host") or "").rsplit(":", 1)[0]
+        host = request.headers.get("host") or ""
+        # IPv6 字面量形如 [::1]:8321,冒号在方括号内,不能直接 rsplit(":")
+        if host.startswith("["):
+            host = host.split("]", 1)[0] + "]"
+        else:
+            host = host.rsplit(":", 1)[0]
         if host not in _LOCAL_HOSTS:
             return JSONResponse(status_code=403, content={
                 "detail": "界面只服务本机(Host 头不是 127.0.0.1/localhost)。"
                           "红线 ④:暴露到网络等于暴露执行权"})
+        # /mcp 是 MCP harness 的 streamable-http 端点:客户端不会带
+        # X-Atlas-Request,该头只对浏览器跨站有意义;Host/回环校验仍适用。
         if request.method in ("POST", "PUT", "DELETE") \
+                and not request.url.path.startswith("/mcp") \
                 and request.headers.get("X-Atlas-Request") != "1":
             # 浏览器里的恶意网页可以用 no-cors 发简单请求,但带不了自定义头
             return JSONResponse(status_code=403, content={
@@ -840,6 +850,46 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                     }
         return out
 
+    # ── MCP streamable-http 挂载 ────────────────────────────────
+    # 单命令启动:atlas-web 同时服务 Web 界面与 MCP 端点。工具面与
+    # stdio 入口(atlas-mcp)共用 build_mcp_server(),行为不会漂移。
+    # Host/回环校验仍适用;X-Atlas-Request 对 MCP 客户端豁免(见中间件)。
+    if mount_mcp:
+        import contextlib
+        from atlas.mcp import build_mcp_server
+
+        # MCP streamable-http 端点。session manager 的生命周期必须由
+        # FastAPI lifespan 驱动,且库内断言每个 manager 实例只能 run 一次;
+        # 测试会对同一 app 反复进入 lifespan(TestClient 上下文),所以在
+        # manager 未运行时才进入,退出时复位标记。
+        mcp_server = build_mcp_server()
+        mcp_starlette = mcp_server.streamable_http_app(json_response=True)
+        mcp_manager = mcp_server._lowlevel_server._session_manager
+        manager_running = False
+
+        @contextlib.asynccontextmanager
+        async def _combined_lifespan(app: FastAPI):
+            nonlocal manager_running
+            if manager_running:
+                yield
+                return
+            manager_running = True
+            try:
+                async with mcp_manager.run():
+                    yield
+                # 干净关闭后复位库内的 run-once 标记,让同一 app 实例可以
+                # 再次进入 lifespan(测试的 TestClient 上下文会反复进出);
+                # 异常退出时不复位,复用仍会被拒绝(fail-closed)。
+                mcp_manager._has_started = False
+            finally:
+                manager_running = False
+
+        app.router.lifespan_context = _combined_lifespan
+        # 挂在根路径:MCP 内部路由就是 /mcp,最终端点为
+        # http://127.0.0.1:8321/mcp,且不产生 /mcp → /mcp/ 重定向。
+        # /api 与静态前端的路由先注册,Starlette 按注册顺序匹配,不受影响。
+        app.mount("", mcp_starlette, name="mcp")
+
     # ── 静态前端(构建产物)───────────────────────────────────────
 
     dist = (Path(web_dist_dir) if web_dist_dir is not None else
@@ -855,7 +905,10 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
 
 
 def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
-    """启动观测界面。host 只接受 127.0.0.1(红线 ④,硬编码拒绝其他值)。"""
+    """启动观测界面 + MCP streamable-http 端点。
+
+    host 只接受 127.0.0.1(红线 ④,硬编码拒绝其他值)。
+    """
     if host != DEFAULT_HOST:
         raise ValueError(
             f"界面只绑 {DEFAULT_HOST}(红线 ④:节点里有能改文件跑命令的 agent,"
@@ -865,6 +918,8 @@ def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
 
     initialize_runtime_config()
     import uvicorn
+    print(f"Atlas Web 界面:   http://{host}:{port}")
+    print(f"Atlas MCP 端点:   http://{host}:{port}/mcp (streamable-http)")
     uvicorn.run(create_app(), host=host, port=port)
 
 

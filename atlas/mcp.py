@@ -58,16 +58,115 @@ def _check_new_id(value: str) -> str:
 # 保存的进程内串行锁:检查与替换之间不是原子的,锁把窗口收窄到持锁期间
 _SAVE_LOCK = threading.Lock()
 
-server = MCPServer(
-    name="atlas",
-    title="Atlas 工作流引擎",
-    instructions=(
+
+def _tool_instructions() -> str:
+    return (
         "本地多模型工作流引擎:你写 YAML 定义节点和边,引擎跑图,"
         "人在 Web 界面(http://127.0.0.1:8321)实时看每个节点的完整输入输出。"
         "纪律:先 atlas_validate_workflow,再 dry_run,过了才真跑;"
         "大图或新图必先 dry_run。"
-    ),
-)
+    )
+
+
+def build_mcp_server() -> MCPServer:
+    """构造带全部六个工具的 MCP server 实例。
+
+    stdio 入口(main)与 Web 进程的 /mcp 挂载共用同一份工具面,
+    保证两个入口的工具描述与行为不会漂移。
+    """
+    srv = MCPServer(name="atlas", title="Atlas 工作流引擎",
+                    instructions=_tool_instructions())
+    _register_tools(srv)
+    return srv
+
+
+def _register_tools(srv: MCPServer) -> None:
+    """把六个工具注册到给定 server(实现函数见上方"内部实现")。"""
+
+    @srv.tool()
+    def atlas_validate_workflow(yaml: str = "", workflow_id: str = "") -> str:
+        """校验一份图定义(零成本)。传 yaml 全文,或已保存的 workflow_id。
+
+        检查:YAML 语法、节点类型封闭清单、边引用、条件边与路由字段、入口、
+        可达性、死环、有环必须设 max_iterations、consumes 引用、异质性提示。
+        返回 JSON；校验不过时 error 会指出具体字段或图结构问题，并统一附带 YAML
+        path、line、column（整图聚合错误没有唯一坐标时只返回 path）。
+        两个参数都传时以 yaml 全文为准。
+        """
+        try:
+            return _render(validate_workflow_impl(yaml, workflow_id))
+        except ValueError as e:
+            return _render({"valid": False, "error": str(e), "next": "id 不合法"})
+
+    @srv.tool()
+    def atlas_save_workflow(workflow_id: str, yaml: str,
+                            expected_sha256: str = "") -> str:
+        """把校验通过的 YAML 保存为 workflows/<workflow_id>.yaml(零成本)。
+
+        校验不过不保存。新建要求 id 未被占用;更新必须传 expected_sha256
+        (上次读到的文件哈希)——文件被改过就拒绝,防静默覆盖。
+        返回 file_sha256(下次更新用它)与 spec_fingerprint。
+        """
+        try:
+            return _render(save_workflow_impl(workflow_id, yaml, expected_sha256))
+        except ValueError as e:
+            return _render({"saved": False, "error": str(e), "next": "id 不合法"})
+
+    @srv.tool()
+    def atlas_run_workflow(workflow_id: str, task: str, dry_run: bool = False,
+                           node_overrides: dict | None = None,
+                           expected_execution_sha256: str | None = None) -> str:
+        """运行已保存的工作流(workflows/<workflow_id>.yaml)。同步阻塞到结束。
+
+        node_overrides 是封闭的本次运行节点参数覆盖；不改 YAML，不接受权限或拓扑字段。
+        可覆盖:model/fallback/thinking/max_output_tokens/temperature/seed/
+        timeout_s/retry/prompt(llm)、max_turns/timeout_s/retry/prompt/workdir
+        (coding_agent;research 无 workdir)、prompt(human)。
+        prompt 是完整替换本次运行的节点职责文本,不是追加;
+        consumes/outputs/图结构永远不可覆盖——要长期生效就让 AI 改 YAML。
+        dry_run=True 与真跑使用同一有效规格，只渲染、不花钱；
+        dry_run=False 真实调用模型。暂停在 human 节点时返回 paused。
+        """
+        try:
+            return _render(run_workflow_impl(
+                workflow_id, task, dry_run, node_overrides=node_overrides,
+                expected_execution_sha256=expected_execution_sha256))
+        except ValueError as e:
+            return _render({"error": str(e), "next": "id 不合法"})
+
+    @srv.tool()
+    def atlas_list_workflows() -> str:
+        """列出 workflows/ 里的图定义与校验状态(零成本)。"""
+        items = []
+        for path in sorted(WORKFLOWS_DIR.glob("*.yaml")):
+            try:
+                spec = spec_from_yaml_file(path)
+                items.append({"id": path.stem, "name": spec.name,
+                              "valid": True, "description": spec.description})
+            except SpecError as e:
+                items.append({"id": path.stem, "name": path.stem, "valid": False,
+                              "description": "", "error": str(e)})
+        return _render({"workflows": items,
+                        "next": "挑一个用 atlas_run_workflow 跑,或先 validate 新图"})
+
+    @srv.tool()
+    def atlas_get_run(run_id: str) -> str:
+        """查某次运行的动态状态、每节点模型与 token、账本路径(零成本)。"""
+        try:
+            return _render(summarize_run(run_id))
+        except ValueError as e:
+            return _render({"error": str(e), "next": "id 不合法"})
+
+    @srv.tool()
+    def atlas_resume_run(run_id: str) -> str:
+        """仅恢复动态判定为 interrupted 的运行；paused 必须在 Web 审批。"""
+        try:
+            return _render(resume_run_impl(run_id))
+        except ValueError as e:
+            return _render({"error": str(e), "next": "id 不合法"})
+
+
+server = build_mcp_server()
 
 
 def _render(obj: dict) -> str:
@@ -536,95 +635,7 @@ def summarize_run(run_id: str) -> dict:
     }
 
 
-# ─────────────────────────── 工具封装 ───────────────────────────
-
-
-@server.tool()
-def atlas_validate_workflow(yaml: str = "", workflow_id: str = "") -> str:
-    """校验一份图定义(零成本)。传 yaml 全文,或已保存的 workflow_id。
-
-    检查:YAML 语法、节点类型封闭清单、边引用、条件边与路由字段、入口、
-    可达性、死环、有环必须设 max_iterations、consumes 引用、异质性提示。
-    返回 JSON；校验不过时 error 会指出具体字段或图结构问题，并统一附带 YAML
-    path、line、column（整图聚合错误没有唯一坐标时只返回 path）。
-    两个参数都传时以 yaml 全文为准。
-    """
-    try:
-        return _render(validate_workflow_impl(yaml, workflow_id))
-    except ValueError as e:
-        return _render({"valid": False, "error": str(e), "next": "id 不合法"})
-
-
-@server.tool()
-def atlas_save_workflow(workflow_id: str, yaml: str,
-                        expected_sha256: str = "") -> str:
-    """把校验通过的 YAML 保存为 workflows/<workflow_id>.yaml(零成本)。
-
-    校验不过不保存。新建要求 id 未被占用;更新必须传 expected_sha256
-    (上次读到的文件哈希)——文件被改过就拒绝,防静默覆盖。
-    返回 file_sha256(下次更新用它)与 spec_fingerprint。
-    """
-    try:
-        return _render(save_workflow_impl(workflow_id, yaml, expected_sha256))
-    except ValueError as e:
-        return _render({"saved": False, "error": str(e), "next": "id 不合法"})
-
-
-@server.tool()
-def atlas_run_workflow(workflow_id: str, task: str, dry_run: bool = False,
-                       node_overrides: dict | None = None,
-                       expected_execution_sha256: str | None = None) -> str:
-    """运行已保存的工作流(workflows/<workflow_id>.yaml)。同步阻塞到结束。
-
-    node_overrides 是封闭的本次运行节点参数覆盖；不改 YAML，不接受权限或拓扑字段。
-    可覆盖:model/fallback/thinking/max_output_tokens/temperature/seed/
-    timeout_s/retry/prompt(llm)、max_turns/timeout_s/retry/prompt/workdir
-    (coding_agent;research 无 workdir)、prompt(human)。
-    prompt 是完整替换本次运行的节点职责文本,不是追加;
-    consumes/outputs/图结构永远不可覆盖——要长期生效就让 AI 改 YAML。
-    dry_run=True 与真跑使用同一有效规格，只渲染、不花钱；
-    dry_run=False 真实调用模型。暂停在 human 节点时返回 paused。
-    """
-    try:
-        return _render(run_workflow_impl(
-            workflow_id, task, dry_run, node_overrides=node_overrides,
-            expected_execution_sha256=expected_execution_sha256))
-    except ValueError as e:
-        return _render({"error": str(e), "next": "id 不合法"})
-
-
-@server.tool()
-def atlas_list_workflows() -> str:
-    """列出 workflows/ 里的图定义与校验状态(零成本)。"""
-    items = []
-    for path in sorted(WORKFLOWS_DIR.glob("*.yaml")):
-        try:
-            spec = spec_from_yaml_file(path)
-            items.append({"id": path.stem, "name": spec.name,
-                          "valid": True, "description": spec.description})
-        except SpecError as e:
-            items.append({"id": path.stem, "name": path.stem, "valid": False,
-                          "description": "", "error": str(e)})
-    return _render({"workflows": items,
-                    "next": "挑一个用 atlas_run_workflow 跑,或先 validate 新图"})
-
-
-@server.tool()
-def atlas_get_run(run_id: str) -> str:
-    """查某次运行的动态状态、每节点模型与 token、账本路径(零成本)。"""
-    try:
-        return _render(summarize_run(run_id))
-    except ValueError as e:
-        return _render({"error": str(e), "next": "id 不合法"})
-
-
-@server.tool()
-def atlas_resume_run(run_id: str) -> str:
-    """仅恢复动态判定为 interrupted 的运行；paused 必须在 Web 审批。"""
-    try:
-        return _render(resume_run_impl(run_id))
-    except ValueError as e:
-        return _render({"error": str(e), "next": "id 不合法"})
+# ─────────────────────────── 入口 ───────────────────────────
 
 
 def main() -> None:
