@@ -25,6 +25,10 @@ from atlas.artifacts import artifact_entry
 from atlas.integrity import build_projection, store_artifact
 from atlas.spec import NodeSpec, WorkflowSpec
 
+# agent attempt 之间的固定等待。engine 的 guarded_agent_runner 依赖这个值
+# 判断"剩余 deadline 是否还够一次 retry sleep",两处必须同源。
+AGENT_RETRY_SLEEP_S = 2.0
+
 # 隔离副本和最终结果均受此上限约束。
 WORKTREE_MAX_BYTES = 2 * 1024 * 1024 * 1024   # 2 GiB
 DIFF_MAX_BYTES = 4 * 1024 * 1024              # 4 MiB
@@ -605,6 +609,14 @@ def make_agent_node_fn(node: NodeSpec, spec: WorkflowSpec, ctx):
         requested_model = node.model or f"agent:{node.type}"
         runner_name = getattr(ctx._agent_runner_raw, "runner_name", "injected")
 
+        def _stage(stage: str, **extra) -> None:
+            """冻结/派生副本的阶段性进度。大 workdir 的全树扫描+拷贝
+            可能耗时分钟级,没有事件时界面在 node_input 与 node_started
+            之间看起来像卡死。复用 node_progress 事件类型,不破坏旧 fold。"""
+            ctx.log.emit("node_progress", node=node.id, iteration=iteration,
+                         phase=stage, model=requested_model, runner=runner_name,
+                         **extra)
+
         baseline = None
         baseline_manifest = None
         baseline_digest = None
@@ -615,6 +627,7 @@ def make_agent_node_fn(node: NodeSpec, spec: WorkflowSpec, ctx):
                     and node.writable and baseline_token is None):
                 raise AgentCliError(
                     f"生产 coding_agent 节点 {node.id} 缺少 SourceBaselineToken")
+            _stage("baseline_freeze")
             baseline, baseline_manifest, baseline_digest, source_head = _freeze_baseline(
                 ctx.run_dir, node, iteration, Path(node.workdir),
                 require_head=node.writable, token=baseline_token)
@@ -630,6 +643,7 @@ def make_agent_node_fn(node: NodeSpec, spec: WorkflowSpec, ctx):
             ctx.check_timeout(spec.guards.timeout_s, node.id)
             cwd = None
             if node.type == "coding_agent":
+                _stage("worktree_derive", attempt=attempt)
                 worktree = _prepare_worktree(
                     ctx.run_dir, node, iteration, baseline, baseline_manifest,
                     baseline_digest, attempt=attempt, require_head=node.writable)
@@ -759,7 +773,7 @@ def make_agent_node_fn(node: NodeSpec, spec: WorkflowSpec, ctx):
                              model_requested=requested_model,
                              reason=f"AgentCliError(第 {attempt} 次):{e}")
                 if attempt < total_attempts:
-                    time.sleep(2)
+                    time.sleep(AGENT_RETRY_SLEEP_S)
         if last_err is not None:
             raise last_err
 

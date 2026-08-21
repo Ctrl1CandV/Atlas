@@ -33,7 +33,7 @@ from atlas.costs import (CostLedger, CostLimitError, compute_cost_usd,
                          fold_cost_accounting)
 from atlas.events import EventLog, EventReader, fold_events
 from atlas.nodes import make_agent_node_fn
-from atlas.nodes.agent import SourceBaselineToken
+from atlas.nodes.agent import AGENT_RETRY_SLEEP_S, SourceBaselineToken
 from atlas.integrity import (
     ArtifactRef,
     IntegrityError,
@@ -202,10 +202,6 @@ def _use_prepared(spec: WorkflowSpec, registry: AdapterRegistry | None,
     actual = spec_fingerprint(spec)
     if prepared.spec_sha256 != actual or spec_fingerprint(prepared.spec) != actual:
         raise SpecError("PreparedExecution 的 spec_sha256 与请求规格不符")
-    if registry is not None and registry is not prepared.registry:
-        raise SpecError("传入 registry 与 PreparedExecution 冻结的 registry 冲突")
-    if agent_runner is not None and agent_runner is not prepared.agent_runner:
-        raise SpecError("传入 agent_runner 与 PreparedExecution 冻结的 runner 冲突")
     current_backend = _current_prepared_backend_sha256(prepared)
     if current_backend != prepared.backend_sha256:
         raise SpecError("PreparedExecution 的后端对象在预检后发生变化,拒绝执行")
@@ -350,6 +346,7 @@ class _NodeCtx:
     cost_ledger: CostLedger | None = field(default=None, repr=False)
     _wall_start: datetime | None = field(default=None, repr=False)
     _agent_runner_raw: object = field(default=None, repr=False)
+    _events_cache: tuple[int, list] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.agent_runner is None:
@@ -363,9 +360,10 @@ class _NodeCtx:
             try:
                 return self._agent_runner_raw(*args, timeout_s=effective, **kwargs)
             except Exception as e:
-                # agent 工厂会在失败后固定 sleep 2s；deadline 不足时禁止进入该 sleep。
+                # agent 工厂在失败后固定 sleep AGENT_RETRY_SLEEP_S；
+                # deadline 不足时禁止进入该 sleep。
                 if self.timeout_s is not None and self.remaining_timeout(
-                        node_id=node_id) <= 2.0:
+                        node_id=node_id) <= AGENT_RETRY_SLEEP_S:
                     raise TimeoutViolation(
                         f"节点 {node_id}:剩余整图时间不足以执行 retry sleep") from e
                 raise
@@ -418,7 +416,7 @@ class _NodeCtx:
         """人工审批的等待时间——那是人的时间,不算进运行超时。"""
         total = 0.0
         paused_at: datetime | None = None
-        for e in self.reader.all():
+        for e in self._events_once():
             t = e["type"]
             if t == "run_paused":
                 paused_at = datetime.fromisoformat(e["ts"])
@@ -431,10 +429,24 @@ class _NodeCtx:
 
     def spent_usd(self) -> float:
         """账本里已结算的真实调用成本；兼容没有 cost_settled 的旧 run。"""
-        return _settled_spent_usd(self.reader.all())
+        return _settled_spent_usd(self._events_once())
 
     def warned_cost_unknown(self) -> bool:
-        return any(e["type"] == "cost_unknown" for e in self.reader.all())
+        return any(e["type"] == "cost_unknown" for e in self._events_once())
+
+    def _events_once(self) -> list[dict]:
+        """同一节点执行内的多次守卫检查共享一次账本读取。
+
+        events.jsonl 接近 16 MiB 上限时,每次全量读取都是秒级 IO;
+        节点入口的 timeout/cost 检查会连读多次,这里按"事件数没变"
+        缓存最近一份,事件只增不改,以长度判新是安全的。
+        """
+        cached = self._events_cache
+        events = self.reader.all()
+        if cached is not None and cached[0] == len(events):
+            return cached[1]
+        self._events_cache = (len(events), events)
+        return events
 
 
 @dataclass
