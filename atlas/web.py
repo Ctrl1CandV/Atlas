@@ -885,10 +885,14 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                 manager_running = False
 
         app.router.lifespan_context = _combined_lifespan
-        # 挂在根路径:MCP 内部路由就是 /mcp,最终端点为
-        # http://127.0.0.1:8321/mcp,且不产生 /mcp → /mcp/ 重定向。
-        # /api 与静态前端的路由先注册,Starlette 按注册顺序匹配,不受影响。
-        app.mount("", mcp_starlette, name="mcp")
+        # MCP 内部路由就是 "/mcp"。不能把它 Mount 进来:Mount 是全捕获,
+        # 挂 "" 会抢在静态前端之前吃掉 GET /,挂 "/mcp" 又会因前缀剥离
+        # 产生 /mcp → /mcp/ 重定向。改为把内部 Route 对象直接并入路由表:
+        # Route 只精确匹配自己的 path,不影响 /api 与静态前端。
+        # 注意 streamable_http_app() 每次调用都会新建一个 session manager
+        # 并覆盖 server 上的引用,这里必须复用第一次构造的实例。
+        for route in mcp_starlette.routes:
+            app.router.routes.append(route)
 
     # ── 静态前端(构建产物)───────────────────────────────────────
 
