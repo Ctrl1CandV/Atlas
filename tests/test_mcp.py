@@ -325,3 +325,63 @@ def test_mcp_streamable_http_mounted_in_web_app(tmp_path):
     finally:
         server.should_exit = True
         thread.join(timeout=5)
+
+
+def test_run_workflow_impl_requires_yaml_or_workflow_id(env):
+    out = m.run_workflow_impl("", "任务", registry_factory=lambda p: None)
+    assert "要么传 yaml" in out["error"]
+
+
+def test_run_workflow_impl_accepts_adhoc_yaml_without_persisting(env):
+    """自定义图直跑:yaml 全文进 run,不写 workflows/。"""
+    adhoc = GOOD_YAML.replace("name: mcp_demo", "name: adhoc_once")
+    out = m.run_workflow_impl("", "临时任务", registry_factory=env["factory"],
+                              yaml=adhoc)
+    assert out["status"] == "done", out.get("failed_error")
+    assert out["graph"] == "adhoc_once"
+    assert out["nodes_done"] == ["a", "b"]
+    assert list(env["workflows"].glob("*.yaml")) == [env["workflows"] / "demo.yaml"]
+
+
+def test_run_workflow_impl_persist_as_saves_after_completion(env):
+    adhoc = GOOD_YAML.replace("name: mcp_demo", "name: adhoc_keep")
+    out = m.run_workflow_impl("", "要固化的任务", registry_factory=env["factory"],
+                              yaml=adhoc, persist_as="kept-custom")
+    assert out["status"] == "done"
+    saved = out["persisted"]
+    assert saved["saved"] is True and saved["created"] is True
+    persisted = env["workflows"] / "kept-custom.yaml"
+    assert persisted.read_text(encoding="utf-8") == adhoc
+
+
+def test_run_workflow_impl_persist_as_collision_reports_not_overwrites(env):
+    (env["workflows"] / "taken.yaml").write_text(
+        "name: taken\nnodes:\n  - id: a\n    type: llm\n    model: Fake:primary\n"
+        "    prompt: p\n    consumes: [task]\nedges:\n  - from: a\n    to: END\n",
+        encoding="utf-8")
+    adhoc = GOOD_YAML.replace("name: mcp_demo", "name: adhoc_collide")
+    out = m.run_workflow_impl("", "任务", registry_factory=env["factory"],
+                              yaml=adhoc, persist_as="taken")
+    assert out["status"] == "done"
+    assert out["persisted"]["saved"] is False
+    assert "expected_sha256" in out["persisted"]["error"]
+    assert "taken" in (env["workflows"] / "taken.yaml").read_text(encoding="utf-8")
+
+
+def test_run_workflow_impl_rejects_invalid_persist_as_before_running(env):
+    for bad in ("CON", "..", "no/slash"):
+        out = m.run_workflow_impl("", "任务", registry_factory=env["factory"],
+                                  yaml=GOOD_YAML, persist_as=bad)
+        assert "error" in out
+    assert not list(env["runs"].glob("*/events.jsonl"))
+
+
+def test_dry_run_impl_accepts_adhoc_yaml(env):
+    adhoc = GOOD_YAML.replace("name: mcp_demo", "name: adhoc_preview")
+    out = m.run_workflow_impl("", "预演", dry_run=True,
+                              registry_factory=env["factory"], yaml=adhoc,
+                              persist_as="never-written")
+    assert out["dry_run"] is True
+    assert out["name"] == "adhoc_preview"
+    assert out["persist_note"]
+    assert not (env["workflows"] / "never-written.yaml").exists()

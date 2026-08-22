@@ -113,24 +113,34 @@ def _register_tools(srv: MCPServer) -> None:
             return _render({"saved": False, "error": str(e), "next": "id 不合法"})
 
     @srv.tool()
-    def atlas_run_workflow(workflow_id: str, task: str, dry_run: bool = False,
+    def atlas_run_workflow(task: str, workflow_id: str = "", dry_run: bool = False,
                            node_overrides: dict | None = None,
-                           expected_execution_sha256: str | None = None) -> str:
-        """运行已保存的工作流(workflows/<workflow_id>.yaml)。同步阻塞到结束。
+                           expected_execution_sha256: str | None = None,
+                           yaml: str = "", persist_as: str = "") -> str:
+        """运行工作流。同步阻塞到结束。
+
+        workflow_id 与 yaml 二选一(都传时以 yaml 为准):
+        - workflow_id:运行已保存的 workflows/<workflow_id>.yaml;
+        - yaml:运行即时编写的自定义图全文,不落盘、不写 workflows/。
+        persist_as(可选):真实运行结束后,把 yaml 固化为
+        workflows/<persist_as>.yaml——新建要求 id 未被占用,更新需
+        expected_sha256 语义与 atlas_save_workflow 相同;dry_run 不固化。
 
         node_overrides 是封闭的本次运行节点参数覆盖；不改 YAML，不接受权限或拓扑字段。
         可覆盖:model/fallback/thinking/max_output_tokens/temperature/seed/
         timeout_s/retry/prompt(llm)、max_turns/timeout_s/retry/prompt/workdir
         (coding_agent;research 无 workdir)、prompt(human)。
         prompt 是完整替换本次运行的节点职责文本,不是追加;
-        consumes/outputs/图结构永远不可覆盖——要长期生效就让 AI 改 YAML。
+        consumes/outputs/图结构永远不可覆盖——要长期生效就用 persist_as 固化
+        或调用 atlas_save_workflow。
         dry_run=True 与真跑使用同一有效规格，只渲染、不花钱；
         dry_run=False 真实调用模型。暂停在 human 节点时返回 paused。
         """
         try:
             return _render(run_workflow_impl(
                 workflow_id, task, dry_run, node_overrides=node_overrides,
-                expected_execution_sha256=expected_execution_sha256))
+                expected_execution_sha256=expected_execution_sha256,
+                yaml=yaml, persist_as=persist_as))
         except ValueError as e:
             return _render({"error": str(e), "next": "id 不合法"})
 
@@ -350,15 +360,28 @@ def _validate_task(task: object) -> str:
 
 def dry_run_impl(workflow_id: str, task: str, node_overrides=None, *,
                  providers_path: Path | None = None, env_store=None,
-                 registry_factory=None, agent_runner_factory=None) -> dict:
-    """用与真跑相同的有效规格渲染，不执行、不花钱、不创建 run。"""
-    _check_id(workflow_id, "工作流")
+                 registry_factory=None, agent_runner_factory=None,
+                 yaml: str = "") -> dict:
+    """用与真跑相同的有效规格渲染，不执行、不花钱、不创建 run。
+
+    workflow_id 与 yaml 二选一:前者渲染已保存的图,后者渲染
+    harness 即时编写的自定义图(不落盘)。
+    """
+    if not yaml and not workflow_id:
+        return {"error": "要么传 yaml 全文(自定义图),要么传 workflow_id",
+                "next": "补上参数再调;两者都传时以 yaml 为准"}
+    if yaml:
+        _check_id(workflow_id or "adhoc", "工作流") if workflow_id else None
     try:
         task = _validate_task(task)
     except ValueError as e:
         return {"error": str(e), "next": "提供不超过 1 MiB 的非空任务文本"}
     try:
-        base_spec = spec_from_yaml_file(WORKFLOWS_DIR / f"{workflow_id}.yaml")
+        if yaml:
+            base_spec = spec_from_yaml(yaml, source="dry-run:<adhoc>")
+        else:
+            _check_id(workflow_id, "工作流")
+            base_spec = spec_from_yaml_file(WORKFLOWS_DIR / f"{workflow_id}.yaml")
         effective = build_effective_spec(base_spec, node_overrides)
         spec = effective.spec
     except SpecError as e:
@@ -420,7 +443,7 @@ def dry_run_impl(workflow_id: str, task: str, node_overrides=None, *,
                      "再真跑;未配置会被零成本拒绝")
     return {
         "dry_run": True,
-        "workflow": workflow_id,
+        "workflow": workflow_id or "(自定义图,未保存)",
         "name": spec.name,
         "task_chars": len(task),
         "nodes": renders,
@@ -442,21 +465,45 @@ def run_workflow_impl(workflow_id: str, task: str, dry_run: bool = False,
                       registry_factory=None, node_overrides=None, *,
                       providers_path: Path | None = None, env_store=None,
                       agent_runner_factory=None,
-                      expected_execution_sha256: str | None = None) -> dict:
-    """跑一张图。同步阻塞到完成/暂停/失败;事件实时落盘,界面实时可见。"""
+                      expected_execution_sha256: str | None = None,
+                      yaml: str = "", persist_as: str = "") -> dict:
+    """跑一张图。同步阻塞到完成/暂停/失败;事件实时落盘,界面实时可见。
+
+    workflow_id 与 yaml 二选一:前者跑已保存的图,后者跑 harness 即时
+    编写的自定义图(不写 workflows/,Atlas 没有落盘权限假设)。
+    persist_as 在真实运行结束后把该 yaml 固化为 workflows/<persist_as>.yaml
+    (走 save_workflow_impl 的校验/原子写/防覆盖;dry_run 不固化)。
+    """
     if dry_run:
-        return dry_run_impl(
+        preview = dry_run_impl(
             workflow_id, task, node_overrides,
             providers_path=providers_path, env_store=env_store,
             registry_factory=registry_factory,
-            agent_runner_factory=agent_runner_factory)
-    _check_id(workflow_id, "工作流")
+            agent_runner_factory=agent_runner_factory, yaml=yaml)
+        if persist_as:
+            preview["persist_as"] = persist_as
+            preview["persist_note"] = ("persist_as 只在真实运行(dry_run=False)"
+                                       "结束后固化;本次预演未写任何文件")
+        return preview
+    if not yaml and not workflow_id:
+        return {"error": "要么传 yaml 全文(自定义图),要么传 workflow_id",
+                "next": "补上参数再调;两者都传时以 yaml 为准"}
+    # 固化目标 id 在花钱之前校验:非法/保留名直接拒绝,不产生半途 run
+    if persist_as:
+        try:
+            _check_new_id(persist_as)
+        except ValueError as e:
+            return {"error": str(e), "next": "persist_as 换一个合法 id"}
     try:
         task = _validate_task(task)
     except ValueError as e:
         return {"error": str(e), "next": "提供不超过 1 MiB 的非空任务文本"}
     try:
-        base_spec = spec_from_yaml_file(WORKFLOWS_DIR / f"{workflow_id}.yaml")
+        if yaml:
+            base_spec = spec_from_yaml(yaml, source=f"run:<adhoc:{persist_as or 'once'}>")
+        else:
+            _check_id(workflow_id, "工作流")
+            base_spec = spec_from_yaml_file(WORKFLOWS_DIR / f"{workflow_id}.yaml")
         effective = build_effective_spec(base_spec, node_overrides)
     except SpecError as e:
         return {"error": str(e), "next": "有效规格不合法,运行未开始(零成本拒绝)"}
@@ -503,6 +550,11 @@ def run_workflow_impl(workflow_id: str, task: str, dry_run: bool = False,
     if result.status == "paused":
         summary["next"] = ("运行暂停在 human 节点:去 Web 界面批准或驳回,"
                            "之后用 atlas_get_run 查询后续")
+    # 运行已结束(含 done/paused/failed):按请求固化自定义图。
+    # 固化失败只如实回报,不影响已发生的运行结果。
+    if persist_as:
+        content = yaml if yaml.endswith("\n") else yaml + "\n"
+        summary["persisted"] = save_workflow_impl(persist_as, content)
     return summary
 
 
