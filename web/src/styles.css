@@ -1010,3 +1010,18 @@ input:focus, textarea:focus {
   display: flex; justify-content: space-between; margin-top: 40px;
   padding-top: 16px; border-top: 1px solid var(--color-line);
 }
+
+/* 工作流卡片删除按钮:默认低调,hover 卡片时才显眼,防误点 */
+.wf-delete {
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--color-ink-dim);
+  opacity: 0;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.wf-card:hover .wf-delete, .wf-delete:focus-visible { opacity: 1; }
+.wf-delete:hover { color: var(--color-danger, #c0392b); }

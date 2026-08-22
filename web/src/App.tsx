@@ -4,6 +4,7 @@ import { ReactFlowProvider } from '@xyflow/react';
 import {
   approveRun,
   deleteRun,
+  deleteWorkflow,
   getRun,
   getWorkflow,
   listProviders,
@@ -95,11 +96,12 @@ const KIND_BADGE: Record<string, { label: string; cls: string }> = {
 /** 工作流发现(PLAN-v3 §2.5):示例是起点不是上限——卡片讲清楚
  *  用途、结构、调用量与要求,自定义图与示例同引擎。 */
 function WorkflowCard({
-  w, active, onOpen,
+  w, active, onOpen, onDelete,
 }: {
   w: WorkflowListItem;
   active: boolean;
   onOpen: () => void;
+  onDelete: () => void;
 }) {
   const meta = w.meta;
   const kind = KIND_BADGE[meta?.kind ?? 'custom'] ?? KIND_BADGE.custom;
@@ -114,6 +116,16 @@ function WorkflowCard({
       <div className="wf-card-head">
         <span className="li-title">{meta?.title || w.name}</span>
         <span className={`badge ${kind.cls}`}>{kind.label}</span>
+        <button
+          className="icon-btn wf-delete"
+          title="删除工作流定义"
+          aria-label={`删除工作流 ${meta?.title || w.name}`}
+          onClick={(ev) => {
+            ev.stopPropagation();
+            onDelete();
+          }}
+          onKeyDown={(ev) => ev.stopPropagation()}
+        >✕</button>
       </div>
       <div className="li-sub">
         {w.valid
@@ -123,7 +135,7 @@ function WorkflowCard({
       {w.valid && (meta?.tags?.length || w.node_count != null || meta?.estimated_calls != null) && (
         <div className="wf-card-meta num">
           {w.node_count != null && <span>{w.node_count} 节点</span>}
-          {meta?.estimated_calls != null && <span>约 {meta.estimated_calls} 次调用</span>}
+          {meta?.estimated_calls != null && <span>约 {meta?.estimated_calls} 次调用</span>}
           {meta?.requires?.human_approval && <span className="accent">需人工批准</span>}
           {meta?.requires?.workdir && <span className="accent">需工作目录</span>}
           {meta?.tags?.slice(0, 3).map((t) => <span key={t} className="chip">{t}</span>)}
@@ -465,6 +477,28 @@ export default function App() {
     }
   };
 
+  const handleDeleteWorkflow = async (w: WorkflowListItem) => {
+    const label = w.meta?.title || w.name || w.id;
+    const isExample = w.meta?.kind === 'example';
+    const suffix = isExample
+      ? ' 这是内置示例,默认受保护,删除前需再次确认(可通过 git 恢复)。'
+      : ' 只删除图定义文件,历史运行记录不受影响。';
+    if (!window.confirm(`删除工作流 ${label}(${w.id})?${suffix}`)) return;
+    if (isExample && !window.confirm('再次确认:真的要删除内置示例?')) return;
+    setError(null);
+    try {
+      await deleteWorkflow(w.id, isExample);
+      setWorkflows((current) => current.filter((item) => item.id !== w.id));
+      if (spec?.id === w.id) {
+        setSpec(null);
+        navigateHash(hrefFor({ view: 'observe', workflowId: null, runId: null, nodeId: null }));
+      }
+    } catch (e) {
+      setError((e as Error).message);
+      listWorkflows().then(setWorkflows).catch(() => undefined);
+    }
+  };
+
   const handleApproval = async (decision: 'approve' | 'reject') => {
     if (!runId) return;
     try {
@@ -595,6 +629,7 @@ export default function App() {
                 w={w}
                 active={spec?.id === w.id}
                 onOpen={() => openWorkflow(w.id)}
+                onDelete={() => handleDeleteWorkflow(w)}
               />
             ))}
             {shownWorkflows.length === 0 && (

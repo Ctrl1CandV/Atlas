@@ -289,6 +289,21 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
             raise HTTPException(400, str(e))
         return _workflow_payload(spec, wid)
 
+    @app.delete("/api/workflows/{wid}")
+    def delete_workflow(wid: str, request: Request):
+        """删除图定义文件(与 MCP 的 atlas_delete_workflow 同一实现)。
+        界面按钮自带确认;内置示例默认保护,需 allow_example 查询参数。"""
+        from atlas.mcp import delete_workflow_impl
+        _check_id(wid, "工作流")
+        result = delete_workflow_impl(
+            wid, confirm=True,
+            allow_example="allow_example" in request.query_params,
+            workflows_dir=workflows_dir)
+        if not result.get("deleted"):
+            status = 404 if "没有这个工作流" in result.get("error", "") else 400
+            raise HTTPException(status, result.get("error", "删除失败"))
+        return result
+
     @app.post("/api/workflows/{wid}/preview")
     def preview_run(wid: str, body: dict):
         """零成本预览本次将执行的具体规格；不分配 run_id、不建目录。

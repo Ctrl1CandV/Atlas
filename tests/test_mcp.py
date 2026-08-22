@@ -122,7 +122,8 @@ def test_tool_wrappers_registered():
     names = {t.name for t in asyncio.run(tools())}
     assert names == {"atlas_validate_workflow", "atlas_save_workflow",
                      "atlas_run_workflow", "atlas_list_workflows",
-                     "atlas_get_run", "atlas_resume_run"}, names
+                     "atlas_get_run", "atlas_resume_run",
+                     "atlas_delete_workflow"}, names
 
 
 def test_validate_and_save_errors_remain_strings_with_source_location(env):
@@ -297,7 +298,8 @@ def test_mcp_streamable_http_mounted_in_web_app(tmp_path):
         names = {t["name"] for t in listing["result"]["tools"]}
         assert names == {"atlas_validate_workflow", "atlas_save_workflow",
                          "atlas_run_workflow", "atlas_list_workflows",
-                         "atlas_get_run", "atlas_resume_run"}
+                         "atlas_get_run", "atlas_resume_run",
+                         "atlas_delete_workflow"}
 
         _, _, call = post({
             "jsonrpc": "2.0", "id": 3, "method": "tools/call",
@@ -385,3 +387,47 @@ def test_dry_run_impl_accepts_adhoc_yaml(env):
     assert out["name"] == "adhoc_preview"
     assert out["persist_note"]
     assert not (env["workflows"] / "never-written.yaml").exists()
+
+
+def test_delete_workflow_impl_requires_confirm_and_valid_id(env):
+    out = m.delete_workflow_impl("demo")
+    assert out["deleted"] is False and "confirm" in out["error"]
+    with pytest.raises(ValueError, match="id 只允许"):
+        m.delete_workflow_impl("../evil", confirm=True)
+    assert (env["workflows"] / "demo.yaml").exists()
+
+
+def test_delete_workflow_impl_removes_custom_and_protects_example(env):
+    (env["workflows"] / "custom-thing.yaml").write_text(
+        "name: custom-thing\nnodes:\n  - id: a\n    type: llm\n    model: Fake:primary\n"
+        "    prompt: p\n    consumes: [task]\nedges:\n  - from: a\n    to: END\n",
+        encoding="utf-8")
+    out = m.delete_workflow_impl("custom-thing", confirm=True)
+    assert out["deleted"] is True
+    assert not (env["workflows"] / "custom-thing.yaml").exists()
+
+    example = "name: ex\nmeta:\n  kind: example\nnodes:\n  - id: a\n    type: llm\n    model: Fake:primary\n" \
+              "    prompt: p\n    consumes: [task]\nedges:\n  - from: a\n    to: END\n"
+    (env["workflows"] / "shipped-ex.yaml").write_text(example, encoding="utf-8")
+    blocked = m.delete_workflow_impl("shipped-ex", confirm=True)
+    assert blocked["deleted"] is False and "内置示例" in blocked["error"]
+    forced = m.delete_workflow_impl("shipped-ex", confirm=True, allow_example=True)
+    assert forced["deleted"] is True
+
+
+def test_delete_workflow_impl_missing_is_honest(env):
+    out = m.delete_workflow_impl("ghost", confirm=True)
+    assert out["deleted"] is False and "没有这个工作流" in out["error"]
+
+
+def test_validate_by_id_echoes_yaml_and_sha(env):
+    out = m.validate_workflow_impl(workflow_id="demo")
+    assert out["valid"] is True
+    assert "name: mcp_demo" in out["yaml"]
+    import hashlib
+    expected = hashlib.sha256(
+        (env["workflows"] / "demo.yaml").read_bytes()).hexdigest()
+    assert out["file_sha256"] == expected
+    # yaml 全文入参时不回显文件字段
+    inline = m.validate_workflow_impl(yaml_text=GOOD_YAML)
+    assert "yaml" not in inline and "file_sha256" not in inline

@@ -26,6 +26,9 @@ async function get<T>(url: string): Promise<T> {
 
 export const listWorkflows = () => get<WorkflowListItem[]>('/api/workflows');
 export const getWorkflow = (id: string) => get<WorkflowSpec>(`/api/workflows/${id}`);
+export const deleteWorkflow = (id: string, allowExample = false) =>
+  req<{ deleted: boolean; workflow_id: string; next: string }>(
+    `/api/workflows/${encodeURIComponent(id)}${allowExample ? '?allow_example=1' : ''}`, 'DELETE');
 export const previewWorkflow = (id: string, nodeOverrides: NodeOverrides = {}) =>
   req<WorkflowPreview>(`/api/workflows/${id}/preview`, 'POST', {
     node_overrides: nodeOverrides,

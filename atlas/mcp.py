@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Atlas MCP 服务:6 个工具,刻意保持很小(架构第 7.1 节)。
+"""Atlas MCP 服务:7 个工具,刻意保持很小(架构第 7.1 节)。
 
 harness 里的 agent 是这套工具的用户:写 YAML → validate(零成本)→
-dry_run(零成本)→ run(真实调用才花钱)→ get_run 查账。
-
+dry_run(零成本)→ run(真实调用才花钱)→ get_run 查账;
+save/delete 与按 id 校验回显的 yaml+file_sha256 构成完整的
+读-改-写闭环,harness 无需文件系统权限。
 每个返回都带 next(下一步建议),减少 agent 来回试错。
 用法:python -m atlas.mcp(stdio)。
 """
@@ -64,7 +65,9 @@ def _tool_instructions() -> str:
         "本地多模型工作流引擎:你写 YAML 定义节点和边,引擎跑图,"
         "人在 Web 界面(http://127.0.0.1:8321)实时看每个节点的完整输入输出。"
         "纪律:先 atlas_validate_workflow,再 dry_run,过了才真跑;"
-        "大图或新图必先 dry_run。"
+        "大图或新图必先 dry_run。自定义图用 run 的 yaml 参数直跑,"
+        "要保留就 persist_as;改已有图先按 id 校验取回 yaml 与 file_sha256,"
+        "改完带 expected_sha256 保存。"
     )
 
 
@@ -91,7 +94,9 @@ def _register_tools(srv: MCPServer) -> None:
         可达性、死环、有环必须设 max_iterations、consumes 引用、异质性提示。
         返回 JSON；校验不过时 error 会指出具体字段或图结构问题，并统一附带 YAML
         path、line、column（整图聚合错误没有唯一坐标时只返回 path）。
-        两个参数都传时以 yaml 全文为准。
+        按 workflow_id 校验时额外回显 yaml 原文与 file_sha256——修改已有图的
+        读-改-写闭环:改 yaml 内容后带 file_sha256 作为 expected_sha256 调
+        atlas_save_workflow。两个参数都传时以 yaml 全文为准。
         """
         try:
             return _render(validate_workflow_impl(yaml, workflow_id))
@@ -168,6 +173,21 @@ def _register_tools(srv: MCPServer) -> None:
             return _render({"error": str(e), "next": "id 不合法"})
 
     @srv.tool()
+    def atlas_delete_workflow(workflow_id: str, confirm: bool = False,
+                              allow_example: bool = False) -> str:
+        """删除一个已保存的工作流定义文件(零成本;不影响任何运行记录)。
+
+        必须显式传 confirm: true;内置示例(meta.kind=example)默认受保护,
+        确要删除需再传 allow_example: true。运行的事件账本与产物不依赖
+        workflows/ 里的文件,删除后历史 run 仍可查看。
+        """
+        try:
+            return _render(delete_workflow_impl(
+                workflow_id, confirm=confirm, allow_example=allow_example))
+        except ValueError as e:
+            return _render({"deleted": False, "error": str(e), "next": "id 不合法"})
+
+    @srv.tool()
     def atlas_resume_run(run_id: str) -> str:
         """仅恢复动态判定为 interrupted 的运行；paused 必须在 Web 审批。"""
         try:
@@ -201,11 +221,21 @@ def validate_workflow_impl(yaml_text: str = "", workflow_id: str = "") -> dict:
     try:
         if yaml_text:
             spec = spec_from_yaml(yaml_text)
+            raw_yaml = ""
+            file_sha = None
         else:
-            spec = spec_from_yaml_file(WORKFLOWS_DIR / f"{workflow_id}.yaml")
+            path = WORKFLOWS_DIR / f"{workflow_id}.yaml"
+            raw_bytes = path.read_bytes()
+            import hashlib
+            file_sha = hashlib.sha256(raw_bytes).hexdigest()
+            raw_yaml = raw_bytes.decode("utf-8")
+            spec = spec_from_yaml(raw_yaml, source=str(path))
     except SpecError as e:
         return {"valid": False, "error": str(e),
                 "next": "按 error 里的指引改 YAML,再校验一次。零成本,随便试"}
+    except OSError as e:
+        return {"valid": False, "error": f"找不到图定义文件或无法读取:{e}",
+                "next": "检查 workflow_id;或直接传 yaml 全文"}
 
     models = sorted({n.model for n in spec.nodes if n.type == "llm"} |
                     {f for n in spec.nodes if n.type == "llm" for f in n.fallback})
@@ -222,7 +252,7 @@ def validate_workflow_impl(yaml_text: str = "", workflow_id: str = "") -> dict:
             if (a.id in node_providers and b.id in node_providers
                     and node_providers[a.id] == node_providers[b.id]):
                 same_vendor_pairs.append([a.id, b.id])
-    return {
+    result = {
         "valid": True,
         "name": spec.name,
         "entry": spec.entry,
@@ -239,9 +269,19 @@ def validate_workflow_impl(yaml_text: str = "", workflow_id: str = "") -> dict:
             "note": ("存在同厂商节点对:交叉验证类流程里它们不算独立意见"
                      if same_vendor_pairs else "各 llm 节点厂商互不相同"),
         },
-        "next": ("校验通过。先 atlas_run_workflow(dry_run=True) 渲染确认,"
-                 "再真实运行。或直接把 YAML 存进 workflows/ 目录"),
     }
+    if file_sha is not None:
+        # 读-改-写闭环:按 id 校验时回显原文与当前哈希,
+        # 修改后带 file_sha256 作为 expected_sha256 调 atlas_save_workflow。
+        result["yaml"] = raw_yaml
+        result["file_sha256"] = file_sha
+        result["next"] = ("校验通过。先 atlas_run_workflow(dry_run=True) 渲染确认,"
+                          "再真实运行。要修改:改 yaml 字段内容,带 file_sha256 作为"
+                          " expected_sha256 调 atlas_save_workflow")
+    else:
+        result["next"] = ("校验通过。先 atlas_run_workflow(dry_run=True) 渲染确认,"
+                          "再真实运行。或用 atlas_save_workflow / persist_as 保存")
+    return result
 
 
 def save_workflow_impl(workflow_id: str, yaml_text: str,
@@ -346,6 +386,40 @@ def save_workflow_impl(workflow_id: str, yaml_text: str,
         "next": ("保存成功。刷新 Web 列表可见;先 dry_run 确认渲染再真跑。"
                  "后续更新请带上本次返回的 file_sha256 作为 expected_sha256"),
     }
+
+
+def delete_workflow_impl(workflow_id: str, *, confirm: bool = False,
+                         allow_example: bool = False,
+                         workflows_dir: Path | None = None) -> dict:
+    """删除 workflows/<workflow_id>.yaml。
+
+    防误删合同:
+    - 必须显式 confirm=true(harness 不能凭推断删除);
+    - 内置示例(meta.kind=example)默认保护,需 allow_example=true 才可删;
+    - id 白名单拒绝路径穿越;文件不存在如实报告,不静默成功;
+    - 删除只影响图定义文件:运行的事件账本/产物/规格快照不受影响。
+    """
+    _check_id(workflow_id, "工作流")
+    if not confirm:
+        return {"deleted": False,
+                "error": "删除是显式操作:必须传 confirm=true",
+                "next": "确认要删再带 confirm 调用;先 atlas_list_workflows 核对 id"}
+    target = (workflows_dir or WORKFLOWS_DIR) / f"{workflow_id}.yaml"
+    if not target.is_file():
+        return {"deleted": False, "error": f"没有这个工作流:{workflow_id}",
+                "next": "用 atlas_list_workflows 核对"}
+    try:
+        spec = spec_from_yaml_file(target)
+        kind = spec.meta.kind
+    except SpecError:
+        kind = ""   # 校验不过的文件也允许删除(清理坏图)
+    if kind == "example" and not allow_example:
+        return {"deleted": False,
+                "error": f"{workflow_id} 是内置示例(meta.kind=example),默认保护",
+                "next": "确要删除请加 allow_example=true;示例可通过 git 恢复"}
+    target.unlink()
+    return {"deleted": True, "workflow_id": workflow_id,
+            "next": "已删除图定义;历史运行记录不受影响。误删示例可用 git 恢复"}
 
 
 def _validate_task(task: object) -> str:
