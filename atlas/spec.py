@@ -23,6 +23,14 @@ NODE_TYPES = frozenset({"llm", "human", "research", "coding_agent"})
 _AGENT_TYPES = frozenset({"research", "coding_agent"})
 
 _NODE_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
+# Windows 保留设备名:节点 id 会成为产物文件名(<node>.input/.output/.diff),
+# id 首个点分量为 CON/PRN/AUX/NUL/COM1-9/LPT1-9 时,Windows 把整个文件名
+# 当作设备访问——exists() 恒为 True,write-once 命名会误判"冲突无法消解"。
+# 在校验期拒绝,而不是等到运行中炸出 IntegrityError。
+_WIN_RESERVED_STEMS = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)})
 _MODEL_REF_RE = re.compile(r"^[A-Za-z0-9_-]+:[A-Za-z0-9_.\-]+$")
 DEFAULT_ROUTE_FIELD = "verdict"
 DEFAULT_MAX_ITERATIONS = 3
@@ -794,6 +802,11 @@ def _parse_node(rn, *, where: str) -> NodeSpec:
     nid = rn.get("id")
     if not isinstance(nid, str) or not _NODE_ID_RE.match(nid):
         raise SpecError(f"{where} 的 id {nid!r} 不合法(允许字母数字_.-,首字符不能是 . 或 -)")
+    if nid.split(".")[0].upper() in _WIN_RESERVED_STEMS:
+        raise SpecError(
+            f"{where} 的 id {nid!r} 以 Windows 保留设备名开头"
+            f"({nid.split('.')[0].upper()}):它会成为产物文件名,在 Windows 上"
+            f"被当作设备而不是文件。请换一个 id")
 
     ntype = rn.get("type")
     if ntype not in NODE_TYPES:
