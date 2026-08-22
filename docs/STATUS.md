@@ -15,7 +15,7 @@
 | 能力 | 当前合同 |
 |---|---|
 | YAML 静态图 | `llm`、`research`、`coding_agent`、静态并行、条件路由、有界循环和 human gate |
-| MCP 控制面 | 七个工具：validate、save、run、list workflows、get run、resume interrupted run、delete workflow |
+| MCP 控制面 | 六个工具：validate、save、run、list workflows、get run、resume interrupted run;工作流删除在 Web 页面 |
 | 零成本预检 | validate 与 dry-run 不调用供应商；`expected_execution_sha256` 可绑定预演与真跑身份 |
 | 可审计运行 | append-only JSONL 事件、write-once 产物、读取时 SHA-256 断言、有效规格快照 |
 | 成本保护（P0min） | 有 `max_cost_usd` 时派发前持久化 reservation；未知费率保守占用剩余预算；无 cap 不虚构金额 |
@@ -53,7 +53,7 @@
 - Python：427 passed、1 skipped、5 个 `real_api` deselected。
 - Web：22 tests passed，lint 0，production build 成功。
 - 六个 shipped workflow 严格离线 validate/dry-run：0 provider call、0 agent call、0 run directory。
-- 当时最终 release sdist：100 entries、0 scan findings；Python 3.12 离线安装、版本、三个 console scripts、当时为六个 MCP 工具;后续分支增至七个(新增 delete workflow)。spec parse、配置初始化通过。
+- 当时最终 release sdist：100 entries、0 scan findings；Python 3.12 离线安装、版本、三个 console scripts、当时为六个 MCP 工具。spec parse、配置初始化通过。
 - 阶段 D 经 MCP stdio 对 Deepseek、SuperAI、Kiro 执行了示例矩阵、自定义图、agent 与失败路径；结果并非每个模型组合都成功，失败均按真实结果记录。
 
 这些数字是该源状态的历史证据，不自动证明后续工作树。当前公开仓库没有完整 CI workflow，因此没有可引用的公开 Windows CI 通过记录；本地阶段 D 也不等于受保护 GitHub environment 的 real-API job。
@@ -72,6 +72,7 @@
 
 实施顺序、依赖和逐项验收标准见 [`ROADMAP.md`](ROADMAP.md)。原 rc.1 与 benchmark 计划已经关闭，只保留为历史记录：
 
+- [`PLAN-rejection-reduction.md`](PLAN-rejection-reduction.md) — 减少截断/非法 JSON/成本帽三类拒绝性错误的已评审方向
 - [`PLAN-rc1-followup.md`](PLAN-rc1-followup.md)
 - [`PLAN-benchmark-optimizations.md`](PLAN-benchmark-optimizations.md)
 - [`archive/README.md`](archive/README.md)

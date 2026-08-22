@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Atlas MCP 服务:7 个工具,刻意保持很小(架构第 7.1 节)。
+"""Atlas MCP 服务:6 个工具,刻意保持很小(架构第 7.1 节)。
 
 harness 里的 agent 是这套工具的用户:写 YAML → validate(零成本)→
 dry_run(零成本)→ run(真实调用才花钱)→ get_run 查账;
-save/delete 与按 id 校验回显的 yaml+file_sha256 构成完整的
-读-改-写闭环,harness 无需文件系统权限。
+save 与按 id 校验回显的 yaml+file_sha256 构成完整的读-改-写闭环,
+harness 无需文件系统权限。删除工作流是页面操作,不在工具面里。
 每个返回都带 next(下一步建议),减少 agent 来回试错。
 用法:python -m atlas.mcp(stdio)。
 """
@@ -171,21 +171,6 @@ def _register_tools(srv: MCPServer) -> None:
             return _render(summarize_run(run_id))
         except ValueError as e:
             return _render({"error": str(e), "next": "id 不合法"})
-
-    @srv.tool()
-    def atlas_delete_workflow(workflow_id: str, confirm: bool = False,
-                              allow_example: bool = False) -> str:
-        """删除一个已保存的工作流定义文件(零成本;不影响任何运行记录)。
-
-        必须显式传 confirm: true;内置示例(meta.kind=example)默认受保护,
-        确要删除需再传 allow_example: true。运行的事件账本与产物不依赖
-        workflows/ 里的文件,删除后历史 run 仍可查看。
-        """
-        try:
-            return _render(delete_workflow_impl(
-                workflow_id, confirm=confirm, allow_example=allow_example))
-        except ValueError as e:
-            return _render({"deleted": False, "error": str(e), "next": "id 不合法"})
 
     @srv.tool()
     def atlas_resume_run(run_id: str) -> str:
@@ -391,8 +376,10 @@ def save_workflow_impl(workflow_id: str, yaml_text: str,
 def delete_workflow_impl(workflow_id: str, *, confirm: bool = False,
                          allow_example: bool = False,
                          workflows_dir: Path | None = None) -> dict:
-    """删除 workflows/<workflow_id>.yaml。
+    """删除 workflows/<workflow_id>.yaml(领域函数,Web API 使用)。
 
+    删除是页面操作,不注册进 MCP 工具面;实现保留在这里与保存逻辑
+    同居一处,防两套删除行为漂移。
     防误删合同:
     - 必须显式 confirm=true(harness 不能凭推断删除);
     - 内置示例(meta.kind=example)默认保护,需 allow_example=true 才可删;

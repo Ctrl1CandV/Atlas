@@ -122,8 +122,7 @@ def test_tool_wrappers_registered():
     names = {t.name for t in asyncio.run(tools())}
     assert names == {"atlas_validate_workflow", "atlas_save_workflow",
                      "atlas_run_workflow", "atlas_list_workflows",
-                     "atlas_get_run", "atlas_resume_run",
-                     "atlas_delete_workflow"}, names
+                     "atlas_get_run", "atlas_resume_run"}, names
 
 
 def test_validate_and_save_errors_remain_strings_with_source_location(env):
@@ -298,8 +297,7 @@ def test_mcp_streamable_http_mounted_in_web_app(tmp_path):
         names = {t["name"] for t in listing["result"]["tools"]}
         assert names == {"atlas_validate_workflow", "atlas_save_workflow",
                          "atlas_run_workflow", "atlas_list_workflows",
-                         "atlas_get_run", "atlas_resume_run",
-                         "atlas_delete_workflow"}
+                         "atlas_get_run", "atlas_resume_run"}
 
         _, _, call = post({
             "jsonrpc": "2.0", "id": 3, "method": "tools/call",
