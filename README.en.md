@@ -10,6 +10,10 @@ It addresses one concrete problem: when you chain multiple LLM calls into a pipe
 
 ![Atlas run view](assets/observe-run.png)
 
+Click any node to see its full input projection, output artifact, the model actually used, tokens, and duration. When a run pauses at a human gate, the approval bar lists the exact materials under review plus the full projection (with hashes) — approve binds that material by hash, and rejecting requires a stated reason.
+
+![Atlas node detail](assets/observe-node.png)
+
 ## What it looks like
 
 A graph = one YAML file. For example, three perspectives analyzed in parallel, synthesized, handed to a coding agent, then approved by a human:
@@ -49,7 +53,9 @@ This is a record of a real run (2026-08-19, DeepSeek deepseek-v4-flash): all 7 n
 
 All come from real provider API runs before release — including failures, because failures are part of the record too.
 
-**Repair loop + code review + human gate** (the `code-change-review-approve` example, SuperAI doubao-seed-2.0-lite). Task: "fix the sample bug in demo-project and self-test". Round one: the implementer fixed the fizzbuzz ordering bug but also created two unrelated files and never actually ran the tests; the reviewer returned a structured `repair` verdict with an issue list. Round two: the implementer cleaned up; the reviewer returned `pass`. Human approval ended the run. Two rounds cost $0.96 total, with both diffs archived as downloadable artifacts.
+**Repair loop + code review + human gate** (the `code-change-review-approve` example, SuperAI doubao-seed-2.0-lite). Task: "fix the sample bug in demo-project and self-test". Round one: the implementer fixed the fizzbuzz ordering bug but also created two unrelated files and never actually ran the tests; the reviewer returned a structured `repair` verdict with an issue list. Round two: the implementer cleaned up; the reviewer returned `pass`. Human approval ended the run. Two rounds cost $0.96 total, with both diffs archived as downloadable artifacts. (Honest note: back edges do not carry reviewer feedback today — round two re-implemented from the frozen baseline; feedback-carrying loops are on the backlog.)
+
+**10-node custom graph, run straight from MCP** (2026-08-22, four models across DeepSeek and SuperAI). Describe the goal to an AI assistant with the Atlas skill loaded and it writes the graph on the spot: three parallel scouts → synthesis → structured review (conditional routing) → a revision branch that consumes the review → re-review → final edit → **human approval** → a post-gate closer. The whole graph ran via the `yaml` argument of `atlas_run_workflow` over the MCP HTTP endpoint, never touching disk. All 8 executed nodes passed on the first attempt (review returned pass immediately); total wall time 361s of which 294s were human wait, about $0.01, and every artifact hash re-verified independently afterwards.
 
 **Honestly recorded failures**. The same test matrix also produced: reasoning models burning their entire output budget on thinking, leaving visible text empty (caught by the empty-output check); a prompt only 1% delivered (caught by the truncation sentinel); and an agent attempt self-reporting ~$10.50 whose automatic retry was manually killed — that incident directly motivated today's cost reservation mechanism and the rule that every real agent run must carry a budget. The full matrix is documented in [`docs/STATUS.md`](docs/STATUS.md).
 
@@ -68,7 +74,7 @@ uv run atlas-web
 
 One command starts both the Web UI (<http://127.0.0.1:8321>) and the MCP endpoint (`http://127.0.0.1:8321/mcp`). Point Claude Code / ZCode / Cursor at that URL and your AI assistant can write graphs, validate, preview, and run for you; alternatively use the repo's `.mcp.json` for zero-config stdio. Setup details in [`docs/mcp.md`](docs/mcp.md).
 
-First start generates local configuration from templates (never overwriting existing files); credentials live only in `config/.env`. The six bundled examples (parallel synthesis, debate judge, map-reduce, repair loop, human approval pipeline, code-change review) validate and preview out of the box; bind your configured models before any real run.
+First start generates local configuration from templates (never overwriting existing files); credentials live only in `config/.env`. The six bundled examples (parallel synthesis, debate judge, map-reduce, retry loop, human approval pipeline, code-change review) validate and preview out of the box; bind your configured models before any real run.
 
 ## Design principles
 
@@ -77,7 +83,7 @@ First start generates local configuration from templates (never overwriting exis
 - **Fake success degrades**: HTTP 200 is not success. Empty output, truncation, or missing required fields trigger a cross-vendor fallback chain, with degradation explicitly labeled.
 - **Auditable end to end**: an append-only JSONL event ledger is the single source of truth; everything the UI shows can be traced to it; approval evidence binds baseline/result/patch digests.
 - **Crash-recoverable**: if the controller dies, the run becomes interrupted; resuming re-executes only unfinished nodes without double-counting reserved budget.
-- **Human in the loop**: `human` nodes pause the graph in the UI until you have reviewed the real artifacts.
+- **Human in the loop**: `human` nodes pause the graph in the UI; the approval bar lists the materials under review and the full projection (hashed, one click to open), and rejecting requires a stated reason.
 
 ## Capabilities and limits (stated plainly)
 
@@ -89,6 +95,8 @@ First start generates local configuration from templates (never overwriting exis
 - Names like "multi-vendor debate" describe topology only; opinions are independent only when genuinely distinct providers are bound.
 
 ## Testing and verification
+
+2026-08-22 post-audit baseline: Python tests **446 passed** (plus 5 real-provider tests excluded by default — opt-in and possibly billable); Web tests 22 passed, lint clean, production build OK; a 10-node custom graph ran end-to-end over the MCP HTTP endpoint including human approval (see the real runs above).
 
 2026-08-19 release baseline: Python tests **427 passed** (plus 5 real-provider tests excluded by default — opt-in and possibly billable); Web tests 22 passed, lint clean, production build OK; strict offline validate/dry-run of all six example workflows with 0 provider calls; release sdist scanned at 100 entries with 0 findings. These numbers describe that source state; see [`docs/STATUS.md`](docs/STATUS.md).
 

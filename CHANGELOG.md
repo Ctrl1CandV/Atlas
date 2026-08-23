@@ -4,14 +4,29 @@ All notable changes to Atlas are documented here. The format follows Keep a Chan
 
 ## Unreleased
 
+### Added
+- `atlas-web` now serves the same six MCP tools over streamable-http at `/mcp`, so harnesses can connect by URL instead of a stdio subprocess; the stdio entry point is unchanged.
+- `atlas_run_workflow` accepts a full custom graph as `yaml` text (ad-hoc run, nothing written) and can solidify it into `workflows/` after a real run via `persist_as`, reusing the same validation and anti-overwrite contract.
+- Workflows can be deleted from the Web UI; `atlas_validate_workflow` echoes `file_sha256` so agents can do a read-modify-write loop through `atlas_save_workflow`.
+- Paused human gates now show a review-materials panel in the Web UI: the artifacts the gate consumes and the full approval projection, each with its SHA-256, openable in the artifact workspace.
+- Rejecting a human gate now requires a reason, enforced synchronously by both the Web UI and the API (`400` before any run lock is touched); approvals may still omit a comment.
+
 ### Changed
-- Made the primary README Chinese-first and added a full English companion, badges, product highlights, and real run/node screenshots.
-- Hardened the existing release-assets workflow to build only from a stable version tag, reserve a new draft Release atomically, and publish assets without replacing an existing Release.
-- Corrected the source-distribution include set so the English README, screenshots, and generic project-level `.mcp.json` ship together; removed the deleted `README.zh-CN.md` entry.
+- Rewrote the READMEs around real runs: the shipped example YAML with its actual ledgered cost, honest failure cases from the run matrix, and measured capability boundaries.
+- Renamed the shipped loop example's claim from "repair loop" to bounded retry: back edges re-run a node with the same static `consumes`, so reviewer feedback does not reach the revised node. The example YAML, in-app guide, and skill now say this explicitly; a feedback-carrying loop design is recorded in `docs/BACKLOG.md`.
+
+### Fixed
+- The MCP route merge no longer swallows `GET /` (the SPA briefly returned 404 when both were mounted).
+- Manual model entry stays reachable in Settings when provider discovery fails.
+- Windows reserved device names (`CON`, `PRN`, `COM1`…) are rejected as node ids at validation time, before any run directory is created.
+- In-app guide navigation: the `mcp-human` and `development` chapters were unreachable via URL and pager (the router whitelist missed them).
+- The offline CI scan no longer reads the deleted `README.zh-CN.md`; it scans `README.en.md` instead.
 
 ### Documentation
 - Added a v0.1.0 provenance record with an honest tag-versus-artifact-build disclosure.
 - The public README and screenshots above were committed after `v0.1.0`; they are not part of that tag or its published sdist.
+- Refreshed `docs/STATUS.md` to the 2026-08-22 source state: new MCP capabilities, the 10-node ad-hoc real run, and the current test baseline.
+- Added `docs/PLAN-post-audit-2026-08-22.md`: consolidated post-audit fixes and phasing.
 
 ## 0.1.0 - 2026-08-19
 
