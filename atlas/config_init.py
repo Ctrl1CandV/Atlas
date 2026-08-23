@@ -45,18 +45,16 @@ class InitResult:
 def _initialization_lock(config_dir: Path) -> Iterator[None]:
     """取得进程内锁和稳定文件上的 OS 排他锁。
 
-    锁文件只创建、不替换也不删除；notice/journal 的 replace 不会改变锁对象。
+    锁文件只创建、不写内容、不删除:Windows/POSIX 的区域锁都允许锁定
+    空文件的字节范围。此前"先写种子字节再上锁"在两个进程并发初始化时,
+    后来者的写会撞上前者已锁的字节 0 → PermissionError [Errno 13]
+    (2026-08-23 公开 CI 两次实证);不写就不会撞。
     """
     root = Path(config_dir)
     root.mkdir(parents=True, exist_ok=True)
     lock_path = root / _LOCK_NAME
     with _NOTICE_LOCK:
         with lock_path.open("a+b") as lock_file:
-            lock_file.seek(0, os.SEEK_END)
-            if lock_file.tell() == 0:
-                lock_file.write(b"\0")
-                lock_file.flush()
-                os.fsync(lock_file.fileno())
             lock_file.seek(0)
             if os.name == "nt":
                 import msvcrt

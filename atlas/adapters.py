@@ -11,6 +11,7 @@ DegradedOutput 与 TransportError 走同一条降级路径——这就是「假�
 """
 import hashlib
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Iterable
 
@@ -479,6 +480,13 @@ class CallOutcome:
     attempts: tuple[CallAttempt, ...] = field(default_factory=tuple)
 
 
+class RunCancelled(Exception):
+    """P2 协作式取消:controller 在消费点看到取消请求后抛出。
+
+    治理类信号,不属于内容失败——不计熔断、不走降级,直接结束整个 run。
+    """
+
+
 class AllCandidatesFailed(Exception):
     """主模型与全部备用都失败。attempts 里是每一次的失败原因。"""
 
@@ -558,23 +566,33 @@ def call_with_fallback(
     after_attempt=None,
     remaining_timeout=None,
     sleep_fn=None,
+    cancel_requested=None,
 ) -> CallOutcome:
     """失败链主入口。假成功与传输错误同路降级;全部失败则抛 AllCandidatesFailed。
 
     M4 节点参数:thinking_tier 按候选各自的真实能力映射(不支持的候选跳过
     并记账,不静默丢掉意图);temperature/seed 原样进请求体。
+    cancel_requested()(P2 协作式取消)在候选切换、同模型重试等待与每次
+    发起前消费:为真立即抛 RunCancelled,不再发起新调用;在途调用只能等它
+    返回或超时(不宣称任意时刻强杀)。
     """
     from atlas.thinking import ThinkingUnsupported, thinking_request_params
 
     attempts: list[CallAttempt] = []
     candidates = [model_ref, *fallback_refs]
     cand_retries_left = {}   # 每个候选的同模型重试余额(retry 只对传输失败)
+
+    def _check_cancel(where: str) -> None:
+        if cancel_requested is not None and cancel_requested():
+            raise RunCancelled(f"取消请求已到达({where})")
+
     idx = -1
     while True:
         idx += 1
         if idx >= len(candidates):
             break
         cand = candidates[idx]
+        _check_cancel(f"候选切换到 {cand}")
         adapter, model_id = registry.resolve(cand)
         if breaker.is_open(cand):
             attempts.append(CallAttempt(cand, "BreakerOpen", "熔断中(连续传输失败),跳过"))
@@ -619,6 +637,7 @@ def call_with_fallback(
                                    else min(timeout_s, remaining))
         if before_attempt is not None:
             reservation = before_attempt(cand)
+        _check_cancel(f"向 {cand} 发起调用前")
         try:
             resp = adapter.call(model_id, prompt,
                                 extra_body=extra_body or None,
@@ -639,7 +658,14 @@ def call_with_fallback(
                 sleep_s = 0.5
                 if remaining_timeout is not None:
                     sleep_s = min(sleep_s, remaining_timeout())
-                (sleep_fn or __import__("time").sleep)(sleep_s)
+                # 可唤醒等待(P2):分片轮询取消请求,而不是整段睡死。
+                deadline = time.monotonic() + max(0.0, sleep_s)
+                while True:
+                    _check_cancel(f"{cand} 传输失败重试等待中")
+                    now = time.monotonic()
+                    if now >= deadline:
+                        break
+                    (sleep_fn or time.sleep)(min(0.05, deadline - now))
                 continue
             breaker.record_transport_failure(cand)
             continue

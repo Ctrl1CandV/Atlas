@@ -8,17 +8,18 @@
 
 两个入口共用同一份工具实现。每个客户端会话选一种入口，不要为同一连接同时接 stdio 子进程与 HTTP 端点。
 
-## 七个工具
+## 八个工具
 
 1. `atlas_validate_workflow`：校验 YAML 或保存的 workflow id；语法和语义错误在有源码位置时带字段路径、行与列。
 2. `atlas_save_workflow`：保存已校验 YAML；更新需 `expected_sha256`。
 3. `atlas_run_workflow`：`dry_run: true` 只渲染；`false` 才执行支持的节点。`workflow_id` 与 `yaml` 二选一——传 `yaml` 全文即可直接运行自定义图，不写 workflows/；`persist_as` 在真实运行结束后把它固化为已保存工作流。`wait=false` 通过全部预检后立即返回 run_id（长任务不再占住会话），用 `atlas_get_run` 轮询；与 `persist_as` 互斥。
 4. `atlas_list_workflows`：列出工作流和校验状态。
-5. `atlas_list_runs`：按 run_id 降序分页列出运行（`limit`/`cursor`），状态含 running/interrupted/paused/done/failed（starting 只在落账前的短暂窗口由 Web 单 run 查询可见）。
+5. `atlas_list_runs`：按 run_id 降序分页列出运行（`limit`/`cursor`），状态含 running/interrupted/paused/done/failed/cancelled（starting 只在落账前的短暂窗口由 Web 单 run 查询可见）。
 6. `atlas_get_run`：查询已创建运行的动态状态与产物位置。
-7. `atlas_resume_run`：仅恢复事件仍为 running、没有活跃控制器且稳定 OS run lock 可取得的 interrupted 运行。
+7. `atlas_cancel_run`：请求协作式取消——running 的运行在下一节点边界终止（在途模型调用与 agent CLI 执行会跑完当次）；paused/interrupted 直接落 `cancelled` 终态；幂等，终态运行返回冲突。请求一经写入不可撤回：若控制器随后死亡，恢复会在首个节点边界消费该请求（等效恢复后立即取消）。
+8. `atlas_resume_run`：仅恢复事件仍为 running、没有活跃控制器且稳定 OS run lock 可取得的 interrupted 运行。
 
-固定顺序是 validate → save（需要时）→ dry-run → 人工确认 → run → get-run（或 wait=false 后轮询 / list-runs）。自定义图优先走 `yaml` 参数而不是直接写文件。运行因控制器退出而显示 interrupted 时才使用 resume；不要跳过零成本预演。
+固定顺序是 validate → save（需要时）→ dry-run → 人工确认 → run → get-run（或 wait=false 后轮询 / list-runs）。自定义图优先走 `yaml` 参数而不是直接写文件。运行因控制器退出而显示 interrupted 时才使用 resume；不要跳过零成本预演。取消用 `atlas_cancel_run`（HTTP API 同款端点 `POST /api/runs/{id}/cancel`；Web 界面按钮属后续批次）。
 
 ## Human 节点
 

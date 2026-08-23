@@ -115,7 +115,7 @@ async def wait_terminal(session, run_id: str, timeout_s: float = 900.0):
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         s = await call_tool(session, "atlas_get_run", {"run_id": run_id})
-        if s.get("status") in ("done", "failed"):
+        if s.get("status") in ("done", "failed", "cancelled"):
             return s
         await asyncio.sleep(3)
     return {"status": "timeout", "run_id": run_id}

@@ -111,5 +111,5 @@ P5 可配置 retry backoff、P8 token guard、P12 durable failure workflow、P14
 | 一(P0 必修) | ✅ 完成(2026-08-22) |
 | 二(P1 稳定性收尾) | ✅ 完成(2026-08-23):B1/A1/A2/C1/B3 已落地并经真实运行与审查;仅 C2(填真实单价)待用户 |
 | 三(R0 治理) | ✅ 闭环(2026-08-23,规则集已强制启用) |
-| 四(P4+P2) | P4 共享 launcher/wait=false/atlas_list_runs 已实施(2026-08-23);P2 cancel 待做 |
+| 四(P4+P2) | ✅ 完成(2026-08-23):P4 共享 launcher/wait=false/atlas_list_runs;P2 协作式取消(8 工具、cancelled 终态、agent retry 预算 RFC 草案);CLI 进程树终止与 Web 取消按钮留作后续强化 |
 | 五–七 | 未开始;实施合同已深化到模块级锚点(见 ROADMAP §3–§10 各期"落地锚点");S1 终局可视化定案在第五梯队b |

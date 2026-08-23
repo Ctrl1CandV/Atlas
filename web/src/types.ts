@@ -168,6 +168,7 @@ export type RunStatus =
   | 'interrupted'
   | 'paused'
   | 'done'
+  | 'cancelled'
   | 'failed';
 
 export interface RunListItem {

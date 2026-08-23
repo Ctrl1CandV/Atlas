@@ -305,9 +305,9 @@ def smoke_install_sdist(archive: Path, *, python_version: str = "3.12",
             raise AssertionError(f"installed console scripts differ: {result.get('scripts')}")
 
         expected_tools = {
-            "atlas_get_run", "atlas_list_runs", "atlas_list_workflows",
-            "atlas_resume_run", "atlas_run_workflow", "atlas_save_workflow",
-            "atlas_validate_workflow",
+            "atlas_cancel_run", "atlas_get_run", "atlas_list_runs",
+            "atlas_list_workflows", "atlas_resume_run", "atlas_run_workflow",
+            "atlas_save_workflow", "atlas_validate_workflow",
         }
         if set(result.get("tools", [])) != expected_tools:
             raise AssertionError(f"installed MCP tools differ: {result.get('tools')}")

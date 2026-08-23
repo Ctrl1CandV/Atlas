@@ -86,6 +86,7 @@ const STATUS_LABEL: Record<string, string> = {
   running: '运行中',
   interrupted: '已中断',
   done: '已完成',
+  cancelled: '已取消',
   failed: '失败',
 };
 

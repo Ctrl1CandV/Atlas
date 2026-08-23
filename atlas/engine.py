@@ -27,7 +27,9 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-from atlas.adapters import AdapterRegistry, call_with_fallback, recover_json_object
+from atlas.adapters import (AdapterRegistry, AllCandidatesFailed,
+                            RunCancelled, call_with_fallback,
+                            recover_json_object)
 from atlas.artifacts import artifact_entry
 from atlas.costs import (CostLedger, CostLimitError, compute_cost_usd,
                          fold_cost_accounting)
@@ -396,6 +398,14 @@ class _NodeCtx:
         if remaining <= 0:  # remaining_timeout 已抛；仅为类型/边界兜底
             raise TimeoutViolation(f"节点 {node_id}:整图 deadline 已耗尽")
 
+    def cancel_requested(self) -> bool:
+        """P2 协作式取消:run 目录里出现 cancel.request.json 即为真。
+
+        只做存在性检查(请求文件是触发器,不是账本内容);controller
+        在消费点抛 RunCancelled,由 _invoke 统一写 run_cancelled 终态。
+        """
+        return (self.run_dir / CANCEL_REQUEST_FILENAME).exists()
+
     def remaining_timeout(self, timeout_s: float | None = None,
                           node_id: str = "节点") -> float:
         """返回整图剩余有效秒数；人工审批等待不计入 deadline。"""
@@ -464,7 +474,7 @@ class RunResult:
     dir: Path
     events: EventReader
     final_state: dict
-    status: str = "done"   # done | paused(在 human 节点等待批准)
+    status: str = "done"   # done | paused(human 等待批准) | cancelled(P2)
 
     @property
     def artifacts(self) -> dict[str, ArtifactRef]:
@@ -537,6 +547,9 @@ def _make_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
                 f"节点 {node.id} 将第 {iteration} 次执行,"
                 f"超过 guards.max_iterations={max_iter}。循环未收敛,停止"
             )
+        # P2 消费点:节点入口——任何花费(投影/预留/调用)之前。
+        if ctx.cancel_requested():
+            raise RunCancelled(f"节点 {node.id} 执行前收到取消请求")
         # guards.timeout_s 是 run 级墙钟(节点边界检查);
         # node.timeout_s 是单次调用超时,已传给 call_with_fallback——
         # 两个语义不混用(混用会让靠后的节点"未执行即超时",M4 审查🟠3)
@@ -672,6 +685,7 @@ def _make_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
             before_attempt=_reserve,
             after_attempt=_settle,
             remaining_timeout=lambda: ctx.remaining_timeout(node_id=node.id),
+            cancel_requested=ctx.cancel_requested,
         )
 
         # 3. 产物落盘 + 事件
@@ -735,6 +749,9 @@ def _make_human_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
                 f"节点 {node.id} 将第 {iteration} 次执行,"
                 f"超过 guards.max_iterations={max_iter}"
             )
+        # P2 消费点:human 入口——暂停等待审批前也尊重取消请求。
+        if ctx.cancel_requested():
+            raise RunCancelled(f"human 节点 {node.id} 执行前收到取消请求")
         ctx.check_timeout(spec.guards.timeout_s, node.id)
 
         projection, proj_ref, consumed = build_projection(
@@ -1489,12 +1506,10 @@ def acquire_run_lock(run_id: str, *, runs_root: Path) -> None:
     file = None
     try:
         file = open(path, "a+b")
-        if path.stat().st_size == 0:
-            file.write(b"\0")
-            file.flush()
+        # 不写种子字节:区域锁允许锁定空文件的字节范围,而并发进程的
+        # "先写后锁"会撞上对方已锁的字节 0(PermissionError,同
+        # config_init 的教训);锁文件保持空文件,权威状态是 OS 锁本身。
         _try_os_lock(file)
-        # 文件内容仅供诊断且可能来自上次持有者；权威状态是当前 OS 锁。
-        # Windows 不允许在锁住首字节后截断文件，因此持锁期间不改内容。
         with _RUN_LOCKS_GUARD:
             _RUN_LOCK_HELD[key] = _HeldRunLock(file=file, mutex=mutex)
     except Exception:
@@ -1516,6 +1531,85 @@ def release_run_lock(run_id: str, *, runs_root: Path) -> None:
     finally:
         lock.file.close()
         lock.mutex.release()
+
+
+# ─────────────────── P2 协作式取消 ───────────────────
+
+CANCEL_REQUEST_FILENAME = "cancel.request.json"
+
+
+def write_cancel_request(run_dir: Path, *, reason: str = "") -> dict:
+    """原子 create-if-absent 写取消请求;已存在时返回首个请求(幂等)。
+
+    请求路径绝不等待 controller 的排他锁——这里只落触发器文件;
+    终态由 controller 持锁写(或 paused/interrupted 时由本模块在锁内写)。
+    """
+    path = Path(run_dir) / CANCEL_REQUEST_FILENAME
+    payload = {
+        "request_id": uuid.uuid4().hex,
+        "requested_at": datetime.now(timezone.utc).isoformat(),
+        "reason": reason or "",
+    }
+    try:
+        handle = open(path, "x", encoding="utf-8")
+    except FileExistsError:
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            return {"already_requested": True, **existing}
+        except Exception:
+            return {"already_requested": True, "request_id": None}
+    with handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=1)
+        handle.write("\n")
+    return {"already_requested": False, **payload}
+
+
+def request_cancel(run_id: str, *, runs_root: Path, reason: str = "",
+                   active_controller: bool = False) -> dict:
+    """取消请求的唯一领域入口(Web 与 atlas_cancel_run 共用)。
+
+    语义:
+    - done/failed/cancelled → RunConflictError(终态不可取消);
+    - running(controller 活跃) → 只写请求,controller 在下一消费点终止,
+      返回 requested+running(在途调用只能等它返回或超时,不宣称强杀);
+    - paused/interrupted(无活跃 controller) → 拿运行锁,复核后在锁内写
+      run_cancelled 终态(cancel 是此时唯一的合法写者)。
+    """
+    run_dir = Path(runs_root) / run_id
+    events_path = run_dir / "events.jsonl"
+    if not events_path.exists():
+        raise RunNotFoundError(f"run {run_id!r} 不存在(没有 events.jsonl)")
+    persisted = fold_events(EventReader(events_path).all())["status"]
+    if persisted in ("done", "failed", "cancelled"):
+        raise RunConflictError(
+            f"run {run_id!r} 已是终态 {persisted!r},不能取消")
+
+    request = write_cancel_request(run_dir, reason=reason)
+
+    if persisted == "paused" or (persisted == "running"
+                                 and not active_controller):
+        # paused/interrupted:controller 不持锁,本调用在锁内成为唯一写者。
+        try:
+            acquire_run_lock(run_id, runs_root=runs_root)
+        except RunConflictError:
+            # 锁被短暂占用(approve/resume/另一 cancel 竞争):请求已落盘,
+            # 持锁方会在自己的校验里看到非 paused/running 状态或消费请求。
+            return {"status": "running", "requested": True, **request}
+        try:
+            latest = fold_events(
+                EventReader(events_path).all())["status"]
+            if latest in ("done", "failed", "cancelled"):
+                raise RunConflictError(
+                    f"run {run_id!r} 在取消时已变为终态 {latest!r}")
+            EventLog(run_dir, continue_seq=True).emit(
+                "run_cancelled", run_id=run_id,
+                reason=reason or "取消请求(无活跃 controller,锁内直写终态)")
+            return {"status": "cancelled", "requested": True, **request}
+        finally:
+            release_run_lock(run_id, runs_root=runs_root)
+
+    # running 且 controller 活跃:请求已落盘,等 controller 消费。
+    return {"status": "running", "requested": True, **request}
 
 
 def _invoke(spec: WorkflowSpec, ctx: _NodeCtx, run_id: str, *,
@@ -1555,6 +1649,21 @@ def _invoke(spec: WorkflowSpec, ctx: _NodeCtx, run_id: str, *,
             dir=ctx.run_dir,
             events=EventReader(ctx.run_dir / "events.jsonl"),
             final_state=dict(final_state),
+        )
+    except RunCancelled as e:
+        # P2 协作式取消的唯一终态写点:只有 controller(本函数所在线程,
+        # 持有运行锁)能把取消落成 run_cancelled;在途调用已按各消费点
+        # 尽力提前结束。未决 reservation 不释放为可再消费预算(保守计入)。
+        try:
+            ctx.log.emit("run_cancelled", run_id=run_id, reason=str(e))
+        except Exception:
+            pass  # 账本写不进去时保持与通用失败分支同款语义
+        return RunResult(
+            run_id=run_id,
+            dir=ctx.run_dir,
+            events=EventReader(ctx.run_dir / "events.jsonl"),
+            final_state={},
+            status="cancelled",
         )
     except Exception as e:
         # 图构建/连接/执行,任何一步失败都记 run_failed——账本不许永久停在 running

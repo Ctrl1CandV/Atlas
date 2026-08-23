@@ -230,8 +230,9 @@ def test_sdist_smoke_is_python312_offline_with_core_contracts(tmp_path, monkeypa
             "python": [3, 12],
             "scripts": ["atlas", "atlas-mcp", "atlas-web"],
             "tools": [
-                "atlas_get_run", "atlas_list_runs", "atlas_list_workflows",
-                "atlas_resume_run", "atlas_run_workflow", "atlas_save_workflow",
+                "atlas_cancel_run", "atlas_get_run", "atlas_list_runs",
+                "atlas_list_workflows", "atlas_resume_run",
+                "atlas_run_workflow", "atlas_save_workflow",
                 "atlas_validate_workflow",
             ],
             "spec": "smoke",
@@ -249,7 +250,7 @@ def test_sdist_smoke_is_python312_offline_with_core_contracts(tmp_path, monkeypa
     assert result["dependencies_installed"] is True
     assert result["spec_parser"] is True
     assert result["config_init"] is True
-    assert len(result["mcp_tools"]) == 7
+    assert len(result["mcp_tools"]) == 8
     assert "--no-python-downloads" in commands[0]
     export = commands[1]
     assert export[1] == "export" and "--frozen" in export and "--no-dev" in export

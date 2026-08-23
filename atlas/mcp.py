@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Atlas MCP 服务:7 个工具,刻意保持很小(架构第 7.1 节)。
+"""Atlas MCP 服务:8 个工具,刻意保持很小(架构第 7.1 节)。
 
 harness 里的 agent 是这套工具的用户:写 YAML → validate(零成本)→
 dry_run(零成本)→ run(真实调用才花钱)→ get_run 查账;
@@ -21,7 +21,8 @@ from atlas.costs import rates_known
 from atlas.effective import build_effective_spec, provider_ids_for_spec
 from atlas.engine import (RunConflictError, RunNotFoundError, execute_graph,
                           lock_interrupted_run, prepare_execution,
-                          prepare_production_agent_runner, release_run_lock,
+                          prepare_production_agent_runner,
+                          request_cancel, release_run_lock,
                           resume_graph, validate_interrupted_run_locked)
 from atlas.runs import build_run_summary, derive_run_status, list_run_summaries
 from atlas import launcher
@@ -72,7 +73,7 @@ def _tool_instructions() -> str:
 
 
 def build_mcp_server() -> MCPServer:
-    """构造带全部七个工具的 MCP server 实例。
+    """构造带全部八个工具的 MCP server 实例。
 
     stdio 入口(main)与 Web 进程的 /mcp 挂载共用同一份工具面,
     保证两个入口的工具描述与行为不会漂移。
@@ -84,7 +85,7 @@ def build_mcp_server() -> MCPServer:
 
 
 def _register_tools(srv: MCPServer) -> None:
-    """把七个工具注册到给定 server(实现函数见上方"内部实现")。"""
+    """把八个工具注册到给定 server(实现函数见上方"内部实现")。"""
 
     @srv.tool()
     def atlas_validate_workflow(yaml: str = "", workflow_id: str = "") -> str:
@@ -159,8 +160,8 @@ def _register_tools(srv: MCPServer) -> None:
         """列出运行(零成本,P4)。按 run_id 降序稳定分页。
 
         每条含 run_id/graph/status/nodes_done/started;状态为
-        running/interrupted/paused/done/failed(interrupted 由账本+运行锁
-        动态判定)。starting 只在账本落账前的短暂窗口由 Web 单 run 查询
+        running/interrupted/paused/done/failed/cancelled(interrupted 由
+        账本+运行锁动态判定)。starting 只在账本落账前的短暂窗口由 Web 单 run 查询
         合成,不出现在本列表。cursor 传上一页返回的 next_cursor 续页。
         """
         try:
@@ -182,6 +183,19 @@ def _register_tools(srv: MCPServer) -> None:
                               "description": "", "error": str(e)})
         return _render({"workflows": items,
                         "next": "挑一个用 atlas_run_workflow 跑,或先 validate 新图"})
+
+    @srv.tool()
+    def atlas_cancel_run(run_id: str, reason: str = "") -> str:
+        """请求取消一个运行(P2,零成本)。
+
+        done/failed/cancelled 返回冲突;running 写请求后 controller 在
+        下一节点边界终止(在途模型调用只能等它返回或超时,不宣称强杀);
+        paused/interrupted 在锁内直接落 run_cancelled 终态。幂等。
+        """
+        try:
+            return _render(cancel_run_impl(run_id, reason))
+        except ValueError as e:
+            return _render({"error": str(e), "next": "id 不合法"})
 
     @srv.tool()
     def atlas_get_run(run_id: str) -> str:
@@ -794,6 +808,27 @@ def list_runs_impl(limit: int = 20, cursor: str = "") -> dict:
     return list_run_summaries(
         RUNS_DIR, limit=limit, cursor=cursor or None,
         active_ids=set(launcher.REGISTRY.active_ids()))
+
+
+def cancel_run_impl(run_id: str, reason: str = "") -> dict:
+    """atlas_cancel_run 的实现:engine.request_cancel 的 MCP 包装。"""
+    _check_id(run_id, "运行")
+    try:
+        result = request_cancel(
+            run_id, runs_root=RUNS_DIR, reason=reason,
+            active_controller=launcher.REGISTRY.is_active(run_id))
+    except RunConflictError as e:
+        return {"error": str(e), "next": "终态运行不可取消"}
+    except RunNotFoundError as e:
+        return {"error": str(e), "next": "用 atlas_list_runs 查正确的 run_id"}
+    if result.get("status") == "cancelled":
+        return {"run_id": run_id, "status": "cancelled",
+                "request_id": result.get("request_id"),
+                "next": "cancelled 是可删除终态;账本含 run_cancelled 事件"}
+    return {"run_id": run_id, "status": "running", "requested": True,
+            "request_id": result.get("request_id"),
+            "next": "在途调用等待返回,controller 将在下一节点边界终止;"
+                    "用 atlas_get_run 轮询到 cancelled"}
 
 
 def summarize_run(run_id: str) -> dict:

@@ -595,6 +595,11 @@ def make_agent_node_fn(node: NodeSpec, spec: WorkflowSpec, ctx):
             from atlas.engine import GuardViolation
             raise GuardViolation(
                 f"节点 {node.id} 将第 {iteration} 次执行,超过 max_iterations")
+        # P2 消费点:agent 入口。在途 CLI 执行无法中断(进程树终止属
+        # cancel 后续强化);至少不让新 agent 尝试在取消后启动。
+        from atlas.adapters import RunCancelled
+        if ctx.cancel_requested():
+            raise RunCancelled(f"agent 节点 {node.id} 执行前收到取消请求")
 
         projection, proj_ref, consumed = build_projection(
             ctx.run_dir, node_id=node.id, iteration=iteration,

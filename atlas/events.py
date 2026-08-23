@@ -198,4 +198,7 @@ def fold_events(records: list[dict]) -> dict:
             state["status"] = "done"
         elif t == "run_failed":
             state["status"] = "failed"
+        elif t == "run_cancelled":
+            # P2 协作式取消的终态;只有 controller(或锁内的 cancel 入口)写。
+            state["status"] = "cancelled"
     return state

@@ -29,10 +29,11 @@ from atlas.costs import fold_cost_accounting
 from atlas.effective import build_effective_spec, provider_ids_for_spec
 from atlas.engine import (RunConflictError, RunNotFoundError, acquire_run_lock,
                           approve_run, execute_graph, lock_approval_run,
-                          lock_interrupted_run, new_run_id, prepare_execution,
+                          lock_interrupted_run, prepare_execution,
                           prepare_production_agent_runner,
                           release_approval_run_lock, release_run_lock,
-                          resume_graph, validate_interrupted_run_locked)
+                          request_cancel, resume_graph,
+                          validate_interrupted_run_locked)
 from atlas.events import EventReader, fold_events
 from atlas import launcher
 from atlas.runs import derive_run_status, list_run_summaries
@@ -445,10 +446,10 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                 if not events:
                     raise HTTPException(404, f"没有这个运行:{rid}")
                 status = fold_events(events)["status"]
-                if status not in ("done", "failed"):
+                if status not in ("done", "failed", "cancelled"):
                     raise HTTPException(
                         409, f"运行 {rid!r} 当前状态为 {status!r};"
-                        "只有 done/failed 的运行可以删除")
+                        "只有 done/failed/cancelled 的运行可以删除")
                 trash_dir.mkdir(parents=True, exist_ok=True)
                 try:
                     run_dir.replace(tombstone)
@@ -473,7 +474,7 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
 
     @app.delete("/api/runs/{rid}")
     def delete_run(rid: str):
-        """仅删除 done/failed；运行锁和重复请求都不会绕过终态复核。"""
+        """仅删除 done/failed/cancelled;运行锁和重复请求都不会绕过终态复核。"""
         with _delete_guard:
             return _delete_run_locked(rid)
 
@@ -807,6 +808,30 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
             release_approval_run_lock(rid, runs_root=runs_dir)
             raise
         return {"run_id": rid, "decision": decision}
+
+    @app.post("/api/runs/{rid}/cancel")
+    def cancel(rid: str, body: dict | None = None):
+        """P2 协作式取消:写请求;paused/interrupted 直接锁内落终态。
+
+        running 时返回 requested+running——在途模型调用只能等它返回或
+        超时,不宣称任意时刻强杀;controller 在下一消费点终止。
+        """
+        _check_id(rid, "运行")
+        reason = str((body or {}).get("reason", "") or "")
+        try:
+            result = request_cancel(
+                rid, runs_root=runs_dir, reason=reason,
+                active_controller=launcher.REGISTRY.is_active(rid))
+        except RunConflictError as e:
+            raise HTTPException(409, str(e)) from e
+        except RunNotFoundError as e:
+            raise HTTPException(404, str(e)) from e
+        if result.get("status") == "cancelled":
+            return {"run_id": rid, "status": "cancelled",
+                    "request_id": result.get("request_id")}
+        return {"run_id": rid, "status": "running", "requested": True,
+                "request_id": result.get("request_id"),
+                "note": "取消请求已落盘;在途调用等待返回,controller 将在下一节点边界终止"}
 
     # ── 配置面(供应商/密钥/模型白名单;PLAN-v2 M3)──────────────
     from atlas.configapi import register_config_routes

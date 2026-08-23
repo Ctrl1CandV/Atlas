@@ -7,7 +7,7 @@ Atlas 是 Windows 本机、YAML 驱动的可审计工作流引擎。MCP 工具�
 ## 当前可以依赖的能力
 
 - `llm`、`research`、`coding_agent` 节点，线性/并行/汇合、条件路由和有界循环；
-- 七个 MCP 工具的校验、保存、dry-run、运行（同步或 wait=false 异步）、运行列表、查询与 interrupted-only 恢复流程；
+- 八个 MCP 工具的校验、保存、dry-run、运行（同步或 wait=false 异步）、运行列表、查询、协作式取消与 interrupted-only 恢复流程；
 - 动态 interrupted 状态、Web 恢复入口，以及保持独立语义的 `human` 审批门；
 - YAML 语法/语义错误的字段路径与行列、输出结构检查、降级记录、有效规格快照与产物哈希；
 - 显式配置后的 Claude CLI agent 执行，以及冻结 baseline/result 普通文件字节清单比较生成的完整文本 unified diff；采集不执行 Git add/filter/hook/attributes/textconv/external diff，二进制变更 fail-loud，审批绑定 baseline/result/patch 三类摘要。
