@@ -9,6 +9,6 @@
 5. `code-change-review-approve`：coding-agent 在 worktree 副本中实施修改，审查由冻结 baseline/result 普通文件字节清单生成的完整文本 unified diff，不合格时有界重试(回边不携带审查意见,从冻结 baseline 重新实施)后进入人工门。Atlas 不写原目录；二进制变更 fail-loud，审批绑定 baseline/result/patch 三类摘要；运行要求 agent 模型供应商具有 `anthropicBaseUrl` 与当前凭据。
 6. `map-reduce-document-analysis`：多个 LLM 视角分析同一材料后汇总。
 
-Agent worktree 不是 OS 沙箱，Claude CLI 与当前用户权限相同。选择原则：单次调用足够时不要加图；审查节点必须消费真实待审产物；新图总是先 validate 和 dry-run。
+Agent worktree 不是 OS 沙箱，Claude CLI 与当前用户权限相同。选择原则：单次调用足够时不要加图；审查节点必须消费真实待审产物；新图总是先 validate 和 dry-run。结构化输出节点（带 `output_schema`/`route_field`）默认配跨厂商 `fallback`——格式性失败同厂商重试解决不了；实测 qwen3.8-max 与 kimi 稳定，glm 系列偶发围栏/非法 JSON（宽容提取能救回围栏包裹的对象，但别把可靠性押在它上）。
 
 → [MCP 与人工审批](#/guide/mcp-human)

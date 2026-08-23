@@ -204,6 +204,22 @@ P2 的 `RunCancelled` 分类；先完成 taxonomy，再开放 YAML 字段。
 - **表面**：Web/MCP 同源展示 error class、error artifact 入口、`__failed__` 路由结果；dry-run 列出图中所有非默认 `on_error` 节点。
 - **测试**：每个异常类正反例各一；`on_error: continue` 配置下治理异常仍终止整图；三策略 × 循环/并行/join 组合重放一致。
 
+## 6b. R4c / S1：执行终局可视化与总结节点（2026-08-23 用户定案）
+
+### 定案
+
+执行结束后必须给出最终可视化结果，并加一个总结节点对结果做总结——不仅给最终结果，还要回顾工作流各节点做了什么。导出可查看的离线报告**不做**（原 Stage E"运行报告导出"条目移除）。
+
+### 落地锚点
+
+- **零成本终局视图**：`atlas/web.py` 运行页顶部"终局总结"卡片——最终结果摘要、每节点一句话回顾（模型/耗时/token/成本）、时间线与成本可视化；数据纯由事件账本派生（fold + 成本折叠 + 节点输出首段摘要），复用 P4 的共享 summary builder（P4 是前置）；无新事件、无 LLM 调用。
+- **总结节点（opt-in）**：`atlas/spec.py` 图级 `summary: {model, prompt_hint?}`（默认关）；`atlas/engine.py` 在 run_done 前执行一次总结调用，输入为各节点摘要投影；`atlas/artifacts.py` 写 run 级 write-once 产物（sha256 入账）+ 事件 `run_summary_written`（model/usage/sha256）；失败记 `run_summary_failed`，run 终态不变、可重试；成本进 CostLedger 受 `max_cost_usd` 约束。
+- **表面**：Web 卡片与 MCP `atlas_get_run` 的 summary 字段同源；`dry_run_impl` 列出"将执行总结（模型 X，预估 1 次调用）"。
+- **不做**：离线报告导出、分享链接、文件打包。
+- **测试**：零成本视图离线断言（无 LLM 也能渲染）；总结成功/失败/预算耗尽三路径；fold 终态不变；产物哈希与事件可复验；总结内容标注"LLM 叙述，事实以账本为准"。
+
+估算：零成本视图 2–3 人日 + 总结节点 3–5 人日；依赖 P4 的 summary builder。
+
 ## 7. R5 / P7：artifact import 与 invocation hash
 
 ### 价值
@@ -344,7 +360,6 @@ human 只有 approve/reject。
 |---|---|---|
 | LLM `web_search` | provider tool-calling + 可插拔搜索后端；来源、查询、成本和条数落产物；不能把结果当可信事实 | tool schema/fallback/来源完整性/预算/恶意网页 prompt injection 测试 |
 | Release 包含 built frontend | 让使用者免 Node；Git 仍不跟踪 `web/dist` | clean machine 解压即可启动，frontend hash 进入 manifest/provenance |
-| Run report export | 自包含 HTML 或 ZIP+manifest，含时间线、成本、产物、diff、完整性哈希 | 离线打开、敏感字段明确、每个导出文件可校验；LLM 摘要只能是可选叙述层 |
 | OS-level sandbox | 调研 Windows Sandbox 或 WSL backend；与 `local_cli` 并列而非把副本改名为沙箱 | 宿主路径/网络/凭据/输出回收威胁模型和逃逸测试 |
 | Browser matrix | 主题、键盘调栏、200% 缩放、系统 Edge/Chromium | 可重复 GUI 测试与真实截图，不用源码字符串代替渲染验证 |
 | 节点通讯文件 | 多命名产物、agent collect、attachments；详见 [`rfcs/node-io-files.md`](rfcs/node-io-files.md) | 每阶段保持 write-once、hash、no traversal、size caps 和 projection 完整性 |

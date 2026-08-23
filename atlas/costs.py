@@ -247,6 +247,15 @@ class CostLedger:
             return self._spent, sum(self._pending.values())
 
 
+def rates_known(model_ref: str) -> bool:
+    """费率表能否算出该模型的成本(通配/供应商级默认也算已知)。
+
+    dry-run 的成本帽警告(C1)用它判断"哪些计费节点费率未知";
+    与 compute_cost_usd 同一套解析规则,不另立口径。
+    """
+    return compute_cost_usd(model_ref, 1_000_000, 1_000_000) is not None
+
+
 def reload_pricing() -> None:
     global _cache
     _cache = None

@@ -16,8 +16,8 @@ from pathlib import Path
 from mcp.server.mcpserver.server import MCPServer
 
 from atlas.adapters import build_real_registry
-from atlas.config import PROJECT_ROOT
-from atlas.costs import fold_cost_accounting
+from atlas.config import PROJECT_ROOT, ConfigError, load_provider_configs
+from atlas.costs import fold_cost_accounting, rates_known
 from atlas.effective import build_effective_spec, provider_ids_for_spec
 from atlas.engine import (RunConflictError, RunNotFoundError, execute_graph,
                           lock_interrupted_run, prepare_execution,
@@ -419,6 +419,68 @@ def _validate_task(task: object) -> str:
     return normalized
 
 
+REASONING_OUTPUT_TOKEN_FLOOR = 16384
+# 实测依据:Deepseek 推理模型在默认 8192 下可见输出被隐性思考烧尽而截断
+# (2026-08-22 真实失败);供应商级 maxOutputTokens: 16384 是 A1 的修复值。
+
+
+def _dry_run_warnings(spec, *, provider_cfgs=None, capabilities=None,
+                      rates_known_fn=None) -> list[str]:
+    """A2/C1 · dry-run 的醒目警告(建议性信息,不改变准入)。
+
+    只用已探测数据:能力表里没有的模型(A2)或费率表读不到(C1)就不警告,
+    不猜。真正的准入失败仍由 prepare_execution fail-closed,这里读不到
+    配置时只是少警告,不让渲染失败。
+    """
+    warnings: list[str] = []
+    if provider_cfgs is None:
+        try:
+            provider_cfgs = load_provider_configs()
+        except ConfigError:
+            provider_cfgs = {}
+    if capabilities is None:
+        try:
+            from atlas.thinking import ThinkingUnsupported, load_capabilities
+            capabilities = load_capabilities()
+        except (ConfigError, ValueError, ThinkingUnsupported):
+            # JSONDecodeError/UnicodeDecodeError 都是 ValueError 子类;
+            # 能力表损坏就少警告,不让渲染失败(准入仍由预检 fail-closed)。
+            capabilities = {}
+    if rates_known_fn is None:
+        rates_known_fn = rates_known
+    unknown_pricing: list[str] = []
+    for n in spec.nodes:
+        if n.type != "llm" or not n.model:
+            continue
+        for ref in [n.model, *n.fallback]:
+            # 供应商级 maxOutputTokens 按候选各自的供应商解析,与真实执行
+            # 路径(注册表按供应商构造默认)同口径;跨厂商 fallback 时尤其
+            # 不能拿主模型供应商的 cap 套用(审查 2026-08-23 发现)。
+            provider_id = ref.partition(":")[0]
+            cfg = provider_cfgs.get(provider_id)
+            vendor_cap = cfg.max_output_tokens if cfg is not None else None
+            kind = capabilities.get(ref, {}).get("kind", "unknown")
+            if kind in ("effort", "budget"):
+                effective_cap = n.max_output_tokens or vendor_cap or 8192
+                if effective_cap < REASONING_OUTPUT_TOKEN_FLOOR:
+                    warnings.append(
+                        f"节点 {n.id} 的 {ref} 是已探测推理型(kind={kind}),"
+                        f"max_output_tokens 生效值 {effective_cap} 低于 "
+                        f"{REASONING_OUTPUT_TOKEN_FLOOR}:隐性思考会烧掉输出预算,"
+                        f"实测形态是截断或可见文本为空;在节点参数或 providers.json"
+                        f" 的 {provider_id} 条目里提高")
+            if spec.guards.max_cost_usd is not None and not rates_known_fn(ref):
+                unknown_pricing.append(f"{n.id} 的候选 {ref}")
+    if unknown_pricing:
+        deduped = ";".join(dict.fromkeys(unknown_pricing))
+        warnings.append(
+            f"设了 max_cost_usd={spec.guards.max_cost_usd} 但有计费候选费率未知"
+            f"({deduped}):守卫对未知费率会保守占用剩余预算,实测只放行首个"
+            "计费节点就拦下后续(2026-08-22 run 20260822-113908-531dab);"
+            "填入确认过的 config/pricing.json 单价,或改用结构性约束控本")
+    return warnings
+
+
 def dry_run_impl(workflow_id: str, task: str, node_overrides=None, *,
                  providers_path: Path | None = None, env_store=None,
                  registry_factory=None, agent_runner_factory=None,
@@ -511,6 +573,7 @@ def dry_run_impl(workflow_id: str, task: str, node_overrides=None, *,
         "guards": {"max_iterations_effective": spec.guards.effective_max_iterations,
                    "max_cost_usd": spec.guards.max_cost_usd,
                    "timeout_s": spec.guards.timeout_s},
+        "warnings": _dry_run_warnings(spec),
         "base_spec_sha256": effective.base_fingerprint,
         "effective_spec_sha256": effective.effective_fingerprint,
         "execution_sha256": execution_sha256,

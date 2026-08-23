@@ -1,4 +1,11 @@
 {
+  "_readme": [
+    "apiKeyEnv 只写环境变量名,真实密钥放在 config/.env,绝不写进本文件。",
+    "可选字段 preferTransport: 'openai'|'anthropic' 选择接口风格。",
+    "可选字段 maxOutputTokens: 供应商级默认输出 token 上限。推理型模型",
+    "会把输出预算烧在隐性思考上(实测 Deepseek 在默认 8192 下被截断),",
+    "这类供应商建议设 16384;节点级 max_output_tokens 可再覆盖。"
+  ],
   "providers": [
     {
       "id": "OpenAI",

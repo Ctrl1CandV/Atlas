@@ -43,7 +43,7 @@ Never read or expose `${ATLAS_HOME}/config/.env` or active provider/agent/capabi
 5. `code-change-review-approve` — coding-agent implementation, complete textual unified diff review bound to baseline/result/patch digests, bounded retry from the frozen baseline (the back edge carries no reviewer feedback), and human approval.
 6. `map-reduce-document-analysis` — parallel lenses over shared material and reduction.
 
-Examples intentionally leave models unselected. They validate and preview; a real run requires explicit model bindings and, for an agent example, the production runner configuration below.
+Examples intentionally leave models unselected. They validate and preview; a real run requires explicit model bindings and, for an agent example, the production runner configuration below. For structured-output nodes (`output_schema`/`route_field`) configure a cross-vendor `fallback` by default: same-vendor retries do not fix format failures. qwen3.8-max and kimi tested stable; glm occasionally returns fenced/invalid JSON (lenient extraction recovers fenced objects, but do not stake reliability on it).
 
 ## Production agent contract
 

@@ -5,6 +5,7 @@ All notable changes to Atlas are documented here. The format follows Keep a Chan
 ## Unreleased
 
 ### Added
+- Dry-run now returns a `warnings` list (advisory only, admission stays fail-closed): reasoning-capable candidates whose effective `max_output_tokens` (node > provider `maxOutputTokens` > 8192) is below 16384 are flagged — hidden thinking burns the output budget (the 2026-08-22 real truncation); and when `max_cost_usd` is set while any billable candidate (including fallbacks) has unknown pricing, dry-run states that the guard will only admit the first billable node (run `20260822-113908-531dab`). Only probed capability data warns; unprobed models stay silent.
 - Lenient JSON extraction (B1): when strict JSON parsing fails on a node with required fields, Atlas strips markdown code fences and extracts the outermost balanced JSON object; if all required fields survive, the same response is accepted with an `output_json_recovered` event instead of burning a fallback candidate, and artifacts still store the raw bytes. Conditional routers read artifacts through the same extraction so routing graphs keep completing. Missing fields after recovery, empty output, truncation sentinels, and output caps still fail exactly as before.
 - `atlas-web` now serves the same six MCP tools over streamable-http at `/mcp`, so harnesses can connect by URL instead of a stdio subprocess; the stdio entry point is unchanged.
 - `atlas_run_workflow` accepts a full custom graph as `yaml` text (ad-hoc run, nothing written) and can solidify it into `workflows/` after a real run via `persist_as`, reusing the same validation and anti-overwrite contract.
@@ -32,6 +33,7 @@ All notable changes to Atlas are documented here. The format follows Keep a Chan
 - Refreshed `docs/STATUS.md` to the 2026-08-22 source state: new MCP capabilities, the 10-node ad-hoc real run, and the current test baseline.
 - Added `docs/PLAN-post-audit-2026-08-22.md`: consolidated post-audit fixes and phasing.
 - R0 governance closed out (2026-08-23): default branch is `main`, the outdated `release/v0.1.0-rc.1` remote branch is deleted, public CI is green on both branches, READMEs now carry the CI badge, and the `release` environment requires a human approver. STATUS/PLAN/ROADMAP refreshed to these facts.
+- Planned a run-final visualization card plus an opt-in summarizer node (S1, after echelon 5); the offline report export item was dropped by owner decision. The in-app guide and skill now recommend cross-vendor fallback for structured-output nodes (qwen3.8-max/kimi tested stable; glm occasionally fenced/invalid JSON), and `providers.example.json` documents the vendor-level `maxOutputTokens` field for reasoning models.
 
 ## 0.1.0 - 2026-08-19
 
