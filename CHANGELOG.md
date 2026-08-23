@@ -5,6 +5,7 @@ All notable changes to Atlas are documented here. The format follows Keep a Chan
 ## Unreleased
 
 ### Added
+- Lenient JSON extraction (B1): when strict JSON parsing fails on a node with required fields, Atlas strips markdown code fences and extracts the outermost balanced JSON object; if all required fields survive, the same response is accepted with an `output_json_recovered` event instead of burning a fallback candidate, and artifacts still store the raw bytes. Conditional routers read artifacts through the same extraction so routing graphs keep completing. Missing fields after recovery, empty output, truncation sentinels, and output caps still fail exactly as before.
 - `atlas-web` now serves the same six MCP tools over streamable-http at `/mcp`, so harnesses can connect by URL instead of a stdio subprocess; the stdio entry point is unchanged.
 - `atlas_run_workflow` accepts a full custom graph as `yaml` text (ad-hoc run, nothing written) and can solidify it into `workflows/` after a real run via `persist_as`, reusing the same validation and anti-overwrite contract.
 - Workflows can be deleted from the Web UI; `atlas_validate_workflow` echoes `file_sha256` so agents can do a read-modify-write loop through `atlas_save_workflow`.

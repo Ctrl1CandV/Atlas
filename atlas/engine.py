@@ -27,7 +27,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-from atlas.adapters import AdapterRegistry, call_with_fallback
+from atlas.adapters import AdapterRegistry, call_with_fallback, recover_json_object
 from atlas.artifacts import artifact_entry
 from atlas.costs import (CostLedger, CostLimitError, compute_cost_usd,
                          fold_cost_accounting)
@@ -313,12 +313,21 @@ def _make_router(spec: WorkflowSpec, src: str, path_map: dict):
                 f"节点 {src} 刚执行完,不应发生——这是引擎 bug"
             )
         raw = read_artifact(ArtifactRef.from_dict(ref_dict))
+        text = raw.decode("utf-8")
+        parsed = None
         try:
-            parsed = json.loads(raw.decode("utf-8"))
-        except json.JSONDecodeError as e:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            # B1 同源宽容提取:验收(检查三)接受的"围栏/散文包着的 JSON",
+            # 判路必须同样读得出,否则路由图会从"可 fallback 完成"变成硬失败。
+            # 路由仍只依据落盘字节,提取是纯函数,重放结果不变。
+            recovered = recover_json_object(text)
+            if recovered is not None:
+                parsed = recovered[0]
+        if parsed is None:
             raise NoRouteError(
-                f"节点 {src} 的产物不是合法 JSON,无法读取路由字段:{e}"
-            ) from e
+                f"节点 {src} 的产物不是合法 JSON,无法读取路由字段"
+            )
         if not isinstance(parsed, dict):
             raise NoRouteError(
                 f"节点 {src} 的产物不是 JSON 对象,无法读取路由字段"

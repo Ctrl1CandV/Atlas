@@ -580,6 +580,8 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                 slot["attempts"].append({"model": e["model"], "reason": e["reason"]})
             elif t == "output_truncated":
                 slot["output_truncated"] = True
+            elif t == "output_json_recovered":
+                slot["json_recovered"] = e.get("how", "")
             elif t == "node_done":
                 slot.update({
                     "status": "done",

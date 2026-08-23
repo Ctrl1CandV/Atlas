@@ -389,6 +389,76 @@ def check_required_fields(text: str, required: list[str] | None) -> dict | None:
     return parsed
 
 
+def _strip_code_fences(text: str) -> str:
+    t = text.strip()
+    if t.startswith("```"):
+        nl = t.find("\n")
+        if nl != -1:
+            t = t[nl + 1:]
+        tail = t.rstrip()
+        if tail.endswith("```"):
+            t = tail[:-3]
+    return t.strip()
+
+
+def _extract_balanced_object(text: str) -> str | None:
+    """取文本中第一个配平的 {...}(字符串内的花括号不算)。"""
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
+def recover_json_object(text: str) -> tuple[dict, str] | None:
+    """严格解析失败后的宽容提取(B1):剥代码围栏、截最外层 JSON 对象。
+
+    只有当提取出的片段能解析为一个 JSON 对象时才返回 (对象, 提取说明);
+    任何失败或非对象结果返回 None,由调用方按原语义报 DegradedOutput。
+    只读文本,不改写任何产物字节(落盘的仍是原始响应)。
+    """
+    stripped = _strip_code_fences(text)
+    candidate = stripped
+    notes: list[str] = []
+    if not (stripped.startswith("{") and stripped.endswith("}")):
+        extracted = _extract_balanced_object(stripped)
+        if extracted is None:
+            return None
+        candidate = extracted
+        notes.append("截取最外层 JSON 对象")
+    if stripped != text.strip():
+        notes.append("剥除代码围栏")
+    if not notes:
+        notes.append("剥除首尾空白")
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed, "、".join(notes)
+
+
 @dataclass(frozen=True)
 class CallAttempt:
     model: str
@@ -581,13 +651,32 @@ def call_with_fallback(
                 raise DegradedOutput("返回内容为空")
             # 检查二:截断哨兵
             assert_not_truncated(prompt, resp.usage, node=node_id, model=cand, log=log)
-            # 检查三:必填字段
-            parsed = check_required_fields(resp.text, required_fields)
+            # 检查三:必填字段。严格解析失败后按 B1 宽容提取(剥围栏/取最外层
+            # 对象):提取后仍缺必填字段照常 DegradedOutput——提取只救"包装坏",
+            # 不救"内容缺"。恢复事件等打顶检查过了再写:被拒的响应不留"已恢复"。
+            recovery_note: str | None = None
+            try:
+                parsed = check_required_fields(resp.text, required_fields)
+            except DegradedOutput as e:
+                recovered = recover_json_object(resp.text)
+                if recovered is None:
+                    raise
+                recovered_obj, how = recovered
+                missing = [f for f in required_fields if f not in recovered_obj]
+                if missing:
+                    raise DegradedOutput(
+                        f"宽容提取后仍缺少必填字段:{missing}") from e
+                parsed = recovered_obj
+                recovery_note = how
             # 输出打顶是内容不完整,与其他假成功一样换候选;没有候选则显式失败。
             if resp.output_truncated:
                 log.emit("output_truncated", node=node_id, iteration=iteration, model=cand,
                          reason="输出 token 达到本次 max_tokens 上限,拒绝不完整内容")
                 raise DegradedOutput("输出达到本次 max_tokens 上限,内容被截断")
+            if recovery_note is not None:
+                # 产物仍存原始字节;此事件只说明"同一响应被宽容提取接受"。
+                log.emit("output_json_recovered", node=node_id,
+                         iteration=iteration, model=cand, how=recovery_note)
         except (DegradedOutput, TruncationError) as e:
             reason = str(e)
             attempts.append(CallAttempt(cand, type(e).__name__, reason))
