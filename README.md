@@ -71,7 +71,7 @@ npm --prefix web run build
 uv run atlas-web
 ```
 
-一条命令同时启动 Web 界面（<http://127.0.0.1:8321>）和 MCP 端点（`http://127.0.0.1:8321/mcp`）。在 Claude Code / ZCode / Cursor 里把 MCP server 指向该 URL，你的 AI 助手就能替你写图、校验、预演、运行；也可以直接用仓库自带的 `.mcp.json` 走 stdio 自动拉起。配置细节见 [`docs/mcp.md`](docs/mcp.md)。
+一条命令同时启动 Web 界面（<http://127.0.0.1:8321>）和 MCP 端点（`http://127.0.0.1:8321/mcp`）。在 Claude Code / ZCode / Cursor 里把 MCP server 指向该 URL，你的 AI 助手就能替你写图、校验、预演、运行；仓库自带的 `.mcp.json` 也指向该端点。配置细节见 [`docs/mcp.md`](docs/mcp.md)。
 
 首次启动会从模板生成本机配置（不覆盖已有文件），凭据只放 `config/.env`。六个随附示例（并行综合、辩论裁决、map-reduce、重试循环、人工审批管线、代码实施审查）开箱即可校验和预演；真实运行前给每个节点绑定你配置好的模型。
 

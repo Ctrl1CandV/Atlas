@@ -4,7 +4,7 @@
 
 推荐方式：`uv run atlas-web` 单进程同时提供 Web 界面与 MCP streamable-http 端点，在 harness 里填 `http://127.0.0.1:8321/mcp` 即可（Claude Code 用 `claude mcp add --transport http atlas http://127.0.0.1:8321/mcp`；ZCode/Cursor 的 JSON 配置见 `docs/mcp.md`）。
 
-备用方式：仓库根目录自带 `.mcp.json`，Claude Code 等读取项目级 MCP 配置的客户端会通过 stdio 自动拉起 `atlas-mcp` 子进程，命令为 `uv --directory <ATLAS_HOME> run atlas-mcp`；`<ATLAS_HOME>` 必须替换为 Atlas 源码目录的绝对路径，配置文件不会展开该占位符或 `${ATLAS_HOME}`。
+备用方式：不想保持 `atlas-web` 运行时,可显式配一条 stdio 条目（`uv --directory <ATLAS_HOME> run atlas-mcp`，`<ATLAS_HOME>` 替换为 Atlas 源码目录的绝对路径，配置文件不会展开占位符）。仓库自带的 `.mcp.json` 已指向 HTTP 端点,不再使用 stdio（随仓库分发相对路径的 stdio 配置在仓库外拉子进程时必坏）。
 
 两个入口共用同一份工具实现。每个客户端会话选一种入口，不要为同一连接同时接 stdio 子进程与 HTTP 端点。
 

@@ -72,7 +72,7 @@ npm --prefix web run build
 uv run atlas-web
 ```
 
-One command starts both the Web UI (<http://127.0.0.1:8321>) and the MCP endpoint (`http://127.0.0.1:8321/mcp`). Point Claude Code / ZCode / Cursor at that URL and your AI assistant can write graphs, validate, preview, and run for you; alternatively use the repo's `.mcp.json` for zero-config stdio. Setup details in [`docs/mcp.md`](docs/mcp.md).
+One command starts both the Web UI (<http://127.0.0.1:8321>) and the MCP endpoint (`http://127.0.0.1:8321/mcp`). Point Claude Code / ZCode / Cursor at that URL and your AI assistant can write graphs, validate, preview, and run for you; the repo's `.mcp.json` points at the same endpoint. Setup details in [`docs/mcp.md`](docs/mcp.md).
 
 First start generates local configuration from templates (never overwriting existing files); credentials live only in `config/.env`. The six bundled examples (parallel synthesis, debate judge, map-reduce, retry loop, human approval pipeline, code-change review) validate and preview out of the box; bind your configured models before any real run.
 

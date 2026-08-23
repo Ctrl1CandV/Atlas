@@ -34,7 +34,7 @@ uv run atlas-web
 
 一条命令同时提供 Web 界面（`http://127.0.0.1:8321`）与 MCP streamable-http 端点（`http://127.0.0.1:8321/mcp`）。harness 里填该 URL 即可连接八个 MCP 工具，无需另开终端。若报“端口已被占用”，是旧实例还在：先 `taskkill` 掉再启动（详见 docs/mcp.md 排障节）。
 
-备用方式：仓库根目录自带 `.mcp.json`，Claude Code 等读取项目级 MCP 配置的客户端会通过 stdio 自动拉起 `atlas-mcp` 子进程。不要绑定或代理到外部接口。
+仓库自带的 `.mcp.json` 指向同一 HTTP 端点（需 `atlas-web` 在运行）；不想保持终端时可按 docs/mcp.md 方式二显式配 stdio（绝对路径）。不要绑定或代理到外部接口。
 
 自定义图想显示中文名时，在 YAML 的 `meta` 里写 `title: 中文名`、`kind: custom`——界面列表会优先显示 `meta.title` 并标注「自定义」徽章。
 

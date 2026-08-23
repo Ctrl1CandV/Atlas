@@ -16,6 +16,7 @@ All notable changes to Atlas are documented here. The format follows Keep a Chan
 - Rejecting a human gate now requires a reason, enforced synchronously by both the Web UI and the API (`400` before any run lock is touched); approvals may still omit a comment.
 
 ### Changed
+- The repo-root `.mcp.json` now points to the HTTP endpoint (`http://127.0.0.1:8321/mcp`) instead of launching a stdio child via `uv --directory .`: a shipped relative directory breaks in any harness that spawns the subprocess outside the repo (field-proven with ZCode on 2026-08-23), and a stdio child never shares code with the running `atlas-web`. stdio remains an explicitly documented alternative with an absolute path (`docs/mcp.md` Option 2); README, in-app guides, and the docs contract tests were updated to match.
 - Rewrote the READMEs around real runs: the shipped example YAML with its actual ledgered cost, honest failure cases from the run matrix, and measured capability boundaries.
 - Renamed the shipped loop example's claim from "repair loop" to bounded retry: back edges re-run a node with the same static `consumes`, so reviewer feedback does not reach the revised node. The example YAML, in-app guide, and skill now say this explicitly; a feedback-carrying loop design is recorded in `docs/BACKLOG.md`.
 

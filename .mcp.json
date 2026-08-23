@@ -1,9 +1,8 @@
 {
   "mcpServers": {
     "atlas": {
-      "type": "stdio",
-      "command": "uv",
-      "args": ["--directory", ".", "run", "atlas-mcp"]
+      "type": "http",
+      "url": "http://127.0.0.1:8321/mcp"
     }
   }
 }
