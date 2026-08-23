@@ -61,3 +61,6 @@ Thumbs.db
 
 # local archived run history (stage D evidence etc.)
 runs-archive/
+
+# local-only custom workflows bound to real providers (not part of the six shipped examples)
+workflows/mcp-custom-pipeline.yaml
