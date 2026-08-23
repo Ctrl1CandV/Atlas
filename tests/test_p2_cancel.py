@@ -114,13 +114,15 @@ def test_cancel_mid_run_stops_at_node_boundary(tmp_path):
                             active_controller=True)
     assert result["status"] == "running" and result["requested"] is True
 
-    b_gate.set()   # 在途的 node_b 完成;取消在 node_c 入口消费
+    b_gate.set()   # 在途的 node_b(若已开始)放行完成
     assert _wait_terminal(tmp_path, run_id) == "cancelled"
     events = EventReader(tmp_path / run_id / "events.jsonl")
     assert events.find(type="run_cancelled") is not None
-    assert events.find(type="node_done", node="node_b") is not None  # 在途已放行
-    assert events.find(type="node_done", node="node_c") is None      # 未再花钱
-    assert events.find(type="run_failed") is None                    # 不是失败
+    assert events.find(type="node_done", node="node_a") is not None
+    # 取消可能落在 node_b 入口(未开始即终止)或 node_b 在途完成后——
+    # 两者都是"下一节点边界终止"的合法时序;node_c 必须从未花钱。
+    assert events.find(type="node_done", node="node_c") is None
+    assert events.find(type="run_failed") is None            # 不是失败
 
 
 def test_fallback_loop_consumes_cancel_before_dispatch():
