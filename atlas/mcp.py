@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Atlas MCP 服务:6 个工具,刻意保持很小(架构第 7.1 节)。
+"""Atlas MCP 服务:7 个工具,刻意保持很小(架构第 7.1 节)。
 
 harness 里的 agent 是这套工具的用户:写 YAML → validate(零成本)→
 dry_run(零成本)→ run(真实调用才花钱)→ get_run 查账;
@@ -17,14 +17,14 @@ from mcp.server.mcpserver.server import MCPServer
 
 from atlas.adapters import build_real_registry
 from atlas.config import PROJECT_ROOT, ConfigError, load_provider_configs
-from atlas.costs import fold_cost_accounting, rates_known
+from atlas.costs import rates_known
 from atlas.effective import build_effective_spec, provider_ids_for_spec
 from atlas.engine import (RunConflictError, RunNotFoundError, execute_graph,
                           lock_interrupted_run, prepare_execution,
                           prepare_production_agent_runner, release_run_lock,
                           resume_graph, validate_interrupted_run_locked)
-from atlas.events import EventReader, fold_events
-from atlas.runs import derive_run_status
+from atlas.runs import build_run_summary, derive_run_status, list_run_summaries
+from atlas import launcher
 from atlas.spec import (SpecError, spec_from_snapshot, spec_from_yaml,
                         spec_from_yaml_file, spec_to_snapshot)
 
@@ -72,7 +72,7 @@ def _tool_instructions() -> str:
 
 
 def build_mcp_server() -> MCPServer:
-    """构造带全部六个工具的 MCP server 实例。
+    """构造带全部七个工具的 MCP server 实例。
 
     stdio 入口(main)与 Web 进程的 /mcp 挂载共用同一份工具面,
     保证两个入口的工具描述与行为不会漂移。
@@ -84,7 +84,7 @@ def build_mcp_server() -> MCPServer:
 
 
 def _register_tools(srv: MCPServer) -> None:
-    """把六个工具注册到给定 server(实现函数见上方"内部实现")。"""
+    """把七个工具注册到给定 server(实现函数见上方"内部实现")。"""
 
     @srv.tool()
     def atlas_validate_workflow(yaml: str = "", workflow_id: str = "") -> str:
@@ -121,7 +121,8 @@ def _register_tools(srv: MCPServer) -> None:
     def atlas_run_workflow(task: str, workflow_id: str = "", dry_run: bool = False,
                            node_overrides: dict | None = None,
                            expected_execution_sha256: str | None = None,
-                           yaml: str = "", persist_as: str = "") -> str:
+                           yaml: str = "", persist_as: str = "",
+                           wait: bool = True) -> str:
         """运行工作流。同步阻塞到结束。
 
         workflow_id 与 yaml 二选一(都传时以 yaml 为准):
@@ -139,15 +140,33 @@ def _register_tools(srv: MCPServer) -> None:
         consumes/outputs/图结构永远不可覆盖——要长期生效就用 persist_as 固化
         或调用 atlas_save_workflow。
         dry_run=True 与真跑使用同一有效规格，只渲染、不花钱；
-        dry_run=False 真实调用模型。暂停在 human 节点时返回 paused。
+        默认同步阻塞到结束(wait=true);wait=false 见下。dry_run=False 真实调用模型。暂停在 human 节点时返回 paused。
+        wait(默认 true)同步阻塞到结束;wait=false 通过全部预检与执行身份
+        断言后立即返回 run_id(status=starting),长任务不再占住会话——
+        用 atlas_get_run 轮询、atlas_list_runs 列表。wait=false 与
+        persist_as 互斥(固化需要等真跑结束)。
         """
         try:
             return _render(run_workflow_impl(
                 workflow_id, task, dry_run, node_overrides=node_overrides,
                 expected_execution_sha256=expected_execution_sha256,
-                yaml=yaml, persist_as=persist_as))
+                yaml=yaml, persist_as=persist_as, wait=wait))
         except ValueError as e:
             return _render({"error": str(e), "next": "id 不合法"})
+
+    @srv.tool()
+    def atlas_list_runs(limit: int = 20, cursor: str = "") -> str:
+        """列出运行(零成本,P4)。按 run_id 降序稳定分页。
+
+        每条含 run_id/graph/status/nodes_done/started;状态为
+        running/interrupted/paused/done/failed(interrupted 由账本+运行锁
+        动态判定)。starting 只在账本落账前的短暂窗口由 Web 单 run 查询
+        合成,不出现在本列表。cursor 传上一页返回的 next_cursor 续页。
+        """
+        try:
+            return _render(list_runs_impl(limit, cursor))
+        except ValueError as e:
+            return _render({"error": str(e), "next": "limit 取 1..200"})
 
     @srv.tool()
     def atlas_list_workflows() -> str:
@@ -590,7 +609,8 @@ def run_workflow_impl(workflow_id: str, task: str, dry_run: bool = False,
                       providers_path: Path | None = None, env_store=None,
                       agent_runner_factory=None,
                       expected_execution_sha256: str | None = None,
-                      yaml: str = "", persist_as: str = "") -> dict:
+                      yaml: str = "", persist_as: str = "",
+                      wait: bool = True) -> dict:
     """跑一张图。同步阻塞到完成/暂停/失败;事件实时落盘,界面实时可见。
 
     workflow_id 与 yaml 二选一:前者跑已保存的图,后者跑 harness 即时
@@ -657,6 +677,28 @@ def run_workflow_impl(workflow_id: str, task: str, dry_run: bool = False,
             "error": "expected_execution_sha256 与当前执行配置不符，"
                      "运行未开始(零成本拒绝)",
             "next": "重新 dry_run 获取当前 execution_sha256 后再运行",
+        }
+
+    if not wait:
+        if persist_as:
+            return {"error": "wait=false 与 persist_as 互斥:"
+                             "固化需要等真实运行结束后才知道是否成功",
+                    "next": "要么 wait=true 同步跑完固化,要么先 wait=false "
+                            "跑、确认 done 后再用 atlas_save_workflow 保存"}
+        run_id = launcher.start_background_run(
+            spec, task=task, runs_root=RUNS_DIR, registry=registry,
+            agent_runner=agent_runner, prepared=prepared,
+            base_spec_sha256=effective.base_fingerprint,
+            binding_summary=effective.bindings,
+            override_summary=effective.overrides)
+        return {
+            "run_id": run_id,
+            "status": "starting",
+            "async": True,
+            "execution_sha256": prepared.execution_sha256,
+            "next": ("预检已过,后台 controller 已启动(会话不被占用)。"
+                     "atlas_get_run 轮询到终态;atlas_list_runs 看全部运行;"
+                     "暂停在 human 节点时去 Web 界面审批"),
         }
 
     try:
@@ -745,70 +787,32 @@ def resume_run_impl(run_id: str, registry_factory=None, *,
     return summary
 
 
+def list_runs_impl(limit: int = 20, cursor: str = "") -> dict:
+    """atlas_list_runs 的实现:与 Web 列表共用 runs.list_run_summaries。"""
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 200:
+        raise ValueError("limit 必须是 1..200 的整数")
+    return list_run_summaries(
+        RUNS_DIR, limit=limit, cursor=cursor or None,
+        active_ids=set(launcher.REGISTRY.active_ids()))
+
+
 def summarize_run(run_id: str) -> dict:
     _check_id(run_id, "运行")
-    path = RUNS_DIR / run_id / "events.jsonl"
-    if not path.exists():
-        return {"error": f"没有这个运行:{run_id}", "next": "用 atlas_list_workflows 查"}
-    events = EventReader(path).all()
-    folded = fold_events(events)
-    dynamic_status = derive_run_status(
-        events, run_id=run_id, runs_root=RUNS_DIR)
-    nodes = {}
-    for e in events:
-        if e["type"] == "node_done":
-            nodes[e["node"]] = {
-                "model_used": e["model_used"],
-                "degraded": e["degraded"],
-                "input_tokens": e.get("input_tokens"),
-                "output_tokens": e.get("output_tokens"),
-                "duration_s": e.get("duration_s"),
-                "output_path": e["output_path"],
-            }
-        elif e["type"] == "run_paused":
-            nodes.setdefault(e.get("node"), {})["status"] = "等待批准"
-    failed = next((e for e in reversed(events) if e["type"] == "run_failed"), None)
-    started = next((e for e in events if e["type"] == "run_started"), {})
-    effective_workflow = None
-    snapshot = RUNS_DIR / run_id / "spec.snapshot.json"
-    if snapshot.is_file():
-        try:
-            effective_workflow = spec_to_snapshot(spec_from_snapshot(
-                json.loads(snapshot.read_text(encoding="utf-8")),
-                source=str(snapshot)))
-        except Exception as e:
-            effective_workflow = {"error": f"有效规格快照损坏:{e}"}
-    accounting = fold_cost_accounting(events)
-    return {
-        "run_id": run_id,
-        "status": dynamic_status,
-        "graph": folded["graph"],
-        "nodes_done": folded["nodes_done"],
-        "node_details": nodes,
-        "totals": {
-            "input_tokens": sum(e.get("input_tokens") or 0 for e in events
-                                if e["type"] == "node_done"),
-            "output_tokens": sum(e.get("output_tokens") or 0 for e in events
-                                 if e["type"] == "node_done"),
-            "known_actual_cost_usd": accounting.known_actual_usd,
-            "accounted_cost_usd": accounting.accounted_usd,
-            "actual_cost_unknown_count": accounting.unknown_count,
-            "outstanding_reserved_usd": accounting.outstanding_reserved_usd,
-            "cost_usd": (accounting.known_actual_usd
-                         if accounting.unknown_count == 0 else None),
-        },
-        "run_dir": str(RUNS_DIR / run_id),
-        "base_spec_sha256": started.get("base_spec_sha256"),
-        "effective_spec_sha256": (started.get("effective_spec_sha256")
-                                  or started.get("spec_sha256")),
-        "bindings": started.get("bindings", []),
-        "overrides": started.get("overrides", []),
-        "effective_workflow": effective_workflow,
-        "failed_error": failed.get("error") if failed else None,
-        "next": ("打开 Web 界面看每个节点的完整输入输出;"
-                 + ("账本与产物在 run_dir,可审计" if folded["status"] != "failed"
-                    else "失败原因见 failed_error 与 model_failed 事件")),
-    }
+    summary = build_run_summary(run_id, runs_root=RUNS_DIR)
+    if "error" in summary:
+        # wait=false 刚返回、账本尚未落 run_started 的窗口:controller 仍
+        # 登记在本进程,如实报 starting,而不是与刚返回的 run_id 矛盾的
+        # "没有这个运行"(审查 2026-08-23 发现)。
+        if launcher.REGISTRY.is_active(run_id):
+            return {"run_id": run_id, "status": "starting",
+                    "next": "预检已过,controller 正在启动,稍后再查"}
+        summary["next"] = "用 atlas_list_runs 查全部运行"
+        return summary
+    summary["next"] = ("打开 Web 界面看每个节点的完整输入输出;"
+                       + ("账本与产物在 run_dir,可审计"
+                          if summary["status"] != "failed"
+                          else "失败原因见 failed_error 与 model_failed 事件"))
+    return summary
 
 
 # ─────────────────────────── 入口 ───────────────────────────

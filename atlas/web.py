@@ -34,7 +34,8 @@ from atlas.engine import (RunConflictError, RunNotFoundError, acquire_run_lock,
                           release_approval_run_lock, release_run_lock,
                           resume_graph, validate_interrupted_run_locked)
 from atlas.events import EventReader, fold_events
-from atlas.runs import derive_run_status
+from atlas import launcher
+from atlas.runs import derive_run_status, list_run_summaries
 from atlas.integrity import TASK_MAX_BYTES
 from atlas.spec import SpecError, spec_from_snapshot, spec_from_yaml_file
 from atlas.thinking import load_capabilities, model_capability
@@ -113,7 +114,6 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
     _agent_runner_factory = agent_runner_factory or (
         lambda spec: prepare_production_agent_runner(
             spec, providers_path=providers_path, env_store=env_store))
-    _run_threads: dict[str, threading.Thread] = {}
     # 删除事务很短且低频；串行化可让同进程的重复 DELETE 稳定收敛为
     # 首个成功、后续 404；稳定 .locks OS 锁保护跨进程/跨操作竞争。
     _delete_guard = threading.Lock()
@@ -379,35 +379,19 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                 409, "expected_execution_sha256 与当前执行配置不符;"
                      "未分配 run_id、未创建锁或运行目录")
 
-        run_id = new_run_id()
         try:
-            acquire_run_lock(run_id, runs_root=runs_dir)
+            run_id = launcher.start_background_run(
+                effective.spec, task=task, runs_root=runs_dir,
+                registry=registry, agent_runner=agent_runner,
+                prepared=prepared,
+                base_spec_sha256=effective.base_fingerprint,
+                binding_summary=effective.bindings,
+                override_summary=effective.overrides,
+                logger=log)
         except RunConflictError as e:
             raise HTTPException(409, str(e)) from e
-
-        def _execute():
-            try:
-                execute_graph(
-                    effective.spec, task=task, runs_root=runs_dir,
-                    registry=registry, run_id=run_id,
-                    agent_runner=agent_runner, prepared=prepared,
-                    base_spec_sha256=effective.base_fingerprint,
-                    binding_summary=effective.bindings,
-                    override_summary=effective.overrides,
-                    _lock_held=True)
-            except Exception:
-                log.exception("run %s 后台执行异常", run_id)
-            finally:
-                _run_threads.pop(run_id, None)
-
-        try:
-            thread = threading.Thread(target=_execute, daemon=True)
-            _run_threads[run_id] = thread
-            thread.start()
-        except Exception:
-            _run_threads.pop(run_id, None)
-            release_run_lock(run_id, runs_root=runs_dir)
-            raise
+        except Exception as e:
+            raise HTTPException(500, f"后台启动失败,运行未开始:{e}") from e
         return {"run_id": run_id}
 
     # ── runs ───────────────────────────────────────────────────
@@ -424,30 +408,16 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
 
     @app.get("/api/runs")
     def list_runs():
-        if not runs_dir.exists():
-            return []
-        items = []
-        for d in sorted(runs_dir.iterdir(), reverse=True):
-            if d.name in (".locks", ".trash"):
-                continue
-            if not (d / "events.jsonl").exists():
-                continue
-            events = EventReader(d / "events.jsonl").all()
-            if not events:
-                continue
-            folded = fold_events(events)
-            status = derive_run_status(
-                events, run_id=d.name, runs_root=runs_dir,
-                active_controller=d.name in _run_threads)
-            items.append({
-                "run_id": d.name,
-                "graph": folded["graph"],
-                "status": status,
-                "nodes_done": len(folded["nodes_done"]),
-                "started": next((e["ts"] for e in events
-                                 if e["type"] == "run_started"), None),
-            })
-        return items
+        listing = list_run_summaries(
+            runs_dir, limit=10_000,
+            active_ids=set(launcher.REGISTRY.active_ids()))
+        return [{
+            "run_id": r["run_id"],
+            "graph": r["graph"],
+            "status": r["status"],
+            "nodes_done": len(r["nodes_done"]),
+            "started": r["started"],
+        } for r in listing["runs"]]
 
     def _delete_run_locked(rid: str):
         """持权威运行锁将终态 run 原子隔离，再清理 tombstone。"""
@@ -538,11 +508,11 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
     @app.get("/api/runs/{rid}")
     def get_run(rid: str):
         _check_id(rid, "运行")
-        events = _run_events(rid, wait=0.3 if rid in _run_threads else 0.0)
+        events = _run_events(rid, wait=0.3 if launcher.REGISTRY.is_active(rid) else 0.0)
         if not events:
             # 空/缺失账本不能证明 run 存在；只有本进程刚分配且线程仍登记的
             # id 才能暴露短暂的 starting 状态。
-            if rid not in _run_threads:
+            if not launcher.REGISTRY.is_active(rid):
                 raise HTTPException(404, f"没有这个运行:{rid}")
             return {"run_id": rid, "status": "starting", "nodes": [],
                     "nodes_done": [], "artifacts": {},
@@ -556,7 +526,7 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
         folded = fold_events(events)
         dynamic_status = derive_run_status(
             events, run_id=rid, runs_root=runs_dir,
-            active_controller=rid in _run_threads)
+            active_controller=launcher.REGISTRY.is_active(rid))
         # 每个节点的最新状态(循环的节点保留最后一次,attempts 全留)
         nodes: dict[str, dict] = {}
         run_failed = folded["status"] == "failed"
@@ -645,7 +615,7 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
     @app.get("/api/runs/{rid}/events")
     def stream_events(rid: str, after: int = 0):
         _check_id(rid, "运行")
-        events = _run_events(rid, wait=5.0 if rid in _run_threads else 0.0)
+        events = _run_events(rid, wait=5.0 if launcher.REGISTRY.is_active(rid) else 0.0)
         if not events:
             raise HTTPException(404, f"没有这个运行:{rid}")
         path = runs_dir / rid / "events.jsonl"
@@ -682,7 +652,7 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                     current = reader.all()
                     if derive_run_status(
                             current, run_id=rid, runs_root=runs_dir,
-                            active_controller=rid in _run_threads) == "interrupted":
+                            active_controller=launcher.REGISTRY.is_active(rid)) == "interrupted":
                         yield ('event: run_interrupted\n'
                                'data: {"type": "run_interrupted"}\n\n')
                         break
@@ -748,7 +718,7 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
         try:
             lock_interrupted_run(
                 rid, runs_root=runs_dir,
-                active_controller=rid in _run_threads)
+                active_controller=launcher.REGISTRY.is_active(rid))
         except RunConflictError as e:
             raise HTTPException(409, str(e)) from e
         except RunNotFoundError as e:
@@ -778,17 +748,11 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                     _lock_held=True)
             except Exception:
                 log.exception("run %s 后台恢复异常", rid)
-            finally:
-                _run_threads.pop(rid, None)
 
         try:
-            thread = threading.Thread(target=_execute_resume, daemon=True)
-            _run_threads[rid] = thread
-            thread.start()
-        except Exception:
-            _run_threads.pop(rid, None)
-            release_run_lock(rid, runs_root=runs_dir)
-            raise
+            launcher.spawn_controller(rid, _execute_resume, runs_root=runs_dir)
+        except Exception as e:
+            raise HTTPException(500, f"后台恢复启动失败:{e}") from e
         return {"run_id": rid, "status": "running"}
 
     @app.post("/api/runs/{rid}/approve")
@@ -836,7 +800,9 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                 log.exception("run %s 批复后执行异常", rid)
 
         try:
-            threading.Thread(target=_execute, daemon=True).start()
+            launcher.spawn_controller(
+                rid, _execute, runs_root=runs_dir,
+                release_lock_on_start_failure=False)
         except Exception:
             release_approval_run_lock(rid, runs_root=runs_dir)
             raise

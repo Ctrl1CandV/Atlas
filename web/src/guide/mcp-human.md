@@ -8,16 +8,17 @@
 
 两个入口共用同一份工具实现。每个客户端会话选一种入口，不要为同一连接同时接 stdio 子进程与 HTTP 端点。
 
-## 六个工具
+## 七个工具
 
 1. `atlas_validate_workflow`：校验 YAML 或保存的 workflow id；语法和语义错误在有源码位置时带字段路径、行与列。
 2. `atlas_save_workflow`：保存已校验 YAML；更新需 `expected_sha256`。
-3. `atlas_run_workflow`：`dry_run: true` 只渲染；`false` 才执行支持的节点。`workflow_id` 与 `yaml` 二选一——传 `yaml` 全文即可直接运行自定义图，不写 workflows/；`persist_as` 在真实运行结束后把它固化为已保存工作流。
+3. `atlas_run_workflow`：`dry_run: true` 只渲染；`false` 才执行支持的节点。`workflow_id` 与 `yaml` 二选一——传 `yaml` 全文即可直接运行自定义图，不写 workflows/；`persist_as` 在真实运行结束后把它固化为已保存工作流。`wait=false` 通过全部预检后立即返回 run_id（长任务不再占住会话），用 `atlas_get_run` 轮询；与 `persist_as` 互斥。
 4. `atlas_list_workflows`：列出工作流和校验状态。
-5. `atlas_get_run`：查询已创建运行的动态状态与产物位置。
-6. `atlas_resume_run`：仅恢复事件仍为 running、没有活跃控制器且稳定 OS run lock 可取得的 interrupted 运行。
+5. `atlas_list_runs`：按 run_id 降序分页列出运行（`limit`/`cursor`），状态含 running/interrupted/paused/done/failed（starting 只在落账前的短暂窗口由 Web 单 run 查询可见）。
+6. `atlas_get_run`：查询已创建运行的动态状态与产物位置。
+7. `atlas_resume_run`：仅恢复事件仍为 running、没有活跃控制器且稳定 OS run lock 可取得的 interrupted 运行。
 
-固定顺序是 validate → save（需要时）→ dry-run → 人工确认 → run → get-run。自定义图优先走 `yaml` 参数而不是直接写文件。运行因控制器退出而显示 interrupted 时才使用 resume；不要跳过零成本预演。
+固定顺序是 validate → save（需要时）→ dry-run → 人工确认 → run → get-run（或 wait=false 后轮询 / list-runs）。自定义图优先走 `yaml` 参数而不是直接写文件。运行因控制器退出而显示 interrupted 时才使用 resume；不要跳过零成本预演。
 
 ## Human 节点
 

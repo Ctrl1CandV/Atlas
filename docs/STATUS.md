@@ -15,7 +15,7 @@
 | 能力 | 当前合同 |
 |---|---|
 | YAML 静态图 | `llm`、`research`、`coding_agent`、静态并行、条件路由、有界循环和 human gate；节点 id 拒绝 Windows 保留设备名 |
-| MCP 控制面 | 六个工具：validate、save、run、list workflows、get run、resume interrupted run。run 支持传 `yaml` 全文跑未保存的自定义图（`persist_as` 真跑后固化）；stdio 之外，`atlas-web` 在 `/mcp` 以 streamable-http 提供同一工具面 |
+| MCP 控制面 | 七个工具：validate、save、run（`wait=false` 异步返回 run_id）、list workflows、list runs、get run、resume interrupted run。run 支持传 `yaml` 全文跑未保存的自定义图（`persist_as` 真跑后固化）；stdio 之外，`atlas-web` 在 `/mcp` 以 streamable-http 提供同一工具面 |
 | 工作流文件管理 | Web 页面可删除工作流；保存走 MCP 的 `expected_sha256` 读-改-写闭环（乐观锁防覆盖） |
 | 零成本预检 | validate 与 dry-run 不调用供应商；`expected_execution_sha256` 可绑定预演与真跑身份 |
 | 可审计运行 | append-only JSONL 事件、write-once 产物、读取时 SHA-256 断言、有效规格快照 |

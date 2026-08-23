@@ -113,7 +113,7 @@ def test_run_failure_visible(env):
 
 
 def test_tool_wrappers_registered():
-    # 6 个工具都注册上了；resume 只接受动态 interrupted 运行。
+    # 7 个工具都注册上了；resume 只接受动态 interrupted 运行。
     import asyncio
     from mcp.server.mcpserver.server import MCPServer
 
@@ -122,7 +122,8 @@ def test_tool_wrappers_registered():
     names = {t.name for t in asyncio.run(tools())}
     assert names == {"atlas_validate_workflow", "atlas_save_workflow",
                      "atlas_run_workflow", "atlas_list_workflows",
-                     "atlas_get_run", "atlas_resume_run"}, names
+                     "atlas_list_runs", "atlas_get_run",
+                     "atlas_resume_run"}, names
 
 
 def test_validate_and_save_errors_remain_strings_with_source_location(env):
@@ -297,7 +298,8 @@ def test_mcp_streamable_http_mounted_in_web_app(tmp_path):
         names = {t["name"] for t in listing["result"]["tools"]}
         assert names == {"atlas_validate_workflow", "atlas_save_workflow",
                          "atlas_run_workflow", "atlas_list_workflows",
-                         "atlas_get_run", "atlas_resume_run"}
+                         "atlas_list_runs", "atlas_get_run",
+                         "atlas_resume_run"}
 
         _, _, call = post({
             "jsonrpc": "2.0", "id": 3, "method": "tools/call",

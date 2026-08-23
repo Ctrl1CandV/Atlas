@@ -540,7 +540,9 @@ def test_allocated_run_without_events_is_starting(tmp_path, monkeypatch):
     def blocked_execute(*args, **kwargs):
         assert release.wait(timeout=5)
 
-    monkeypatch.setattr(web_module, "execute_graph", blocked_execute)
+    # P4 起 run 的执行点在共享 launcher 里;阻塞它以暴露 starting 窗口。
+    from atlas import launcher as launcher_module
+    monkeypatch.setattr(launcher_module, "execute_graph", blocked_execute)
     app = create_app(workflows_dir=workflows, runs_dir=tmp_path / "runs",
                      registry_factory=lambda _: make_registry(fake), api_only=True)
     headers = {"X-Atlas-Request": "1"}
