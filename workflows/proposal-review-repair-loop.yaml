@@ -1,12 +1,14 @@
-# 示例 3/6:方案审查与有限修复循环。
-# author 产出方案 → reviewer 结构化判定 → 不合格回 author 修订(回边)。
+# 示例 3/6:方案审查与有限重试循环。
+# author 产出方案 → reviewer 结构化判定 → 不合格回到 author 重跑(回边)。
+# 回边语义(如实说明):consumes 是静态的,重跑轮的输入与首轮相同、
+# 不携带 reviewer 的意见——循环是"有界重试",不是"按批注修订"。
 # 终止双保险:条件出口(verdict=pass)+ max_iterations 上限(决定 1)。
 name: proposal-review-repair-loop
-description: 方案产出-审查-修订循环,回边有条件出口与轮数上限
+description: 方案产出-审查-有界重试循环,回边有条件出口与轮数上限
 
 meta:
-  title: 方案审查与修复循环
-  description: 生成方案、结构化审查、不合格自动回修;最多 2 轮,超限大声失败
+  title: 方案审查与重试循环
+  description: 生成方案、结构化审查、不合格自动重试(回边不携带审查反馈);最多 2 轮,超限大声失败
   kind: example
   category: document
   tags: [有限循环, 条件分支, 结构化判定]
@@ -17,8 +19,8 @@ nodes:
   - id: author
     type: llm
     prompt: |
-      按任务产出/修订一份方案。若上游有审查意见,逐条回应:
-      接受的怎么改、拒绝的为什么。方案要具体到可执行。
+      按任务产出一份方案。要求:结构完整、内容具体到可执行、无事实性硬伤。
+      (若为循环重试轮,你的输入与首轮相同,请在质量上自行加强。)
     consumes: [task]
 
   - id: reviewer

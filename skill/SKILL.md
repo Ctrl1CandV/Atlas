@@ -38,9 +38,9 @@ Never read or expose `${ATLAS_HOME}/config/.env` or active provider/agent/capabi
 
 1. `parallel-research-synthesis` — parallel LLM perspectives and synthesis; despite its name it uses LLM nodes rather than an agent `research` node.
 2. `multi-vendor-debate-judge` — debate topology; bind genuinely distinct providers before calling opinions independent.
-3. `proposal-review-repair-loop` — bounded author/reviewer repair loop.
+3. `proposal-review-repair-loop` — bounded author/reviewer retry loop; the back edge carries no reviewer feedback (consumes are static), so it is bounded retry rather than annotation-driven revision.
 4. `human-approval-pipeline` — draft, human gate, and finalization.
-5. `code-change-review-approve` — coding-agent implementation, complete textual unified diff review bound to baseline/result/patch digests, bounded repair, and human approval.
+5. `code-change-review-approve` — coding-agent implementation, complete textual unified diff review bound to baseline/result/patch digests, bounded retry from the frozen baseline (the back edge carries no reviewer feedback), and human approval.
 6. `map-reduce-document-analysis` — parallel lenses over shared material and reduction.
 
 Examples intentionally leave models unselected. They validate and preview; a real run requires explicit model bindings and, for an agent example, the production runner configuration below.
