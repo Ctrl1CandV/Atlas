@@ -1,0 +1,27 @@
+# A1/A3 用:标准两节点图。node_a 带必填字段,是假成功检测的对象。
+name: two_node
+description: M0/M1 断言 A1 A2 A3 的标准夹具
+
+nodes:
+  - id: node_a
+    type: llm
+    model: Fake:primary
+    fallback: [Fake:fallback]
+    prompt: 你是分析员。基于任务材料完成分析,输出含 summary/verdict/detail 的 JSON。
+    consumes: [task]
+    output_schema:
+      required: [summary, verdict]
+
+  - id: node_b
+    type: llm
+    model: Fake:other
+    prompt: 你是审查员。核对上游分析的完整性并给出结论。
+    consumes: [task, node_a.output]
+    output_schema:
+      required: [review]
+
+edges:
+  - from: node_a
+    to: node_b
+  - from: node_b
+    to: END

@@ -1,0 +1,66 @@
+name: Real provider discovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_cost_usd:
+        description: "Explicit provider budget; discovery must remain zero-token-cost"
+        required: true
+        default: "0.00"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    environment: real-api
+    env:
+      ATLAS_REAL_API_BASE_URL: ${{ vars.ATLAS_REAL_API_BASE_URL }}
+      ATLAS_REAL_API_MODEL: ${{ vars.ATLAS_REAL_API_MODEL }}
+      ATLAS_REAL_API_KEY: ${{ secrets.ATLAS_REAL_API_KEY }}
+      ATLAS_REAL_API_MAX_COST_USD: ${{ inputs.max_cost_usd }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          version: "0.8.13"
+      - name: Require protected configuration and zero token budget
+        shell: pwsh
+        run: |
+          if (-not $env:ATLAS_REAL_API_BASE_URL -or -not $env:ATLAS_REAL_API_MODEL -or -not $env:ATLAS_REAL_API_KEY) {
+            throw "Configure the protected real-api URL, model, and API key"
+          }
+          $budget = 0.0
+          if (-not [double]::TryParse($env:ATLAS_REAL_API_MAX_COST_USD, [Globalization.NumberStyles]::Number, [Globalization.CultureInfo]::InvariantCulture, [ref]$budget)) {
+            throw "max_cost_usd must be a decimal number"
+          }
+          if ($budget -ne 0.0) {
+            throw "This workflow only calls model discovery and requires max_cost_usd=0.00; it must not make token-billed inference calls"
+          }
+      - name: Create ephemeral single-provider configuration
+        shell: pwsh
+        run: |
+          $config = @{
+            providers = @(@{
+              id = "RealAPI"
+              apiKeyEnv = "ATLAS_REAL_API_KEY"
+              models = @($env:ATLAS_REAL_API_MODEL)
+              openaiBaseUrl = $env:ATLAS_REAL_API_BASE_URL
+            })
+          } | ConvertTo-Json -Depth 5
+          Set-Content -Path config/providers.json -Value $config -Encoding utf8
+          Set-Content -Path config/.env -Value "ATLAS_REAL_API_KEY=$env:ATLAS_REAL_API_KEY" -Encoding utf8
+      - name: Sync locked dependencies
+        run: uv sync --locked --all-groups
+      - name: Query one provider discovery endpoint
+        run: uv run pytest tests/test_discovery_real.py -m real_api -s
+      - name: Remove ephemeral credentials
+        if: always()
+        shell: pwsh
+        run: Remove-Item config/.env, config/providers.json -Force -ErrorAction SilentlyContinue
