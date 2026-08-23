@@ -43,6 +43,8 @@
 | C1 | dry-run 显式警告"设了 max_cost_usd 但 N 节点费率未知→只放行首个计费节点" | 警告出现在 dry-run 返回 |
 | C2 | pricing.json 填入确认过的真实单价 | **只能由用户完成,不填猜的数字** |
 
+开工顺序(2026-08-23 确认):① B1(纯代码+测试,先立"提取后仍缺必填字段照样 DegradedOutput"反例)→ ② A1+A2 同批(供应商级默认值 + dry-run 警告,警告逻辑与输出处理同域)→ ③ C1(费率警告)→ ④ B3(指南/skill 默认建议)。除 A1 验收需一次真实运行外全部零成本;真实运行按成本红线执行:先 dry-run、显式预算、便宜模型、retry=0。C2 在 A1 验收后由用户择机完成。
+
 ### 2b. 体验与技术债(审查发现,按收益排序)
 
 | 项 | 问题 | 方案 | 工作量 |
@@ -65,9 +67,9 @@
 - **A3 截断自动升档重试**:自动加钱必须显式决策。
 - **B2 供应商 response_format**:各网关支持参差,需实测矩阵。
 
-## 第三梯队(P2):R0 发布与仓库治理(执行中)
+## 第三梯队(P2):R0 发布与仓库治理(✅ 已闭环,2026-08-23)
 
-本地部分本轮完成:大清理、gitignore、提交、推送。剩余为 GitHub 网页操作(默认分支迁移 `main` 并保护、release environment 人工审批、Social Preview、可选 Discussions),由用户执行;v0.1.1 起发布走 release-assets.yml(exact-tag + 全量验证链)。
+落地记录:六批提交推送、`main` 从同一提交建出并成为默认分支、`release/v0.1.0-rc.1` 远端删除、公开 CI 双分支全绿(`7eac07b`)、README 挂 CI 徽章、`release` environment 人工审批生效、Social preview 上传。唯一残余:`main` 的 deletion/non-fast-forward 规则集已创建但处于禁用态,需仓库管理员在 Settings → Rules → Rulesets 中启用(存储的 git 凭据无管理写权限,无法代为执行)。v0.1.1 起发布走 release-assets.yml(exact-tag + 全量验证链)。
 
 ## 第四梯队(P3):统一状态与停止损失(ROADMAP 第一批)
 
@@ -99,5 +101,5 @@ P5 可配置 retry backoff、P8 token guard、P12 durable failure workflow、P14
 |---|---|
 | 一(P0 必修) | ✅ 完成(2026-08-22) |
 | 二(P1 稳定性收尾) | 方案就绪,A1/A2/B1/B3/C1 可立即开工 |
-| 三(R0 治理) | 本地完成,网页操作待用户 |
-| 四–七 | 未开始,按序推进 |
+| 三(R0 治理) | ✅ 闭环(2026-08-23,规则集启用待用户点击) |
+| 四–七 | 未开始;实施合同已深化到模块级锚点(见 ROADMAP §3–§10 各期"落地锚点") |

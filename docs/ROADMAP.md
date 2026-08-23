@@ -1,6 +1,6 @@
 # Atlas 后续路线图
 
-> 状态：2026-08-19 起生效。这里的“计划”都不是当前能力；完成必须以代码、事件兼容、测试和用户文档同时落地为准。
+> 状态：2026-08-19 起生效；2026-08-23 深化——R0 闭环，各期补充"落地锚点"（模块/事件/表面/测试级方案）。这里的“计划”都不是当前能力；完成必须以代码、事件兼容、测试和用户文档同时落地为准。
 
 ## 1. 排序原则
 
@@ -22,32 +22,27 @@ P0min、P1、P6 已实施。P5、P8、P12、P14 已移除且不排期；除非�
 
 每一批必须满足：旧事件可读、状态可从事件重放、Web/MCP/API 共用领域函数、dry-run 无花销、real-API 默认排除、相关 Python/Web 测试与文档同步。涉及崩溃或并发的能力必须含真实子进程 kill/竞争测试，不能只用普通异常代替。
 
-## 2. R0：发布与仓库治理
+## 2. R0：发布与仓库治理（✅ 已闭环，2026-08-23）
 
-### 价值
+### 落地记录
 
-让 tag、源码、构建资产和 provenance 指向同一 commit，避免用户验证出“证明有效但不是 tag 源码”的结果。
+- 默认分支已迁移 `main`（7eac07b），`release/v0.1.0-rc.1` 远端已删除；`main` 上创建 deletion/non-fast-forward 规则集（强制启用待仓库管理员在网页确认）。
+- 公开 CI（ci.yml）在 `main` 双 job 全绿；README 挂 CI 徽章；`release` environment 必须人工批准（required reviewer 已配置）。
+- tests/scripts 已公开；release-assets.yml 保留全量验证链。
+- `v0.1.0` tag 与资产来源差异保持 as-built 披露，不改动。
 
-### 当前缺口
+### 遗留合同（下次发布 v0.1.1 执行）
 
-- `v0.1.0` tag 为 `4f9b0b5…`，当前 Release 资产从 `d34d785…` 构建。
-- 默认分支仍叫 `release/v0.1.0-rc.1`，公开分支未保护。
-- v0.1.0 之后的 README、截图和 release workflow 改动不属于 v0.1.0 tag/source package。
-- 公开仓库没有完整 Windows CI；本地 untracked workflow 不能被宣传为公开 CI 证据。
+1. 不移动、不重签 `v0.1.0`；发布记录保留 as-built truth。
+2. `v0.1.1` 从 exact tag checkout 构建，断言 `HEAD == tag^{commit}`，版本与资产名从 tag 派生。
+3. 发布资产默认不可覆写；修复用新 patch version。
+4. 启用 `main` 规则集强制状态（唯一待办的网页动作）。
 
-### 实施合同
-
-1. 不移动、重签或静默替换 `v0.1.0`；在发布记录中保留 as-built truth。
-2. 下一发布建议为 `v0.1.1`：release workflow 从 exact tag checkout，断言 `HEAD == tag^{commit}`，版本与资产名从 tag 派生；证明和资产只针对该 checkout。
-3. 在确认 GitHub 默认分支与外部链接后，把正式开发默认分支改为 `main`；启用禁止 force-push/删除及必要 status checks。
-4. 明确公开 CI 策略：若继续不公开 tests/scripts，README 不能展示虚假的 CI badge；若公开 CI，则只上传脱敏、无 run/config 的产物。
-5. 发布资产默认不可覆写；修复用新 patch version，不反复替换同一 Release 文件。
-
-### 验收
+### 下次发布验收
 
 - `git rev-list -n 1 <tag>`、workflow `head_sha`、provenance `gitCommit` 三者完全相等。
 - 下载资产逐项匹配 `SHA256SUMS` 和 attestation subjects。
-- clean Python 3.12 离线 smoke 使用下载资产，而不是本地另建的同名文件。
+- clean Python 3.12 冒烟安装使用下载资产，而不是本地另建的同名文件。
 - Release 正文准确标注 source-only、Windows、无 PyPI/installer 和已知边界。
 
 ## 3. R1 / P4：共享 launcher、MCP 异步与 `atlas_list_runs`
@@ -81,6 +76,14 @@ P1 已完成。P4 应先于 P2；否则 cancel 会被迫接入两套 controller 
 - 并发启动、resume、approve 不产生两个 controller 或重复终态。
 
 估算：4–7 人日。
+
+### 落地锚点（2026-08-23 深化）
+
+- **模块**：新建 `atlas/launcher.py`——进程内 ControllerRegistry（run_id → controller 线程句柄，注册/注销加锁，防双 controller）；`atlas/runs.py` 增 `build_run_summary(run_dir)` 领域函数，Web 列表与 MCP `atlas_list_runs` 共用（状态/节点/成本/错误摘要 + 按 run_id 降序稳定游标分页）；`atlas/web.py` 的后台线程与 `atlas/mcp.py` 的 run/resume 全部改走 launcher。
+- **事件**：无新事件类型。wait=false 只改变控制面返回时机，事件序列与 P1 interrupted 派生完全不变。
+- **表面**：`atlas_run_workflow` 增 `wait: bool = true`（默认同步，兼容不变）；第 7 个 MCP 工具 `atlas_list_runs(limit, cursor)`；skill、`.mcp.json`、内置指南、`tests/test_docs_agent_contract.py` 工具数契约同步。
+- **测试**：新 `tests/test_launcher_registry.py`（并发 start/resume/approve 不产生双 controller、不写重复终态）；扩展 `tests/test_p1_kill_resume.py`（kill MCP 子进程后另一入口观察到 interrupted 并只补未完成节点）；wait=false 预检后快速返回且轮询可达 paused/terminal；Web/MCP 对同一 run 的 summary 结构化等价。
+- **实施顺序**：① 抽 registry + summary（Web 先切换，行为零变化）→ ② MCP `wait=false` → ③ `atlas_list_runs` → ④ kill/竞争测试补齐。
 
 ## 4. R2 / P2：协作式取消与真实费用停损
 
@@ -123,6 +126,15 @@ P4 shared launcher；复用 P1 状态派生和现有 stable run lock；成本沿
 
 估算：6–10 人日（含成本 RFC 与 UI/MCP）。
 
+### 落地锚点（2026-08-23 深化）
+
+- **模块**：`atlas/runs.py` 增 cancel request 文件（目录内原子 create-if-absent，含 request_id/时间/可选 reason；请求路径绝不等待 controller 排他锁）与 `cancelled` 终态状态机（只有 controller 在锁内写）；`atlas/engine.py` 在节点入口、fallback 切换、retry 等待、checkpoint 边界消费 token，sleep 改可唤醒等待；`atlas/nodes/local_cli.py` + `atlas/nodes/agent.py` 保存进程句柄并终止整个进程树（复用 `tests/test_p1_kill_resume.py` 的真子进程 kill 基建）；HTTP SDK 首版语义如实标注为"等待在途调用返回或 timeout"。
+- **事件**：新增 `run_cancelled`（controller-only 唯一终态事件）；cancel request 文件是触发器不是账本内容，重放只看事件。
+- **表面**：MCP 第 8 个工具 `atlas_cancel_run(run_id, reason?)`（幂等；running/interrupted/paused 接受，done/failed/cancelled 返回冲突）；Web 运行页取消按钮；cancelled 进入 Web/MCP summary 且可删除；成本面板对未决 reservation 的取消语义如实展示。
+- **成本停损**：先出 RFC 决定 agent 默认 `retry=0` 还是"存在可执行预算才允许 retry"；`--max-budget-usd` 映射进 `local_cli` 预检路径，用桩 CLI 测有效值/缺失/拒绝/超支报告；pricing 全 null 且含 agent 的图在 preview 发醒目运营警告（不写成已阻止收费）。
+- **测试**：竞争矩阵（cancel × approve × resume × 自然完成的全顺序，终态唯一）；真子进程树终止无 orphan；取消后不自动 retry；事件可重放且 cost fold 一致。
+- **实施顺序**：① request 文件 + 状态机 + `run_cancelled` → ② engine token 消费点 → ③ 进程树终止接入 → ④ MCP/Web 表面 → ⑤ 成本 RFC 与 agent 预算映射落地。
+
 ## 5. R3 / P9：controller heartbeat
 
 ### 价值
@@ -149,6 +161,13 @@ P2 的 attempt context/cancellation lifecycle；后续由 P10 控制事件增长
 慢 fake provider/CLI 显示递增 elapsed；冻结调用时措辞仍准确；结束后无泄漏线程或迟到事件；event fold 不因 heartbeat 改变终态。
 
 估算：3–5 人日。
+
+### 落地锚点（2026-08-23 深化）
+
+- **模块**：`atlas/engine.py` 每 attempt 挂 watchdog 线程定时写事件；间隔默认 30 秒（下限 30 秒、run 级可配），不读 YAML 图文件，避免把运营参数混进图语义。
+- **事件**：新增 `node_progress`：node、iteration、attempt、candidate/runner、controller elapsed_ms、phase（waiting/retry）；`fold_events` 显式声明忽略该类型（终态与既有语义零变化，需回归测试锁定）。
+- **容量**：事件量级计入账本 16MiB 治理（30 秒一次 ≈ 每节点每天 2880 条）；P10 的分段账本方案落地前，文档如实写出长跑的容量代价。
+- **测试**：慢 fake provider/CLI 显示递增 elapsed；冻结调用时措辞仍只说"controller 在等待"；终态后线程停止、迟到 heartbeat 被拒绝；event fold 不因 heartbeat 改变终态。
 
 ## 6. R4 / P3：异常 taxonomy 与节点 `on_error`
 
@@ -178,6 +197,14 @@ P2 的 `RunCancelled` 分类；先完成 taxonomy，再开放 YAML 字段。
 
 估算：7–11 人日。
 
+### 落地锚点（2026-08-23 深化）
+
+- **模块**：新建 `atlas/exc.py` 异常分类层——治理类（CostExceeded、GuardViolation、RunCancelled、run deadline、Spec/Wiring/NoRoute、Integrity、CheckpointInvariant、ApprovalRejected）永不可吞；内容类（候选全部失败、假成功耗尽、node-local timeout）可策略化；`AgentCliError` 单独分类，仅显式白名单子类可 soft-fail。`atlas/engine.py` 节点失败路径按类分发；`atlas/spec.py` 校验节点级 `on_error`。
+- **YAML**：节点字段 `on_error: stop|continue|branch`（默认 stop，旧图零变化）；`branch` 要求存在到保留键 `__failed__` 的边，校验期强制，不等到运行期。
+- **事件/artifact**：soft failure 写 write-once error artifact（含 error class、原始异常摘要、节点上下文）+ 新事件 `node_failed_soft`；fold 必须从旧/新事件都得到同一终态（反例测试：新事件缺失时按失败处理）。
+- **表面**：Web/MCP 同源展示 error class、error artifact 入口、`__failed__` 路由结果；dry-run 列出图中所有非默认 `on_error` 节点。
+- **测试**：每个异常类正反例各一；`on_error: continue` 配置下治理异常仍终止整图；三策略 × 循环/并行/join 组合重放一致。
+
 ## 7. R5 / P7：artifact import 与 invocation hash
 
 ### 价值
@@ -205,6 +232,13 @@ P2 的 `RunCancelled` 分类；先完成 taxonomy，再开放 YAML 字段。
 
 估算：7–11 人日。
 
+### 落地锚点（2026-08-23 深化）
+
+- **模块**：`atlas/artifacts.py` 负责字节复制与写后 hash 复验；`atlas/runs.py` 在源 run 的 stable lock 内校验事件、role、大小、hash 后才复制；`atlas/engine.py` + `atlas/effective.py` 计算 `invocation_sha256`（节点执行字段、有效 prompt、有序输入 hash、provider/runner execution identity、算法版本），进入 execution identity 与 `expected_execution_sha256` 合同（`tests/test_prepared_execution.py` 已有锚点可扩展）。
+- **YAML**：节点级 `imports: [{run, name}]`；校验期解析（源 run 必须终态且事件证明该产物完整），拒绝指向运行中/中断 run。
+- **事件**：新增 `artifact_imported`（源 run/logical name/hash、新 path/hash、时间、算法版本）；imports/skip plan 进入 execution identity，dry-run 明示"将从哪个 run 复制什么、将跳过什么"。
+- **测试**：导入后删除源 run，新 run 仍可完成；任一 prompt/model/input/runner 改变都不复用；复制中途崩溃无半产物（kill 测试）；与源删除并发时锁行为确定。
+
 ## 8. R5b / P13：fork 与失效闭包
 
 ### 价值
@@ -228,6 +262,13 @@ P7 invocation hash/import。
 线性、并行、join、条件边和循环图分别验证；failed/paused 源 run 只能导入事件证明完整的产物。
 
 估算：4–7 人日。
+
+### 落地锚点（2026-08-23 深化）
+
+- **模块**：`atlas/m0_graph.py` 增失效闭包计算——比较源 snapshot 与新图的 invocation identities 得 changed set，静态图上取 changed nodes + 全部后代；循环按强连通分量整体失效（不做循环内部分保留）。
+- **规则**：闭包内禁止 import/skip；闭包外仅 identity 完全相等且依赖完整才复制；join 依赖 changed 分支时必须重跑（防止"先 pin 全部再意外跳过目标节点"）。
+- **事件/dry-run**：changed set、closure、import map、算法版本全部进 dry-run 输出、事件与 execution identity。
+- **测试**：线性、并行、join、条件边、循环五类图分别验证；failed/paused 源 run 只能导入事件证明完整的产物。
 
 ## 9. R6 / P10：retention、star 与 run index
 
@@ -256,6 +297,13 @@ age/count 决策确定；star 和非终态保护；清理崩溃可重试；索�
 
 估算：4–7 人日。
 
+### 落地锚点（2026-08-23 深化）
+
+- **模块**：`atlas/runs.py` 拆"候选选择"与"删除执行"两步；删除复用 stable run lock、同卷 tombstone、no-follow 清理，禁止直接 `rmtree`；star 是 run 目录内 write-once 标记文件；轻量索引（run_id、状态、时间、star、成本摘要）为可丢弃缓存，损坏即重建，事件仍是唯一真相。
+- **配置**：`max_runs`/`max_age_days` 默认 null（永不自动删）；running/paused/interrupted 与 star 标记永不自动删。
+- **联动**：与账本 16MiB 治理合并设计——retention 是控容量的主路径，分段账本+索引是备选；P7 lineage 引用的源 run 有 import 标记时不自动删（或删除前校验无引用）。
+- **测试**：age/count 决策确定性；star 与非终态保护；清理进程崩溃后可重试且无半删状态；索引与抽样 full fold 一致；P7 lineage 不悬空。
+
 ## 10. R7 / P11：request_changes 与 routed approval
 
 ### 价值
@@ -282,6 +330,12 @@ human 只有 approve/reject。
 旧图兼容；三分支可重放；缺 comment 拒绝；任何摘要、role、sha、consumed 篡改对三种 decision 都在写事件前拒绝。
 
 估算：4–7 人日。
+
+### 落地锚点（2026-08-23 深化）
+
+- **模块**：`atlas/engine.py` human 节点增 `approval_mode: binary|routed`（默认 binary，旧图零变化）与闭合 `decisions` 枚举（approve/reject/request_changes）；复用 `_verify_approval_material` 的三摘要校验，三种 decision 全部先验 projection/consumed/baseline/result/patch 再持久化；`atlas/web.py` 与 `atlas/mcp.py` 同枚举同领域函数。
+- **循环语义**：request_changes 必填非空 comment，经有界回边返回生产者节点；回边轮输入沿用静态 `consumes`（循环携带反馈的完整语义仍是独立 RFC，见 Stage E）；`max_iterations` 消耗与 reject 一致。
+- **测试**：旧图兼容；三分支决策可重放；缺 comment 拒绝；任何摘要/role/sha/consumed 篡改对三种 decision 都在写事件前拒绝；与 P3 `on_error` 组合不产生旁路。
 
 ## 11. Stage E：独立价值项
 
