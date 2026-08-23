@@ -245,12 +245,21 @@ def test_sdist_smoke_is_python312_offline_with_core_contracts(tmp_path, monkeypa
     monkeypatch.setattr(sdist_gate, "_run", fake_run)
     result = sdist_gate.smoke_install_sdist(archive)
 
-    assert result["offline"] is True
+    assert result["offline"] is False
     assert result["dependencies_installed"] is True
     assert result["spec_parser"] is True
     assert result["config_init"] is True
     assert len(result["mcp_tools"]) == 6
     assert "--no-python-downloads" in commands[0]
-    install = commands[1]
-    assert "--offline" in install and "--no-deps" not in install
-    assert commands[2][1:3] == ["-I", "-c"]
+    export = commands[1]
+    assert export[1] == "export" and "--frozen" in export and "--no-dev" in export
+    install = commands[2]
+    assert "--offline" not in install and "--no-deps" not in install
+    assert "--constraint" in install
+    assert commands[3][1:3] == ["-I", "-c"]
+
+    commands.clear()
+    offline_result = sdist_gate.smoke_install_sdist(archive, offline=True)
+    offline_install = commands[2]
+    assert offline_result["offline"] is True
+    assert "--offline" in offline_install and "--constraint" in offline_install

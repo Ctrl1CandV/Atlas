@@ -23,6 +23,7 @@ All notable changes to Atlas are documented here. The format follows Keep a Chan
 - The offline CI scan no longer reads the deleted `README.zh-CN.md`; it scans `README.en.md` instead.
 - Console entry points (`atlas`, `atlas-web`, `atlas-mcp`) force standard streams to UTF-8 at startup: on Windows consoles with a non-UTF-8 code page (e.g. cp1252 on Western locales), `atlas init` crashed with `UnicodeEncodeError` before printing its Chinese summary. Stdio MCP JSON-RPC also requires UTF-8, which the code page did not guarantee.
 - Web test scripts pass `--experimental-strip-types` to Node so `.test.mjs` files importing `.ts` sources run on Node 22.12 (the documented minimum), not only on Node ≥ 23.6 where type stripping is on by default; this was the Ubuntu CI failure.
+- CI hardening (not shipped code): the sdist smoke now pins dependency versions with constraints exported from `uv.lock` and installs online by default (`--offline` remains opt-in) — `uv sync` never populates the registry-metadata cache layer pip-style offline resolution needs, so the previous offline install only passed on machines with historically warm caches; agent CLI stubs in tests are cross-platform (`.cmd` forwarder on Windows, `#!/bin/sh` forwarder elsewhere) so the unsupported-platform signal reflects real compatibility, not stub mechanics.
 
 ### Documentation
 - Added a v0.1.0 provenance record with an honest tag-versus-artifact-build disclosure.

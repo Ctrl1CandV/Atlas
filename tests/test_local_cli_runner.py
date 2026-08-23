@@ -30,6 +30,17 @@ def provider():
     )
 
 
+def _write_platform_launcher(launcher: Path, script: Path) -> None:
+    """跨平台 CLI 桩:Windows 用 .cmd 转发,POSIX 用 /bin/sh 转发(可执行)。"""
+    if os.name == "nt":
+        launcher.write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
+    else:
+        launcher.write_text(
+            f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n',
+            encoding="utf-8")
+        launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR)
+
+
 def _stub_program(tmp_path: Path) -> Path:
     script = tmp_path / "stub_cli.py"
     script.write_text(r'''# -*- coding: utf-8 -*-
@@ -61,12 +72,7 @@ print(json.dumps({
 }))
 ''', encoding="utf-8")
     launcher = tmp_path / ("stub.cmd" if os.name == "nt" else "stub")
-    if os.name == "nt":
-        launcher.write_text(f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
-    else:
-        launcher.write_text(f'#!{sys.executable}\nexec "{sys.executable}" "{script}" "$@"\n',
-                            encoding="utf-8")
-        launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR)
+    _write_platform_launcher(launcher, script)
     return launcher
 
 
@@ -176,10 +182,12 @@ def test_result_parser_rejects_invalid_and_empty_json():
 def test_cli_contract_rejects_missing_required_flags(tmp_path):
     from atlas.nodes.local_cli import _check_cli_contract
 
-    script = tmp_path / "bad-cli.cmd"
-    script.write_text('@echo --print --model\r\n', encoding="utf-8")
+    script = tmp_path / "bad_cli.py"
+    script.write_text("print('--print --model')\n", encoding="utf-8")
+    launcher = tmp_path / ("bad-cli.cmd" if os.name == "nt" else "bad-cli")
+    _write_platform_launcher(launcher, script)
     with pytest.raises(ConfigError, match="缺少 Atlas 必需参数"):
-        _check_cli_contract(str(script), _base_child_env())
+        _check_cli_contract(str(launcher), _base_child_env())
 
 
 def test_cli_contract_accepts_realistic_help_layout(tmp_path):
@@ -204,9 +212,8 @@ def test_cli_contract_accepts_realistic_help_layout(tmp_path):
         "  --allowedTools, --allowed-tools <tools...>  Tools to allow\\n"
         "  --max-budget-usd <dollars>     Session spending cap''')",
         encoding="utf-8")
-    launcher = tmp_path / "realistic-cli.cmd"
-    launcher.write_text(
-        f'@"{sys.executable}" "{stub}" %*\r\n', encoding="utf-8")
+    launcher = tmp_path / ("realistic-cli.cmd" if os.name == "nt" else "realistic-cli")
+    _write_platform_launcher(launcher, stub)
     _check_cli_contract(str(launcher), _base_child_env())
 
 
@@ -215,14 +222,7 @@ def _runner_for_source(tmp_path: Path, provider: ProviderConfig,
     script = tmp_path / f"{name}.py"
     script.write_text(source, encoding="utf-8")
     launcher = tmp_path / (f"{name}.cmd" if os.name == "nt" else name)
-    if os.name == "nt":
-        launcher.write_text(
-            f'@"{sys.executable}" "{script}" %*\r\n', encoding="utf-8")
-    else:
-        launcher.write_text(
-            f'#!{sys.executable}\nexec "{sys.executable}" "{script}" "$@"\n',
-            encoding="utf-8")
-        launcher.chmod(launcher.stat().st_mode | stat.S_IXUSR)
+    _write_platform_launcher(launcher, script)
     env = tmp_path / f"{name}.env"
     env.write_text("STUB_KEY=temporary-test-key\n", encoding="utf-8")
     config = AgentRunnerConfig(

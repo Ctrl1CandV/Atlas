@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Scan an sdist and smoke-install it offline into a clean Python 3.12 venv."""
+"""Scan an sdist and smoke-install it (lock-pinned deps) into a clean Python 3.12 venv."""
 from __future__ import annotations
 
 import argparse
@@ -198,9 +198,12 @@ def _run(command: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.Co
         timeout=180, check=False)
 
 
-def smoke_install_sdist(archive: Path, *, python_version: str = "3.12") -> dict:
-    """Install locked dependencies offline, then exercise the installed package."""
+def smoke_install_sdist(archive: Path, *, python_version: str = "3.12",
+                        project_root: Path | None = None,
+                        offline: bool = False) -> dict:
+    """Install lock-pinned dependencies, then exercise the installed package."""
     archive = Path(archive).resolve()
+    root = Path(project_root or Path(__file__).resolve().parent.parent)
     expected_version = _archive_version(archive)
     uv = shutil.which("uv")
     if uv is None:
@@ -217,12 +220,26 @@ def smoke_install_sdist(archive: Path, *, python_version: str = "3.12") -> dict:
             raise AssertionError(f"clean Python {python_version} venv failed: {created.stderr}")
         python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
-        installed = _run(
-            [uv, "pip", "install", "--offline", "--python", str(python),
-             str(archive)],
-            cwd=temp, env=env)
+        # 约束把依赖钉到 uv.lock 的精确版本，安装集合可复现。默认联网：uv sync
+        # 填充的缓存不含 pip 解析器要用的注册表元数据层，离线解析只在恰好温热
+        # 的缓存上成立（v0.1.0 当时本地能离线过属历史缓存产物，不可复现）。
+        # --offline 保留给显式验证热缓存环境的场景。
+        constraints = temp / "constraints.txt"
+        exported = _run(
+            [uv, "export", "--frozen", "--no-dev", "--no-hashes",
+             "--no-emit-project", "-o", str(constraints)],
+            cwd=root, env=env)
+        if exported.returncode != 0:
+            raise AssertionError(f"uv export from lock failed: {exported.stderr}")
+
+        install_command = [
+            uv, "pip", "install", "--python", str(python),
+            "--constraint", str(constraints), str(archive)]
+        if offline:
+            install_command.insert(3, "--offline")
+        installed = _run(install_command, cwd=temp, env=env)
         if installed.returncode != 0:
-            raise AssertionError(f"offline sdist install failed: {installed.stderr}")
+            raise AssertionError(f"locked-constraint sdist install failed: {installed.stderr}")
 
         probe = textwrap.dedent(r'''
             import asyncio
@@ -306,7 +323,8 @@ def smoke_install_sdist(archive: Path, *, python_version: str = "3.12") -> dict:
     return {
         "version": expected_version,
         "python": "3.12",
-        "offline": True,
+        "offline": offline,
+        "dependencies_locked_constraints": True,
         "dependencies_installed": True,
         "console_scripts": sorted(expected_scripts),
         "mcp_tools": sorted(expected_tools),
@@ -326,12 +344,18 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--archive", type=Path)
     parser.add_argument("--dist-dir", type=Path, default=Path("dist"))
+    parser.add_argument("--project-root", type=Path,
+                        default=Path(__file__).resolve().parent.parent)
+    parser.add_argument("--offline", action="store_true",
+                        help="离线安装依赖（只在注册表元数据层已温热的缓存上成立；"
+                             "uv sync 填充的缓存不满足）。默认联网但版本钉在 uv.lock")
     parser.add_argument("--skip-install", action="store_true")
     args = parser.parse_args()
     archive = args.archive or _find_archive(args.dist_dir)
     result = {"scan": scan_sdist(archive)}
     if not args.skip_install:
-        result["install"] = smoke_install_sdist(archive)
+        result["install"] = smoke_install_sdist(
+            archive, project_root=args.project_root, offline=args.offline)
     print(json.dumps(result, ensure_ascii=False))
     return 0
 
