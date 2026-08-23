@@ -797,6 +797,10 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
         if decision not in ("approve", "reject"):
             raise HTTPException(400, "decision 只能是 approve/reject")
         comment = str(body.get("comment", "") or "")
+        if decision == "reject" and not comment.strip():
+            # 驳回不留理由 = 下游(与未来的你)无法追溯为什么否决;
+            # 批准时理由可省。同步 400,不触碰运行锁。
+            raise HTTPException(400, "驳回必须填写理由(comment 不能为空)")
         spec = _spec_for_run(rid)
 
         provider_ids = provider_ids_for_spec(spec)

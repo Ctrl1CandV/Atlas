@@ -547,6 +547,30 @@ input:focus, textarea:focus {
 .approval-bar .reject { background: var(--color-fail); color: #fff; border: none; border-radius: var(--radius-ctrl); padding: 6px 14px; font-weight: 600; }
 .approval-bar .resume { background: var(--color-accent); color: var(--color-canvas); border: none; border-radius: var(--radius-ctrl); padding: 6px 14px; font-weight: 600; }
 .approval-bar .resume:disabled { opacity: 0.55; cursor: wait; }
+/* 暂停态升级为待审材料面板:先看材料,再决策 */
+.approval-bar.approval-panel {
+  flex-direction: column; align-items: stretch; gap: 6px; max-width: 720px;
+}
+.approval-panel .approval-head { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.approval-panel .approval-title { font-weight: 600; white-space: nowrap; }
+.approval-panel .approval-prompt {
+  color: var(--color-ink-dim); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
+}
+.approval-panel .approval-materials {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+}
+.approval-panel .approval-materials-label { opacity: 0.85; }
+.approval-panel .material {
+  background: color-mix(in srgb, var(--color-degraded) 12%, var(--color-panel));
+  color: inherit; border: 1px solid color-mix(in srgb, var(--color-degraded) 55%, transparent);
+  border-radius: 999px; padding: 2px 10px; font-size: 11px; cursor: pointer;
+  font-family: var(--font-mono);
+}
+.approval-panel .material:hover { border-color: var(--color-degraded); }
+.approval-panel .material.proj { border-style: dashed; font-family: var(--font-sans); }
+.approval-panel .approval-actions { display: flex; gap: 8px; align-items: center; }
+.approval-panel .approval-actions input { flex: 1; }
 .approval-bar.interrupted {
   background: color-mix(in srgb, var(--color-accent) 10%, var(--color-panel));
   border-color: var(--color-accent);

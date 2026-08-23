@@ -22,7 +22,8 @@ export interface Route {
 
 const GUIDE_CHAPTERS = [
   'overview', 'quickstart', 'concepts', 'examples',
-  'models', 'results', 'safety', 'troubleshooting',
+  'models', 'results', 'safety', 'mcp-human',
+  'troubleshooting', 'development',
 ] as const;
 
 export function isGuideChapter(c: string): boolean {

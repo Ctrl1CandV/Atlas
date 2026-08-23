@@ -393,6 +393,51 @@ def test_invalid_approval_rejected_synchronously(app):
         assert "approve/reject" in response.json()["detail"]
 
 
+def test_reject_without_comment_is_400(tmp_path, monkeypatch):
+    """驳回不留理由 = 无法追溯为什么否决;必须在触碰运行锁前同步拒绝。"""
+    runs = tmp_path / "runs"
+    fake = FakeProvider()
+    fake.configure("primary", text="方案")
+    fake.configure("other", text="终稿")
+    registry = make_registry(fake)
+    run = execute_graph(load_graph("human_gate"), task=TASK_TEXT,
+                        runs_root=runs, registry=registry)
+    assert run.status == "paused"
+
+    called = threading.Event()
+
+    def fake_approve(run_id, **kwargs):
+        called.set()
+        release_approval_run_lock(run_id, runs_root=kwargs["runs_root"])
+
+    monkeypatch.setattr(web_module, "approve_run", fake_approve)
+    workflows = tmp_path / "workflows"
+    workflows.mkdir()
+    (workflows / "human_gate.yaml").write_text(
+        (GRAPHS / "human_gate.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+    app = create_app(workflows_dir=workflows, runs_dir=runs,
+                     registry_factory=lambda _: registry, api_only=True)
+    headers = {"X-Atlas-Request": "1"}
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        for comment in ("", "   "):
+            response = client.post(f"/api/runs/{run.run_id}/approve",
+                                   json={"decision": "reject", "comment": comment},
+                                   headers=headers)
+            assert response.status_code == 400
+            assert "驳回必须填写理由" in response.json()["detail"]
+        # 批准不带说明仍然合法(理由只在驳回时强制)
+        approved = client.post(f"/api/runs/{run.run_id}/approve",
+                               json={"decision": "approve", "comment": ""},
+                               headers=headers)
+        assert approved.status_code == 200
+        assert called.wait(timeout=2)
+        # 驳回带理由通过校验(执行被桩住,不真正恢复)
+        rejected = client.post(f"/api/runs/{run.run_id}/approve",
+                               json={"decision": "reject", "comment": "结构缺失"},
+                               headers=headers)
+        assert rejected.status_code == 200
+
+
 def test_unknown_and_empty_event_run_ids_are_404(tmp_path):
     runs = tmp_path / "runs"
     empty_run = runs / "empty-ledger"

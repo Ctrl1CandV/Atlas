@@ -12,6 +12,8 @@ import {
   listWorkflows,
   previewWorkflow,
   resumeRun,
+  runArtifactUrl,
+  runProjectionUrl,
   startRun,
   subscribeRun,
 } from './api';
@@ -379,6 +381,16 @@ export default function App() {
     return map;
   }, [summary]);
 
+  // 暂停时正在等待的 human 门:节点已 started 未 done,即为待审节点。
+  // 待审材料 = 它消费的产物 + 完整投影(审批证据绑定的就是这份投影)。
+  const awaitingGate = useMemo(() => {
+    if (summary?.status !== 'paused' || !spec) return null;
+    const running = summary.nodes.find((n) => n.status === 'running');
+    if (!running) return null;
+    const gateSpec = spec.nodes.find((n) => n.id === running.id && n.type === 'human');
+    return gateSpec ? { run: running, spec: gateSpec } : null;
+  }, [summary, spec]);
+
   const handleRun = async () => {
     if (!spec || !task.trim()) return;
     setBusy(true);
@@ -501,6 +513,10 @@ export default function App() {
 
   const handleApproval = async (decision: 'approve' | 'reject') => {
     if (!runId) return;
+    if (decision === 'reject' && !approvalComment.trim()) {
+      setError('驳回必须填写理由:说明哪里不合格、期望怎么改(后端同样强制)。');
+      return;
+    }
     try {
       await approveRun(runId, decision, approvalComment);
       setApprovalComment('');
@@ -708,19 +724,73 @@ export default function App() {
             </div>
           )}
           {summary?.status === 'paused' && (
-            <div className="approval-bar">
-              <span>⏸ 等待人工批准——点画布上的节点看要审的材料</span>
-              <input
-                value={approvalComment}
-                onChange={(e) => setApprovalComment(e.target.value)}
-                placeholder="批复说明(驳回时必填理由)"
-              />
-              <button className="approve" onClick={() => handleApproval('approve')}>
-                批准
-              </button>
-              <button className="reject" onClick={() => handleApproval('reject')}>
-                驳回
-              </button>
+            <div className="approval-bar approval-panel">
+              <div className="approval-head">
+                <span className="approval-title">
+                  ⏸ 等待人工批准:{awaitingGate ? awaitingGate.spec.id : 'human'} 节点
+                </span>
+                {awaitingGate && (
+                  <span className="approval-prompt" title={awaitingGate.spec.prompt}>
+                    {awaitingGate.spec.prompt}
+                  </span>
+                )}
+              </div>
+              {awaitingGate && (
+                <div className="approval-materials">
+                  <span className="approval-materials-label">
+                    待审材料(批准即绑定这份投影的哈希):
+                  </span>
+                  {(awaitingGate.run.consumed ?? []).map((c) => (
+                    <button
+                      key={c.name}
+                      className="material"
+                      title={`${c.name} · sha256 ${c.sha256?.slice(0, 12) ?? '?'}… 点击放大审阅`}
+                      onClick={() => runId && setWorkspaceTarget({
+                        kind: 'text',
+                        title: `待审材料 ${c.name}`,
+                        rawUrl: runArtifactUrl(runId, c.path),
+                        sha256: c.sha256,
+                      })}
+                    >
+                      {c.name} ↗
+                    </button>
+                  ))}
+                  {awaitingGate.run.projection_path && (
+                    <button
+                      className="material proj"
+                      title="送进审批的完整材料原文(投影)"
+                      onClick={() => runId && setWorkspaceTarget({
+                        kind: 'text',
+                        title: `${awaitingGate.spec.id} 完整待审投影`,
+                        rawUrl: runProjectionUrl(runId, awaitingGate.run.projection_path!),
+                        sha256: awaitingGate.run.projection_sha256,
+                      })}
+                    >
+                      完整投影 ↗
+                    </button>
+                  )}
+                  {(!awaitingGate.run.consumed || awaitingGate.run.consumed.length === 0)
+                    && !awaitingGate.run.projection_path && (
+                    <span className="approval-materials-label">
+                      无消费产物;可点画布节点查看上游输出
+                    </span>
+                  )}
+                </div>
+              )}
+              <div className="approval-actions">
+                <input
+                  value={approvalComment}
+                  onChange={(e) => setApprovalComment(e.target.value)}
+                  placeholder="批复说明(驳回时必填理由:哪里不合格、期望怎么改)"
+                  aria-label="批复说明"
+                />
+                <button className="approve" onClick={() => handleApproval('approve')}>
+                  批准
+                </button>
+                <button className="reject" onClick={() => handleApproval('reject')}>
+                  驳回
+                </button>
+              </div>
             </div>
           )}
         </main>
