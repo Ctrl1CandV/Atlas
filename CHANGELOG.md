@@ -21,6 +21,8 @@ All notable changes to Atlas are documented here. The format follows Keep a Chan
 - Windows reserved device names (`CON`, `PRN`, `COM1`…) are rejected as node ids at validation time, before any run directory is created.
 - In-app guide navigation: the `mcp-human` and `development` chapters were unreachable via URL and pager (the router whitelist missed them).
 - The offline CI scan no longer reads the deleted `README.zh-CN.md`; it scans `README.en.md` instead.
+- Console entry points (`atlas`, `atlas-web`, `atlas-mcp`) force standard streams to UTF-8 at startup: on Windows consoles with a non-UTF-8 code page (e.g. cp1252 on Western locales), `atlas init` crashed with `UnicodeEncodeError` before printing its Chinese summary. Stdio MCP JSON-RPC also requires UTF-8, which the code page did not guarantee.
+- Web test scripts pass `--experimental-strip-types` to Node so `.test.mjs` files importing `.ts` sources run on Node 22.12 (the documented minimum), not only on Node ≥ 23.6 where type stripping is on by default; this was the Ubuntu CI failure.
 
 ### Documentation
 - Added a v0.1.0 provenance record with an honest tag-versus-artifact-build disclosure.

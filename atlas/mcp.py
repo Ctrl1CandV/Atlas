@@ -754,8 +754,10 @@ def summarize_run(run_id: str) -> dict:
 def main() -> None:
     import asyncio
     from atlas.config_init import initialize_runtime_config
+    from atlas.console import force_utf8_stdio
 
-    # stdio MCP 的 stdout 是协议通道；初始化器本身不得打印。
+    # stdio MCP 的 stdout 是协议通道（JSON-RPC 规定为 UTF-8）；初始化器本身不得打印。
+    force_utf8_stdio()
     initialize_runtime_config()
     asyncio.run(server.run_stdio_async())
 

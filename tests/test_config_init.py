@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import io
+import sys
 import threading
 from pathlib import Path
 
@@ -138,6 +140,21 @@ def test_cli_init_reports_results_without_file_contents(tmp_path, capsys):
     assert "已创建" in output
     assert "atlas-web" in output
     assert "template" not in output
+
+
+def test_cli_init_survives_non_utf8_console(tmp_path, monkeypatch):
+    # 西文 Windows 的控制台代码页是 cp1252；中文提示必须仍可打印（CI 实证崩溃过）。
+    _write_templates(tmp_path)
+    buffer = io.BytesIO()
+    console = io.TextIOWrapper(buffer, encoding="cp1252")
+    monkeypatch.setattr(sys, "stdout", console)
+
+    code = cli_main(["init", "--config-dir", str(tmp_path)])
+
+    console.flush()
+    output = buffer.getvalue().decode("utf-8")
+    assert code == 0
+    assert "已创建" in output
 
 
 def _start_processes(processes, ready, start) -> None:

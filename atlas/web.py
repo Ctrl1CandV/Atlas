@@ -948,6 +948,9 @@ def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
 
 def main() -> None:
     """``atlas-web`` 命令入口。"""
+    from atlas.console import force_utf8_stdio
+
+    force_utf8_stdio()
     serve()
 
 

@@ -10,8 +10,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "test": "node --test src/*.test.mjs",
-    "test:diff": "node --test src/diffParse.test.mjs",
+    "test": "node --experimental-strip-types --test src/*.test.mjs",
+    "test:diff": "node --experimental-strip-types --test src/diffParse.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

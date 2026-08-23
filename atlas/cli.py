@@ -7,9 +7,11 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from atlas.config_init import initialize_runtime_config
+from atlas.console import force_utf8_stdio
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    force_utf8_stdio()
     parser = argparse.ArgumentParser(prog="atlas")
     sub = parser.add_subparsers(dest="command", required=True)
     init_parser = sub.add_parser("init", help="从通用模板创建缺失的本机配置")
