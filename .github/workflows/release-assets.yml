@@ -20,7 +20,8 @@ concurrency:
 jobs:
   release:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
+    environment: release
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -77,6 +78,28 @@ jobs:
           "release_id=$($created.id)" >> $env:GITHUB_OUTPUT
       - name: Sync locked dependencies
         run: uv sync --locked --all-groups
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Initialize missing runtime configuration
+        run: uv run atlas init
+      - name: Install Web dependencies from lock
+        run: npm --prefix web ci
+      - name: Test, lint, and build Web app once
+        run: |
+          npm --prefix web test
+          npm --prefix web run lint
+          npm --prefix web run build
+      - name: Compile Python sources
+        run: uv run python -m compileall -q atlas scripts
+      - name: Run Python tests without real providers
+        run: uv run pytest
+      - name: Run offline workflow release gate
+        run: uv run python scripts/release_workflow_gate.py
+      - name: Run clean-init and MCP silence gate
+        run: uv run python scripts/release_clean_init_gate.py
       - name: Build source distribution only
         run: uv build --sdist
       - name: Verify source distribution name
@@ -90,6 +113,8 @@ jobs:
           if ($archives[0].Name -ne $expected) {
             throw "Expected $expected, found $($archives[0].Name)"
           }
+      - name: Scan and smoke-install source distribution
+        run: uv run python scripts/release_sdist_gate.py --dist-dir dist
       - name: Generate SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
