@@ -652,8 +652,14 @@ def test_main_delegates_to_serve(monkeypatch):
 
 def test_serve_initializes_config_before_app(monkeypatch):
     order = []
+    import socket as _socket
     from atlas import config_init
     import uvicorn
+
+    probe = _socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
 
     monkeypatch.setattr(config_init, "initialize_runtime_config",
                         lambda: order.append("init"))
@@ -661,7 +667,7 @@ def test_serve_initializes_config_before_app(monkeypatch):
                         lambda: order.append("app") or object())
     monkeypatch.setattr(uvicorn, "run",
                         lambda app, **kwargs: order.append("run"))
-    web_module.serve()
+    web_module.serve(port=port)
     assert order == ["init", "app", "run"]
 
 
@@ -677,6 +683,29 @@ def test_serve_refuses_non_localhost():
     from atlas.web import serve
     with pytest.raises(ValueError, match="127.0.0.1"):
         serve(host="0.0.0.0")
+
+
+def test_serve_fails_loud_when_port_is_occupied(monkeypatch, capsys):
+    """端口被占:SystemExit + 可行动的排障提示,绝不打印"已启动"横幅。
+
+    背景:旧实例占 8321 时新进程绑定失败却照常打印横幅,harness 连到的
+    是旧代码,排查被误导(2026-08-23 实证)。
+    """
+    import socket
+    from atlas import config_init
+
+    holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    holder.bind(("127.0.0.1", 0))
+    holder.listen(1)
+    port = holder.getsockname()[1]
+    monkeypatch.setattr(config_init, "initialize_runtime_config", lambda: None)
+    try:
+        with pytest.raises(SystemExit, match="已被占用"):
+            web_module.serve(port=port)
+    finally:
+        holder.close()
+    out = capsys.readouterr().out
+    assert "Atlas Web 界面" not in out      # 失败路径不打印成功横幅
 
 
 def test_invalid_workflow_errors_are_strings_with_source_location(app):

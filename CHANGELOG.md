@@ -20,6 +20,7 @@ All notable changes to Atlas are documented here. The format follows Keep a Chan
 - Renamed the shipped loop example's claim from "repair loop" to bounded retry: back edges re-run a node with the same static `consumes`, so reviewer feedback does not reach the revised node. The example YAML, in-app guide, and skill now say this explicitly; a feedback-carrying loop design is recorded in `docs/BACKLOG.md`.
 
 ### Fixed
+- `atlas-web` now fails loud before printing its banner when port 8321 is already occupied (2026-08-23 field report: a stale instance kept serving old code on the port while the new process printed "started" and exited, so harnesses silently talked to stale code and debugging was misled); the error names the likely cause and the exact netstat/taskkill steps. `docs/mcp.md` gained a bilingual troubleshooting section (port conflicts, stale sessions, connectivity probe).
 - The MCP route merge no longer swallows `GET /` (the SPA briefly returned 404 when both were mounted).
 - Manual model entry stays reachable in Settings when provider discovery fails.
 - Windows reserved device names (`CON`, `PRN`, `COM1`…) are rejected as node ids at validation time, before any run directory is created.
@@ -30,6 +31,7 @@ All notable changes to Atlas are documented here. The format follows Keep a Chan
 - CI hardening (not shipped code): the sdist smoke now pins dependency versions with constraints exported from `uv.lock` and installs online by default (`--offline` remains opt-in) — `uv sync` never populates the registry-metadata cache layer pip-style offline resolution needs, so the previous offline install only passed on machines with historically warm caches; agent CLI stubs in tests are cross-platform (`.cmd` forwarder on Windows, `#!/bin/sh` forwarder elsewhere) so the unsupported-platform signal reflects real compatibility, not stub mechanics.
 
 ### Documentation
+- Fact surfaces resynced to the P4/P2 delivery: STATUS gains shared-launcher and cooperative-cancel capability rows and drops the now-false "no cancel / blocking MCP" limitations; BACKLOG moves P4/P2 to a completed section with the explicitly remaining scope (CLI process-tree kill, Web cancel button, budget mapping); the skill's required sequence covers `wait=false`, `atlas_list_runs`, and cancel semantics.
 - Added a v0.1.0 provenance record with an honest tag-versus-artifact-build disclosure.
 - The public README and screenshots above were committed after `v0.1.0`; they are not part of that tag or its published sdist.
 - Refreshed `docs/STATUS.md` to the 2026-08-22 source state: new MCP capabilities, the 10-node ad-hoc real run, and the current test baseline.

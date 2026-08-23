@@ -127,3 +127,16 @@ Do not connect both a harness-managed stdio process and the HTTP endpoint from t
 - **日常 harness 使用 + Web 观测**：HTTP。一个 `atlas-web` 进程同时提供界面、SSE 实时视图、审批按钮和 MCP 工具。
 - **clone 后不想保持终端**：走 `.mcp.json` 的 stdio；进程生命周期由 harness 管理。
 - `atlas_run_workflow(wait=false)` 通过预检后立即返回 run_id（P4），长任务不再阻塞连接；默认 `wait=true` 仍同步等到运行结束。
+
+
+## Troubleshooting / 排障
+
+- **`atlas-web` exits with “端口 127.0.0.1:8321 已被占用”**: another `atlas-web` instance (possibly running older code) still holds the port — your harness would be talking to stale code. Find and stop it first: `netstat -ano | findstr :8321`, then `taskkill /PID <pid> /F`, then start again. The pre-bind check (2026-08-23) fails loud instead of printing a misleading “started” banner.
+- **Tools look outdated after a code update**: restart `atlas-web`; the HTTP endpoint serves the code of the process that owns port 8321.
+- **`Session not found` (JSON-RPC error -32600)**: the server restarted and the session id is stale — reconnect (re-initialize) from the harness side.
+- **Quick connectivity probe**: `curl -X POST http://127.0.0.1:8321/mcp -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}'` — a JSON result means the endpoint is alive.
+
+- **`atlas-web` 报“端口 127.0.0.1:8321 已被占用”退出**：还有另一个 `atlas-web` 实例（可能是旧版本代码）占着端口——harness 连到的是旧代码。先找到并关闭它：`netstat -ano | findstr :8321`，再 `taskkill /PID <pid> /F`，然后重新启动。2026-08-23 起绑定前预检会大声失败，不再打印误导性的“已启动”横幅。
+- **升级代码后工具面像旧版**：重启 `atlas-web`；HTTP 端点服务的是占用 8321 的那个进程的代码。
+- **`Session not found`（JSON-RPC 错误 -32600）**：服务端重启过、会话 id 已失效——harness 侧重新连接（重新 initialize）即可。
+- **连通性快查**：用上面那条 curl initialize 探针，返回 JSON result 即端点存活。

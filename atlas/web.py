@@ -933,6 +933,23 @@ def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
     from atlas.config_init import initialize_runtime_config
 
     initialize_runtime_config()
+    # 端口被占必须 fail-loud,而不是打印"已启动"横幅后静默退出——
+    # 否则旧实例仍占着 8321(harness 连到的是旧代码),新进程误导排查。
+    import socket
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind((host, port))
+    except OSError as e:
+        raise SystemExit(
+            f"端口 {host}:{port} 已被占用({e.strerror})。最常见的原因是"
+            "已有一个 atlas-web 实例在运行(它可能是旧版本代码)。"
+            f"先找到并关闭它:netstat -ano | findstr :{port},"
+            "再 taskkill /PID <pid> /F,然后重新启动。"
+        ) from e
+    finally:
+        probe.close()
+
     import uvicorn
     print(f"Atlas Web 界面:   http://{host}:{port}")
     print(f"Atlas MCP 端点:   http://{host}:{port}/mcp (streamable-http)")

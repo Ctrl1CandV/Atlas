@@ -16,8 +16,8 @@ Use a single model call for simple one-step work. Use Atlas for explicit graph s
 3. Call `atlas_save_workflow` only when persistence is requested.
 4. Call `atlas_run_workflow` with `dry_run: true` (zero provider calls and no run directory).
 5. Show unresolved model choices, graph shape, guard limits, agent security boundaries, privacy, and cost implications.
-6. Call `atlas_run_workflow` with `dry_run: false` only after explicit execution intent.
-7. Call `atlas_get_run` to inspect a created run. If and only if its dynamic status is `interrupted`, use `atlas_resume_run`; `paused` human decisions remain in the local Web UI.
+6. Call `atlas_run_workflow` with `dry_run: false` only after explicit execution intent. Default is synchronous (`wait=true`); for long graphs pass `wait=false` to get a `run_id` immediately after preflight instead of blocking the session (mutually exclusive with `persist_as`).
+7. Call `atlas_get_run` to inspect a created run, `atlas_list_runs` to page through runs. If and only if its dynamic status is `interrupted`, use `atlas_resume_run`; `paused` human decisions remain in the local Web UI. To stop a run, `atlas_cancel_run` requests cooperative cancellation — in-flight provider/agent calls finish their current attempt; paused/interrupted runs become `cancelled` directly. Requests cannot be revoked.
 
 For an ad-hoc custom graph, do not write into the repository's `workflows/` directory yourself. Pass the full YAML text as the `yaml` argument of `atlas_validate_workflow` and `atlas_run_workflow`; the graph runs without being persisted. When the user wants to keep it, either `atlas_save_workflow` it, or pass `persist_as=<id>` on the real run — Atlas then writes `workflows/<id>.yaml` through the same validation and anti-overwrite contract after the run ends. `persist_as` is rejected before any spending when the id is invalid, and reports (not masks) a collision.
 

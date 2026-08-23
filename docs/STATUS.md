@@ -16,6 +16,8 @@
 |---|---|
 | YAML 静态图 | `llm`、`research`、`coding_agent`、静态并行、条件路由、有界循环和 human gate；节点 id 拒绝 Windows 保留设备名 |
 | MCP 控制面 | 八个工具：validate、save、run（`wait=false` 异步返回 run_id）、list workflows、list runs、get run、cancel run（协作式）、resume interrupted run。run 支持传 `yaml` 全文跑未保存的自定义图（`persist_as` 真跑后固化）；stdio 之外，`atlas-web` 在 `/mcp` 以 streamable-http 提供同一工具面 |
+| 共享 launcher（P4） | Web 启动/恢复/审批续跑与 MCP 走同一进程内 controller registry（每 run 唯一 controller）；运行摘要由账本派生，Web/MCP 共用同一构建函数 |
+| 协作式取消（P2） | `atlas_cancel_run` 与 `POST /api/runs/{id}/cancel` 写原子请求文件；running 由 controller 在节点入口/候选切换/重试等待消费并唯一写 `run_cancelled`；paused/interrupted 由取消入口持锁直写终态；`cancelled` 可删除、拒绝 resume/approve；在途模型调用与 agent CLI 执行会跑完当次，请求不可撤回 |
 | 工作流文件管理 | Web 页面可删除工作流；保存走 MCP 的 `expected_sha256` 读-改-写闭环（乐观锁防覆盖） |
 | 零成本预检 | validate 与 dry-run 不调用供应商；`expected_execution_sha256` 可绑定预演与真跑身份 |
 | 可审计运行 | append-only JSONL 事件、write-once 产物、读取时 SHA-256 断言、有效规格快照 |
@@ -52,7 +54,7 @@
 
 2026-08-23 公开 CI 基线（`main` @ `7eac07b`，GitHub Actions）：
 
-- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、447 passed 测试套件、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
+- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-23 起为 496 passed，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
 - Ubuntu 兼容性信号 job（`continue-on-error`，明确不支持）同样通过：跨平台 agent CLI 桩修复后它反映真实兼容性。
 - `real-api.yml` 仅手动触发（`environment: real-api` 保护），不计入常规 CI。
 
@@ -74,9 +76,9 @@
 
 ## 已知限制与运营教训
 
-- MCP 真跑默认同步阻塞；没有 `atlas_list_runs`，也没有共享 launcher（HTTP 端点不改变阻塞语义）。
+- 取消是协作式的：在途模型调用与 agent CLI 执行会跑完当次尝试才在下一节点边界终止；取消请求一经写入不可撤回（控制器死亡后 resume 会在首个节点边界消费它）。Web 界面的取消按钮尚未交付（API 与 MCP 工具已可用）。
 - 回边循环的 `consumes` 是静态的：重跑轮输入与首轮相同，不携带触发重跑的审查意见——是"有界重试"而非"按批注修订"。反馈可见需要显式消费 `reviewer.output` 的修订节点；语义改进见 BACKLOG"循环携带反馈"。
-- 没有协作式 cancel。HTTP 调用只能等待返回/timeout；CLI 只能依赖 deadline 或外部终止。
+- agent 自动 retry 的预算约束尚未落地（RFC 草案 `docs/rfcs/agent-retry-budget.md` 待评审）；`--max-budget-usd` 到 Claude CLI 的映射也未实现。
 - human gate 只有 approve/reject；节点失败默认终止整图。
 - 没有 run retention/index、跨 run artifact import、invocation hash 或 fork invalidation。
 - release sdist 不包含 built `web/dist`，使用者仍需 Node.js 构建前端。

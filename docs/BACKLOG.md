@@ -4,13 +4,16 @@
 >
 > 复杂度依据 2026-08-21 的代码审计标注：风险主要来自 Windows 进程树终止、终态竞争，以及不能破坏现有的 SHA/事件重放/成本预留合同。
 
+## 已完成（2026-08-23）
+
+- **P4 共享 launcher + MCP 异步 + `atlas_list_runs`** ✅：`atlas/launcher.py` controller registry；`wait=false` 预检后返回 run_id；`atlas_list_runs` 降序稳定分页；Web/MCP 共用 `runs.build_run_summary`。
+- **P2 协作式取消** ✅（部分范围）：`run_cancelled` 终态、`atlas_cancel_run`（第 8 工具）、Web API 端点、llm/human/agent 入口与重试等待的消费点、agent retry 预算 RFC 草案。**未含**：CLI 进程树终止、Web 界面取消按钮、`--max-budget-usd` 映射与 RFC 决策——保留在下表外的能力债里，随下批实施。
+
 ## 总览表
 
 | 建议批次 | 编号 | 功能 | 用户可见效果 | 估算 | 风险 | 依赖 |
 |---|---|---|---|---|---|---|
 | R0 | — | 发布与仓库治理 | tag / 构建资产 / provenance 指向同一 commit；默认分支迁到 `main` 并保护；公开 CI 策略确定 | 低（流程性） | 低 | 无 |
-| 第一批 | P4 | 共享 launcher + MCP 异步 + `atlas_list_runs` | `atlas_run_workflow(wait=false)` 立即返回 run_id，长任务不再占住 MCP 会话；MCP 能列出历史运行 | 4–7 人日 | 中 | P1（已完成） |
-| 第一批 | P2 | 协作式 cancel + agent 成本停损 | 界面/MCP 发出取消请求后进程树真正退出；agent 自动 retry 受预算约束；`cancelled` 成为终态 | 6–10 人日 | **高** | P4 |
 | 第二批 | P9 | controller heartbeat | 区分"控制器在等模型"和"事件流断了"；显示 attempt 上下文 | 3–5 人日 | 低 | P2 |
 | 第二批 | P3 | 异常 taxonomy + 节点 `on_error` | 内容型节点失败可按图作者策略 continue 或走 `__failed__` 分支，而不是终止整图；治理异常（费用/完整性/审批）永不被吞 | 7–11 人日 | 中 | P2 的 RunCancelled |
 | 第二批b | S1 | 执行终局可视化与总结节点 | run 结束后 Web 顶部"终局总结"卡片（零成本、纯账本派生）+ opt-in 总结节点（最终结果+各节点工作回顾，write-once 产物+事件）；2026-08-23 用户定案，**不做离线报告导出**（原 Stage E 条目移除） | 5–8 人日 | 中 | P4 的 summary builder |
