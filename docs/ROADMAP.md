@@ -26,7 +26,7 @@ P0min、P1、P6 已实施。P5、P8、P12、P14 已移除且不排期；除非�
 
 ### 落地记录
 
-- 默认分支已迁移 `main`（7eac07b），`release/v0.1.0-rc.1` 远端已删除；`main` 上创建 deletion/non-fast-forward 规则集（强制启用待仓库管理员在网页确认）。
+- 默认分支已迁移 `main`（7eac07b），`release/v0.1.0-rc.1` 远端已删除；`main` 上 deletion/non-fast-forward 规则集已强制启用（2026-08-23）。
 - 公开 CI（ci.yml）在 `main` 双 job 全绿；README 挂 CI 徽章；`release` environment 必须人工批准（required reviewer 已配置）。
 - tests/scripts 已公开；release-assets.yml 保留全量验证链。
 - `v0.1.0` tag 与资产来源差异保持 as-built 披露，不改动。
@@ -36,7 +36,6 @@ P0min、P1、P6 已实施。P5、P8、P12、P14 已移除且不排期；除非�
 1. 不移动、不重签 `v0.1.0`；发布记录保留 as-built truth。
 2. `v0.1.1` 从 exact tag checkout 构建，断言 `HEAD == tag^{commit}`，版本与资产名从 tag 派生。
 3. 发布资产默认不可覆写；修复用新 patch version。
-4. 启用 `main` 规则集强制状态（唯一待办的网页动作）。
 
 ### 下次发布验收
 

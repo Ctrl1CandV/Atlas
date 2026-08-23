@@ -69,7 +69,7 @@
 
 ## 第三梯队(P2):R0 发布与仓库治理(✅ 已闭环,2026-08-23)
 
-落地记录:六批提交推送、`main` 从同一提交建出并成为默认分支、`release/v0.1.0-rc.1` 远端删除、公开 CI 双分支全绿(`7eac07b`)、README 挂 CI 徽章、`release` environment 人工审批生效、Social preview 上传。唯一残余:`main` 的 deletion/non-fast-forward 规则集已创建但处于禁用态,需仓库管理员在 Settings → Rules → Rulesets 中启用(存储的 git 凭据无管理写权限,无法代为执行)。v0.1.1 起发布走 release-assets.yml(exact-tag + 全量验证链)。
+落地记录:六批提交推送、`main` 从同一提交建出并成为默认分支、`release/v0.1.0-rc.1` 远端删除、公开 CI 双分支全绿(`7eac07b`)、README 挂 CI 徽章、`release` environment 人工审批生效、Social preview 上传、main 规则集(deletion/non-fast-forward)强制启用。v0.1.1 起发布走 release-assets.yml(exact-tag + 全量验证链)。
 
 ## 第四梯队(P3):统一状态与停止损失(ROADMAP 第一批)
 

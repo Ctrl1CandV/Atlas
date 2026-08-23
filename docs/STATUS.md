@@ -5,7 +5,7 @@
 ## 版本与支持范围
 
 - 当前版本：`0.1.0`，支持 Windows 10/11 x64，Python 3.12。
-- 当前公开分支：默认分支为 `main`（2026-08-23 迁移完成）；`release/v0.1.0-rc.1` 远端已删除。`main` 上有 deletion/non-fast-forward 规则集（创建于 2026-08-23，强制启用需仓库管理员在网页 Rules 页确认）。公开 CI（`.github/workflows/ci.yml`）在 `main` 上通过。
+- 当前公开分支：默认分支为 `main`（2026-08-23 迁移完成）；`release/v0.1.0-rc.1` 远端已删除。`main` 上启用 deletion/non-fast-forward 规则集（2026-08-23 强制生效）。公开 CI（`.github/workflows/ci.yml`）在 `main` 上通过。
 - 分发方式：Git 仓库与 GitHub Release 中的源码 sdist；未发布到 PyPI，没有 wheel 或预编译安装器。
 - Web 只支持回环地址；不支持多用户、远程暴露、Linux/macOS 生产运行。
 - Atlas 不依赖 Atlas 托管服务，也不内置遥测；真实工作流通常会调用用户配置的远程模型供应商。
