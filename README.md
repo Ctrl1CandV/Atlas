@@ -2,7 +2,7 @@
 
 **中文** · [English](README.en.md)
 
-![version](https://img.shields.io/github/v/tag/Ctrl1CandV/Atlas) ![license](https://img.shields.io/badge/license-Apache--2.0-green) ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey) ![python](https://img.shields.io/badge/python-3.12-blue)
+![version](https://img.shields.io/github/v/tag/Ctrl1CandV/Atlas) ![license](https://img.shields.io/badge/license-Apache--2.0-green) ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey) ![python](https://img.shields.io/badge/python-3.12-blue) ![ci](https://github.com/Ctrl1CandV/Atlas/actions/workflows/ci.yml/badge.svg)
 
 Atlas 是一个跑在本机 Windows 上的多模型工作流引擎：用 YAML 画一张有向图，让不同厂商的模型各司其职——并行调研、交叉审查、改代码、人工拍板——每个节点的完整输入输出都实时落在你自己的磁盘上。
 

@@ -2,7 +2,7 @@
 
 [中文](README.md) · **English**
 
-![version](https://img.shields.io/github/v/tag/Ctrl1CandV/Atlas) ![license](https://img.shields.io/badge/license-Apache--2.0-green) ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey) ![python](https://img.shields.io/badge/python-3.12-blue)
+![version](https://img.shields.io/github/v/tag/Ctrl1CandV/Atlas) ![license](https://img.shields.io/badge/license-Apache--2.0-green) ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey) ![python](https://img.shields.io/badge/python-3.12-blue) ![ci](https://github.com/Ctrl1CandV/Atlas/actions/workflows/ci.yml/badge.svg)
 
 Atlas is a multi-model workflow engine that runs on your local Windows machine: you describe a directed graph in YAML, different vendors' models play different roles — parallel research, cross review, code changes, human sign-off — and the complete input and output of every node lands on your own disk in real time.
 

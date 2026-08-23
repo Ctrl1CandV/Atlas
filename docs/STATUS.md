@@ -1,11 +1,11 @@
 # Atlas 当前状态
 
-> 最后核对：2026-08-22。本文是当前产品与发布事实的入口；历史计划和归档记录不能替代本文。
+> 最后核对：2026-08-23。本文是当前产品与发布事实的入口；历史计划和归档记录不能替代本文。
 
 ## 版本与支持范围
 
 - 当前版本：`0.1.0`，支持 Windows 10/11 x64，Python 3.12。
-- 当前公开分支：远端默认分支仍是 `release/v0.1.0-rc.1`（仓库管理遗留，不代表包版本仍是 RC）；本地开发分支 `docs/post-v0.1.0-release-hardening` 领先远端（含 v0.1.0 之后的 MCP/删除/审查修复等工作）。默认分支迁移 `main` 属 ROADMAP R0。
+- 当前公开分支：默认分支为 `main`（2026-08-23 迁移完成）；`release/v0.1.0-rc.1` 远端已删除。`main` 上有 deletion/non-fast-forward 规则集（创建于 2026-08-23，强制启用需仓库管理员在网页 Rules 页确认）。公开 CI（`.github/workflows/ci.yml`）在 `main` 上通过。
 - 分发方式：Git 仓库与 GitHub Release 中的源码 sdist；未发布到 PyPI，没有 wheel 或预编译安装器。
 - Web 只支持回环地址；不支持多用户、远程暴露、Linux/macOS 生产运行。
 - Atlas 不依赖 Atlas 托管服务，也不内置遥测；真实工作流通常会调用用户配置的远程模型供应商。
@@ -50,6 +50,12 @@
 
 ## 验证状态
 
+2026-08-23 公开 CI 基线（`main` @ `7eac07b`，GitHub Actions）：
+
+- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、447 passed 测试套件、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
+- Ubuntu 兼容性信号 job（`continue-on-error`，明确不支持）同样通过：跨平台 agent CLI 桩修复后它反映真实兼容性。
+- `real-api.yml` 仅手动触发（`environment: real-api` 保护），不计入常规 CI。
+
 2026-08-22 审查后基线（本地 `docs/post-v0.1.0-release-hardening` 工作树）：
 
 - Python：446 passed、1 skipped（无 symlink 权限账户）、5 个 `real_api` deselected。
@@ -64,7 +70,7 @@
 - 当时最终 release sdist：100 entries、0 scan findings；Python 3.12 离线安装、版本、三个 console scripts、当时为六个 MCP 工具。spec parse、配置初始化通过。
 - 阶段 D 经 MCP stdio 对 Deepseek、SuperAI、Kiro 执行了示例矩阵、自定义图、agent 与失败路径；结果并非每个模型组合都成功，失败均按真实结果记录。
 
-这些数字是各自源状态的历史证据，不自动证明后续工作树。当前公开仓库没有完整 CI workflow，因此没有可引用的公开 Windows CI 通过记录；本地运行也不等于受保护 GitHub environment 的 real-API job。
+这些数字是各自源状态的历史证据，不自动证明后续工作树。公开 CI 自 2026-08-23 起存在并可引用（见上）；本地运行仍不等于受保护 GitHub environment 的 real-API job。
 
 ## 已知限制与运营教训
 

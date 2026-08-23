@@ -30,6 +30,7 @@ All notable changes to Atlas are documented here. The format follows Keep a Chan
 - The public README and screenshots above were committed after `v0.1.0`; they are not part of that tag or its published sdist.
 - Refreshed `docs/STATUS.md` to the 2026-08-22 source state: new MCP capabilities, the 10-node ad-hoc real run, and the current test baseline.
 - Added `docs/PLAN-post-audit-2026-08-22.md`: consolidated post-audit fixes and phasing.
+- R0 governance closed out (2026-08-23): default branch is `main`, the outdated `release/v0.1.0-rc.1` remote branch is deleted, public CI is green on both branches, READMEs now carry the CI badge, and the `release` environment requires a human approver. STATUS/PLAN/ROADMAP refreshed to these facts.
 
 ## 0.1.0 - 2026-08-19
 
