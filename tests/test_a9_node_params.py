@@ -135,11 +135,13 @@ def test_graph_deadline_caps_node_timeout(tmp_path):
     fake = FakeProvider()
     fake.configure("primary", text="ok")
     spec = spec_from_yaml(_llm_yaml("    timeout_s: 120")
-                          + "\nguards:\n  timeout_s: 1\n")
+                          + "\nguards:\n  timeout_s: 30\n")
     execute_graph(spec, task=TASK_TEXT, runs_root=tmp_path,
                   registry=make_registry(fake))
     timeout = fake.calls[0]["timeout_s"]
-    assert timeout is not None and 0 < timeout <= 1
+    # 断言封顶关系(节点 120 被 run 级 30 压住),不断言绝对墙钟——
+    # 共享 runner 高负载下 1 秒都不稳定(2026-08-25 CI 实证)
+    assert timeout is not None and 0 < timeout <= 30
 
 
 def test_a9_llm_retry_retries_transport_only(tmp_path):

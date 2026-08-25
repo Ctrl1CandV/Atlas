@@ -102,6 +102,7 @@
 6. **端口冲突**:atlas-web 有 fail-loud 预检;排障入口 `docs/mcp.md` Troubleshooting 节(端口占用/旧实例/旧 stdio 条目/Session not found)。
 7. **模型怪癖**:deepseek 推理需 `maxOutputTokens: 16384`(已配供应商级默认);glm 系列 JSON 不可靠(宽容提取只救围栏包装);qwen/kimi 稳定;结构化节点默认配跨厂商 fallback。
 8. **flake 处理原则**:同提交两分支一绿一红、重跑即绿 → 高度疑似 flake,但**必须找根因修掉**,不许只重跑(先例两次)。
+9. **墙钟敏感测试(2026-08-25 实证,同日已修复;教训保留)**:`tests/test_a9_node_params.py::test_graph_deadline_caps_node_timeout` 曾用 `timeout_s=1.0` 断言绝对墙钟,共享 runner 高负载(实测整跑 1.79s)即失败——已改为断言封顶**关系**(节点 120 被 run 级 30 压住);`tests/test_m6_artifacts_thinking.py` 三处无睡眠紧凑轮询在高负载下先耗尽、索引空 nodes 报 IndexError——已统一为 `_wait_done` 助手(0.02s 间隔轮询 + 终态断言 + 超时大声失败)。**新写测试的规则**:不断言绝对墙钟;轮询必须带睡眠与终态断言。
 
 ## 八、验证与排查命令集
 

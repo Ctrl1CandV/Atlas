@@ -181,6 +181,19 @@ edges:
                       registry_factory=lambda pids: make_registry(fake))
 
 
+
+def _wait_done(client, rid, timeout_s: float = 30.0):
+    """轮询到终态;超时大声失败,而不是索引空 nodes。"""
+    import time as _time
+    deadline = _time.monotonic() + timeout_s
+    while _time.monotonic() < deadline:
+        data = client.get(f"/api/runs/{rid}").json()
+        if data.get("status") in ("done", "failed", "cancelled"):
+            assert data["status"] == "done", data
+            return data
+        _time.sleep(0.02)
+    raise AssertionError(f"run {rid} 在 {timeout_s}s 内未到终态")
+
 def _client(app) -> TestClient:
     return TestClient(app, base_url="http://127.0.0.1")
 
@@ -190,10 +203,7 @@ def test_get_run_artifacts_and_thinking_layers(tmp_path):
     with _client(app) as client:
         rid = client.post("/api/workflows/w/run", json={"task": TASK_TEXT},
                           headers={"X-Atlas-Request": "1"}).json()["run_id"]
-        for _ in range(100):
-            data = client.get(f"/api/runs/{rid}").json()
-            if data.get("status") == "done":
-                break
+        data = _wait_done(client, rid)
     node = data["nodes"][0]
     arts = node["artifacts"]
     assert any(a["role"] == "output" for a in arts)
@@ -211,10 +221,7 @@ def test_get_run_provider_default_and_presence(tmp_path):
     with _client(app) as client:
         rid = client.post("/api/workflows/w/run", json={"task": TASK_TEXT},
                           headers={"X-Atlas-Request": "1"}).json()["run_id"]
-        for _ in range(100):
-            data = client.get(f"/api/runs/{rid}").json()
-            if data.get("status") == "done":
-                break
+        data = _wait_done(client, rid)
     node = data["nodes"][0]
     assert node["thinking"]["requested_tier"] in ("high", "provider_default")
     assert set(node["thinking"]) == {"capability", "requested_tier", "evidence"}
@@ -318,8 +325,5 @@ edges:
     with TestClient(app, base_url="http://127.0.0.1") as c:
         rid = c.post("/api/workflows/w/run", json={"task": TASK_TEXT},
                      headers={"X-Atlas-Request": "1"}).json()["run_id"]
-        for _ in range(100):
-            data = c.get(f"/api/runs/{rid}").json()
-            if data.get("status") == "done":
-                break
+        data = _wait_done(c, rid)
     assert data["nodes"][0]["thinking"]["capability"] == "unprobed"
