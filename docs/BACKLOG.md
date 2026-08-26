@@ -8,13 +8,14 @@
 
 - **P4 共享 launcher + MCP 异步 + `atlas_list_runs`** ✅：`atlas/launcher.py` controller registry；`wait=false` 预检后返回 run_id；`atlas_list_runs` 降序稳定分页；Web/MCP 共用 `runs.build_run_summary`。
 - **P2 协作式取消** ✅（部分范围）：`run_cancelled` 终态、`atlas_cancel_run`（第 8 工具）、Web API 端点、llm/human/agent 入口与重试等待的消费点、agent retry 预算 RFC 草案。**未含**：CLI 进程树终止、Web 界面取消按钮、`--max-budget-usd` 映射与 RFC 决策——保留在下表外的能力债里，随下批实施。
+- **P9 controller heartbeat** ✅（2026-08-26）：每次 attempt 派发窗口内 `node_progress`（attempt/model/elapsed_ms/phase）；间隔默认与下限 30s、`ATLAS_NODE_HEARTBEAT_INTERVAL_S` run 级可配；窗口在 attempt 结束/失败/取消/终态后闭合，迟到 tick 拒绝；fold 显式忽略；事件容量代价（30s ≈ 2880 条/节点/天）写入 STATUS,分段账本治理随 P10。
 
 ## 总览表
 
 | 建议批次 | 编号 | 功能 | 用户可见效果 | 估算 | 风险 | 依赖 |
 |---|---|---|---|---|---|---|
 | R0 | — | 发布与仓库治理 | tag / 构建资产 / provenance 指向同一 commit；默认分支迁到 `main` 并保护；公开 CI 策略确定 | 低（流程性） | 低 | 无 |
-| 第二批 | P9 | controller heartbeat | 区分"控制器在等模型"和"事件流断了"；显示 attempt 上下文 | 3–5 人日 | 低 | P2 |
+| 第二批 | P9 | controller heartbeat | 区分"控制器在等模型"和"事件流断了"；显示 attempt 上下文 | 3–5 人日 | 低 | P2（✅ 已完成,见上） |
 | 第二批 | P3 | 异常 taxonomy + 节点 `on_error` | 内容型节点失败可按图作者策略 continue 或走 `__failed__` 分支，而不是终止整图；治理异常（费用/完整性/审批）永不被吞 | 7–11 人日 | 中 | P2 的 RunCancelled |
 | 第二批b | S1 | 执行终局可视化与总结节点 | run 结束后 Web 顶部"终局总结"卡片（零成本、纯账本派生）+ opt-in 总结节点（最终结果+各节点工作回顾，write-once 产物+事件）；2026-08-23 用户定案，**不做离线报告导出**（原 Stage E 条目移除） | 5–8 人日 | 中 | P4 的 summary builder |
 | 第三批 | P7 | artifact import + invocation hash | 新 run 可安全复用旧 run 的昂贵上游产物（字节复制 + lineage 事件）；执行身份相同可自动 skip | 7–11 人日 | **高** | 现有 SHA 合同 |

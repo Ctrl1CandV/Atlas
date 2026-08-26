@@ -567,6 +567,7 @@ def call_with_fallback(
     remaining_timeout=None,
     sleep_fn=None,
     cancel_requested=None,
+    heartbeat=None,
 ) -> CallOutcome:
     """失败链主入口。假成功与传输错误同路降级;全部失败则抛 AllCandidatesFailed。
 
@@ -575,6 +576,9 @@ def call_with_fallback(
     cancel_requested()(P2 协作式取消)在候选切换、同模型重试等待与每次
     发起前消费:为真立即抛 RunCancelled,不再发起新调用;在途调用只能等它
     返回或超时(不宣称任意时刻强杀)。
+    heartbeat(P9)由本函数按真实派发窗口开合:adapter.call 在途时定时写
+    node_progress;同模型重试等待期切 phase=retry;attempt 结束(返回/
+    传输失败无重试/意外异常)即 end,迟到 tick 由心跳对象自己拒绝。
     """
     from atlas.thinking import ThinkingUnsupported, thinking_request_params
 
@@ -638,6 +642,8 @@ def call_with_fallback(
         if before_attempt is not None:
             reservation = before_attempt(cand)
         _check_cancel(f"向 {cand} 发起调用前")
+        if heartbeat is not None:
+            heartbeat.begin()
         try:
             resp = adapter.call(model_id, prompt,
                                 extra_body=extra_body or None,
@@ -658,6 +664,8 @@ def call_with_fallback(
                 sleep_s = 0.5
                 if remaining_timeout is not None:
                     sleep_s = min(sleep_s, remaining_timeout())
+                if heartbeat is not None:
+                    heartbeat.mark_retry_wait()   # 线程跨重试等待期继续跑
                 # 可唤醒等待(P2):分片轮询取消请求,而不是整段睡死。
                 deadline = time.monotonic() + max(0.0, sleep_s)
                 while True:
@@ -667,8 +675,16 @@ def call_with_fallback(
                         break
                     (sleep_fn or time.sleep)(min(0.05, deadline - now))
                 continue
+            if heartbeat is not None:
+                heartbeat.end()
             breaker.record_transport_failure(cand)
             continue
+        except BaseException:
+            if heartbeat is not None:
+                heartbeat.end()
+            raise
+        if heartbeat is not None:
+            heartbeat.end()
         if after_attempt is not None:
             after_attempt(reservation, cand, resp.usage)
         try:

@@ -174,6 +174,11 @@ def fold_events(records: list[dict]) -> dict:
             state["status"] = "running"
         elif t == "run_resumed":
             state["status"] = "running"
+        elif t == "node_progress":
+            # P9 controller 心跳与 agent 阶段标记:纯活性信号,不携带影响
+            # 终态/产物的语义。fold 显式忽略;删掉这些事件后重放结果必须
+            # 与保留时完全一致(回归测试锁定,见 test_p9_heartbeat)。
+            pass
         elif t == "run_paused":
             state["status"] = "paused"
         elif t == "node_done":

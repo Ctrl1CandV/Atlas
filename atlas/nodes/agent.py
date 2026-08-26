@@ -598,6 +598,7 @@ def make_agent_node_fn(node: NodeSpec, spec: WorkflowSpec, ctx):
         # P2 消费点:agent 入口。在途 CLI 执行无法中断(进程树终止属
         # cancel 后续强化);至少不让新 agent 尝试在取消后启动。
         from atlas.adapters import RunCancelled
+        from atlas.engine import NodeHeartbeat
         if ctx.cancel_requested():
             raise RunCancelled(f"agent 节点 {node.id} 执行前收到取消请求")
 
@@ -644,6 +645,9 @@ def make_agent_node_fn(node: NodeSpec, spec: WorkflowSpec, ctx):
         worktree = None
         started_emitted = False
         total_attempts = 1 + node.retry
+        heartbeat = NodeHeartbeat(
+            ctx.log, node=node.id, iteration=iteration,
+            interval_s=ctx.heartbeat_interval_s, started_mono=started)
         for attempt in range(1, total_attempts + 1):
             ctx.check_timeout(spec.guards.timeout_s, node.id)
             cwd = None
@@ -693,7 +697,15 @@ def make_agent_node_fn(node: NodeSpec, spec: WorkflowSpec, ctx):
                         "max_budget_usd": (
                             reservation.amount if reservation else None),
                     })
-                raw_result = ctx.agent_runner(proj_ref.path, **runner_kwargs)
+                # P9:CLI 派发窗口的心跳。窗口内的异常(含 AgentCliError/
+                # RunCancelled/超时)一律走 finally 停心跳,不许线程外泄。
+                heartbeat.set_context(attempt=attempt, model=requested_model,
+                                      runner=runner_name)
+                heartbeat.begin()
+                try:
+                    raw_result = ctx.agent_runner(proj_ref.path, **runner_kwargs)
+                finally:
+                    heartbeat.end()
                 if isinstance(raw_result, str):
                     text = raw_result
                     result = None
@@ -778,7 +790,12 @@ def make_agent_node_fn(node: NodeSpec, spec: WorkflowSpec, ctx):
                              model_requested=requested_model,
                              reason=f"AgentCliError(第 {attempt} 次):{e}")
                 if attempt < total_attempts:
+                    # P9:重试退避也是 controller 的等待期,心跳切 retry 相位;
+                    # sleep 结束即闭合,下一轮派发重新开窗。
+                    heartbeat.mark_retry_wait()
+                    heartbeat.begin()
                     time.sleep(AGENT_RETRY_SLEEP_S)
+                    heartbeat.end()
         if last_err is not None:
             raise last_err
 

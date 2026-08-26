@@ -342,6 +342,113 @@ def _make_router(spec: WorkflowSpec, src: str, path_map: dict):
 # ─────────────────────────── 执行 ───────────────────────────
 
 
+# ─────────────────────────── P9 controller heartbeat ───────────────────────────
+
+
+HEARTBEAT_INTERVAL_ENV = "ATLAS_NODE_HEARTBEAT_INTERVAL_S"
+DEFAULT_HEARTBEAT_INTERVAL_S = 30.0
+MIN_HEARTBEAT_INTERVAL_S = 30.0
+
+
+def resolve_heartbeat_interval(explicit: float | None = None) -> float:
+    """运行级心跳间隔:显式参数 > 环境变量 > 默认 30s。
+
+    这是运营参数,不进 YAML 图文件(图语义与运行环境解耦)。环境变量是
+    跨进程一致的唯一渠道——resume/approve 续跑发生在新进程里,拿不到首次
+    执行时的显式参数。环境值低于 30s 下限时大声拒绝,不静默钳制:30s 一条
+    ≈ 每节点每天 2880 条事件,更快的频率必须在容量设计里重新论证。
+    显式参数是进程内的可信输入(测试用小间隔驱动),不设下限。
+    """
+    if explicit is not None:
+        return explicit
+    raw = os.environ.get(HEARTBEAT_INTERVAL_ENV, "").strip()
+    if not raw:
+        return DEFAULT_HEARTBEAT_INTERVAL_S
+    value = float(raw)
+    if value < MIN_HEARTBEAT_INTERVAL_S:
+        raise ValueError(
+            f"{HEARTBEAT_INTERVAL_ENV}={value}s 低于下限 {MIN_HEARTBEAT_INTERVAL_S}s"
+            f"(30s 一条 ≈ 每节点每天 2880 条事件,账本容量必须真实计入);"
+            f"拒绝更快的频率")
+    return value
+
+
+class NodeHeartbeat:
+    """controller 心跳:定时写 node_progress,只证明「controller 仍在等待
+    这次派发返回」,不声称模型内部进度或百分比。
+
+    生命周期与 attempt 对齐:预留钩子 set_context 更新 attempt/model 语境,
+    派发窗口由调用点 begin()/end() 开合;end() 会 join 心跳线程,返回后
+    任何迟到 tick 被拒绝(不写事件)——终态事件之后账本不会再出现心跳。
+    线程为 daemon:controller 崩溃时进程退出不被心跳拖住。elapsed_ms 的
+    基准是节点开工时刻(controller elapsed),不是 attempt 起点——用户
+    看到的是「这个节点 controller 已经等了多久」,重试不该把它清零。
+    """
+
+    def __init__(self, log: EventLog, *, node: str, iteration: int,
+                 interval_s: float, started_mono: float) -> None:
+        self._log = log
+        self._node = node
+        self._iteration = iteration
+        self._interval_s = interval_s
+        self._started_mono = started_mono
+        self._context: dict = {"phase": "waiting"}
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    def set_context(self, *, attempt: int, model: str,
+                    phase: str = "waiting", **extra) -> None:
+        """(重新)声明当前 attempt 语境;下一次 tick 起生效。"""
+        with self._lock:
+            self._context = {"attempt": attempt, "model": model,
+                             "phase": phase, **extra}
+
+    def mark_retry_wait(self) -> None:
+        """phase 切到 retry:同一模型的传输失败重试等待期。"""
+        with self._lock:
+            self._context["phase"] = "retry"
+
+    def begin(self) -> None:
+        """派发窗口开启:线程已在跑则保持(语境已由 set_context 更新)。"""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop = threading.Event()
+            thread = threading.Thread(
+                target=self._loop, name=f"atlas-heartbeat-{self._node}",
+                daemon=True)
+            self._thread = thread
+        thread.start()
+
+    def end(self) -> None:
+        """派发窗口关闭:停线程并等它收尾;幂等。此后 tick 不写事件。"""
+        with self._lock:
+            self._stop.set()
+            thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
+        with self._lock:
+            self._thread = None
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self._interval_s):
+            if not self._tick():
+                break
+
+    def _tick(self) -> bool:
+        """写一条心跳;已停止时拒绝写并返回 False(测试的确定性入口)。"""
+        with self._lock:
+            if self._stop.is_set() or self._thread is None:
+                return False
+            fields = dict(self._context)
+            elapsed_ms = int((time.monotonic() - self._started_mono) * 1000)
+            self._log.emit("node_progress", node=self._node,
+                           iteration=self._iteration,
+                           elapsed_ms=elapsed_ms, **fields)
+        return True
+
+
 @dataclass
 class _NodeCtx:
     run_dir: Path
@@ -354,12 +461,18 @@ class _NodeCtx:
         default_factory=lambda: MappingProxyType({}), repr=False)
     timeout_s: float | None = field(default=None, repr=False)
     cost_cap: float | None = field(default=None, repr=False)
+    heartbeat_interval_s: float | None = field(default=None, repr=False)
     cost_ledger: CostLedger | None = field(default=None, repr=False)
     _wall_start: datetime | None = field(default=None, repr=False)
     _agent_runner_raw: object = field(default=None, repr=False)
     _events_cache: tuple[int, list] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
+        # 心跳间隔在此统一解析:显式参数 > 环境变量 > 默认 30s。三条构造
+        # 路径(执行/续跑/审批续跑)都会经过这里,resume 的新进程靠环境
+        # 变量与首次执行保持同一频率。
+        self.heartbeat_interval_s = resolve_heartbeat_interval(
+            self.heartbeat_interval_s)
         if self.agent_runner is None:
             from atlas.nodes.sandbox import sandbox_runner
             self.agent_runner = sandbox_runner
@@ -578,6 +691,9 @@ def _make_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
         attempt = 0
         attempt_by_reservation: dict[str, int] = {}
         warned_reservations: set[str] = set()
+        heartbeat = NodeHeartbeat(
+            ctx.log, node=node.id, iteration=iteration,
+            interval_s=ctx.heartbeat_interval_s, started_mono=started)
 
         def _project_candidate(cand: str) -> float | None:
             output_cap = (node.max_output_tokens
@@ -621,6 +737,7 @@ def _make_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
                 ctx.log.emit("node_started", node=node.id, iteration=iteration,
                              model_requested=node.model)
                 started_emitted = True
+            heartbeat.set_context(attempt=attempt, model=cand)
             return reservation
 
         def _settle(reservation, cand: str, usage):
@@ -667,26 +784,32 @@ def _make_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
                 raise CostExceeded(str(exceeded)) from exceeded
 
         # 2. 调模型:失败链 + 假成功检测 + M4 节点参数
-        outcome = call_with_fallback(
-            registry=ctx.registry,
-            log=ctx.log,
-            node_id=node.id,
-            iteration=iteration,
-            model_ref=node.model,
-            fallback_refs=node.fallback,
-            prompt=projection.decode("utf-8"),
-            required_fields=node.required_fields,
-            thinking_tier=node.thinking,
-            temperature=node.temperature,
-            seed=node.seed,
-            max_output_tokens=node.max_output_tokens,
-            timeout_s=node.timeout_s,
-            retry=node.retry,
-            before_attempt=_reserve,
-            after_attempt=_settle,
-            remaining_timeout=lambda: ctx.remaining_timeout(node_id=node.id),
-            cancel_requested=ctx.cancel_requested,
-        )
+        try:
+            outcome = call_with_fallback(
+                registry=ctx.registry,
+                log=ctx.log,
+                node_id=node.id,
+                iteration=iteration,
+                model_ref=node.model,
+                fallback_refs=node.fallback,
+                prompt=projection.decode("utf-8"),
+                required_fields=node.required_fields,
+                thinking_tier=node.thinking,
+                temperature=node.temperature,
+                seed=node.seed,
+                max_output_tokens=node.max_output_tokens,
+                timeout_s=node.timeout_s,
+                retry=node.retry,
+                before_attempt=_reserve,
+                after_attempt=_settle,
+                remaining_timeout=lambda: ctx.remaining_timeout(node_id=node.id),
+                cancel_requested=ctx.cancel_requested,
+                heartbeat=heartbeat,
+            )
+        finally:
+            # 兜底停心跳:派发窗口的正常开合在 call_with_fallback 内部,
+            # 这里覆盖取消消费点抛 RunCancelled、意外异常等所有离开路径。
+            heartbeat.end()
 
         # 3. 产物落盘 + 事件
         ext = ".json" if node.required_fields else ".txt"
@@ -934,6 +1057,7 @@ def execute_graph(
     checkpoint: bool = True,
     agent_runner=None,
     prepared: PreparedExecution | None = None,
+    heartbeat_interval_s: float | None = None,
     base_spec_sha256: str | None = None,
     binding_summary=(),
     override_summary=(),
@@ -964,7 +1088,8 @@ def execute_graph(
                            for token in prepared.source_baseline_tokens
                        }),
                        timeout_s=spec.guards.timeout_s,
-                       cost_ledger=CostLedger(spec.guards.max_cost_usd))
+                       cost_ledger=CostLedger(spec.guards.max_cost_usd),
+                       heartbeat_interval_s=heartbeat_interval_s)
 
         task_ref = store_artifact(
             run_dir, name="task", filename="task.txt", content=task.encode("utf-8"),

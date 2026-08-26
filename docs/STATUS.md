@@ -18,6 +18,7 @@
 | MCP 控制面 | 八个工具：validate、save、run（`wait=false` 异步返回 run_id）、list workflows、list runs、get run、cancel run（协作式）、resume interrupted run。run 支持传 `yaml` 全文跑未保存的自定义图（`persist_as` 真跑后固化）；stdio 之外，`atlas-web` 在 `/mcp` 以 streamable-http 提供同一工具面 |
 | 共享 launcher（P4） | Web 启动/恢复/审批续跑与 MCP 走同一进程内 controller registry（每 run 唯一 controller）；运行摘要由账本派生，Web/MCP 共用同一构建函数 |
 | 协作式取消（P2） | `atlas_cancel_run` 与 `POST /api/runs/{id}/cancel` 写原子请求文件；running 由 controller 在节点入口/候选切换/重试等待消费并唯一写 `run_cancelled`；paused/interrupted 由取消入口持锁直写终态；`cancelled` 可删除、拒绝 resume/approve；在途模型调用与 agent CLI 执行会跑完当次，请求不可撤回 |
+| Controller 心跳（P9） | 每次 attempt 的派发窗口内定时写 `node_progress`（node/iteration/attempt/model/elapsed_ms/phase=waiting|retry）；只证明 controller 在等待，不声称模型内部进度或百分比；间隔默认与下限 30s，`ATLAS_NODE_HEARTBEAT_INTERVAL_S` run 级可配（低于下限大声拒绝）；窗口在 attempt 结束/失败/取消/终态后闭合，迟到 tick 被拒绝；fold 显式忽略该类型；容量代价如实计入：30s 一条 ≈ 每节点每天 2880 条（16 MiB 账本治理随 P10） |
 | 工作流文件管理 | Web 页面可删除工作流；保存走 MCP 的 `expected_sha256` 读-改-写闭环（乐观锁防覆盖） |
 | 零成本预检 | validate 与 dry-run 不调用供应商；`expected_execution_sha256` 可绑定预演与真跑身份 |
 | 可审计运行 | append-only JSONL 事件、write-once 产物、读取时 SHA-256 断言、有效规格快照 |
@@ -54,7 +55,7 @@
 
 2026-08-23 公开 CI 基线（`main` @ `7eac07b`，GitHub Actions）：
 
-- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-23 起为 496 passed，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
+- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-26 起为 506 passed，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
 - Ubuntu 兼容性信号 job（`continue-on-error`，明确不支持）同样通过：跨平台 agent CLI 桩修复后它反映真实兼容性。
 - `real-api.yml` 仅手动触发（`environment: real-api` 保护），不计入常规 CI。
 
