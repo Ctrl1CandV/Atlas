@@ -989,6 +989,9 @@ def _resolve_models(spec: WorkflowSpec, registry: AdapterRegistry) -> None:
             registry.resolve(n.model)
             for f in n.fallback:
                 registry.resolve(f)
+    if spec.summary is not None:
+        # S1:总结模型与节点模型同一预检口径,坏引用在花钱前拒绝。
+        registry.resolve(spec.summary.model)
 
 
 def validate_executable_spec(
@@ -1737,6 +1740,135 @@ def request_cancel(run_id: str, *, runs_root: Path, reason: str = "",
     return {"status": "running", "requested": True, **request}
 
 
+SUMMARY_NODE_ID = "run_summary"
+SUMMARY_PROMPT_MAX_CHARS = 24_000
+
+
+def _artifact_first_paragraph(path_str: str | None, *, cap: int = 200) -> str:
+    """节点产物首段,压成单行作为总结与终局视图的「一句话回顾」原料。"""
+    if not path_str:
+        return "(无输出)"
+    try:
+        with open(path_str, "rb") as f:
+            raw = f.read(cap * 8)   # 只读头部,60k 级产物不做全量 IO
+    except OSError:
+        return "(产物不可读)"
+    text = raw.decode("utf-8", errors="replace").strip()
+    cut = text.find("\n\n")
+    if cut != -1:
+        text = text[:cut]
+    text = " ".join(text.split())
+    if len(text) > cap:
+        text = text[:cap].rstrip() + "…"
+    return text or "(空输出)"
+
+
+def _execute_run_summary(spec: WorkflowSpec, ctx: _NodeCtx, run_id: str,
+                         task_text: str) -> None:
+    """S1 opt-in 总结调用:run_done 前一次 LLM 回顾,受 guards 约束。
+
+    输入是账本派生的各节点摘要(模型/耗时/token/成本/输出首段),不是
+    内存状态;输出是 run 级 write-once 产物 + run_summary_written 事件。
+    预算与结算走与节点同款的 CostLedger 路径(有帽时先预留);失败由
+    调用方记 run_summary_failed,run 终态不变——总结是增强,不是运行
+    成败的一部分。窗口内挂 P9 心跳,派发前后闭合。
+    """
+    if ctx.reader.find(type="run_summary_written") is not None:
+        # 崩溃窗口重放:产物与事件已落账、run_done 未写——不重复消费预算。
+        return
+    if ctx.cancel_requested():
+        raise RunCancelled("run 总结调用前收到取消请求")
+    model = spec.summary.model
+    lines: list[str] = []
+    for e in ctx.reader.filter(type="node_done"):
+        cost = e.get("cost_usd")
+        cost_label = "成本未知" if cost is None else f"${cost}"
+        lines.append(
+            f"- {e['node']}({e.get('model_used')},"
+            f"耗时 {e.get('duration_s')}s,"
+            f"tokens {e.get('input_tokens')}/{e.get('output_tokens')},"
+            f"{cost_label}):{_artifact_first_paragraph(e.get('output_path'))}")
+    prompt = (
+        "你是工作流执行总结员。以下是一次工作流运行的事件账本回顾。"
+        "请写一段执行总结:最终结果是什么,每个节点各做了什么,"
+        "以及值得注意的降级/重试/成本情况。你的叙述是给人看的回顾,"
+        "事实以事件账本为准,不要编造账本里没有的数字。\n")
+    if spec.summary.prompt_hint:
+        prompt += f"用户补充要求:{spec.summary.prompt_hint}\n"
+    prompt += (f"工作流:{spec.name}\n"
+               f"任务摘要(前 400 字):{(task_text or '')[:400]}\n"
+               f"节点回顾(按完成顺序):\n" + "\n".join(lines))
+    if len(prompt) > SUMMARY_PROMPT_MAX_CHARS:
+        prompt = prompt[:SUMMARY_PROMPT_MAX_CHARS].rstrip() \
+            + "\n…(回顾过长,已截断)"
+    adapter, model_id = ctx.registry.resolve(model)
+    projected = compute_cost_usd(
+        model, len(prompt.encode("utf-8")) // 3,
+        ctx.registry.default_max_output_tokens(model))
+    try:
+        if projected is None and spec.guards.max_cost_usd is not None:
+            reservation = ctx.cost_ledger.reserve_remaining(
+                description=f"run 总结({model})派发前检查")
+        else:
+            reservation = ctx.cost_ledger.reserve(
+                projected, description=f"run 总结({model})派发前检查")
+    except CostLimitError as e:
+        raise CostExceeded(str(e)) from e
+    if reservation is not None:
+        ctx.log.emit(
+            "cost_reserved", node=SUMMARY_NODE_ID, iteration=1, attempt=1,
+            model=model, reservation_id=reservation.reservation_id,
+            reserved_usd=reservation.amount)
+    heartbeat = NodeHeartbeat(
+        ctx.log, node=SUMMARY_NODE_ID, iteration=1,
+        interval_s=ctx.heartbeat_interval_s, started_mono=time.monotonic())
+    heartbeat.set_context(attempt=1, model=model)
+    heartbeat.begin()
+    try:
+        resp = adapter.call(
+            model_id, prompt, extra_body=None,
+            timeout_s=ctx.call_timeout(None, SUMMARY_NODE_ID))
+    except BaseException:
+        heartbeat.end()
+        raise
+    heartbeat.end()
+    usage = resp.usage
+    actual = compute_cost_usd(
+        model,
+        usage.input_tokens if usage else None,
+        usage.output_tokens if usage else None)
+    unknown = actual is None
+    exceeded = None
+    try:
+        accounted = ctx.cost_ledger.settle(
+            reservation, actual,
+            description=f"run 总结({model})结算",
+            unknown_as_reserved=unknown)
+    except CostLimitError as e:
+        accounted = actual
+        exceeded = e
+    ctx.log.emit(
+        "cost_settled", node=SUMMARY_NODE_ID, iteration=1, attempt=1,
+        model=model,
+        reservation_id=(reservation.reservation_id
+                        if reservation is not None else None),
+        actual_cost_usd=actual, accounted_cost_usd=accounted,
+        cost_unknown=unknown, cost_usd=actual,
+        input_tokens=usage.input_tokens if usage else None,
+        output_tokens=usage.output_tokens if usage else None)
+    if exceeded is not None:
+        raise CostExceeded(str(exceeded)) from exceeded
+    ref = store_artifact(
+        ctx.run_dir, name="run_summary", filename="run_summary.txt",
+        content=resp.text.encode("utf-8"))
+    ctx.log.emit(
+        "run_summary_written", run_id=run_id, model=model,
+        path=str(ref.path), sha256=ref.sha256,
+        input_tokens=usage.input_tokens if usage else None,
+        output_tokens=usage.output_tokens if usage else None,
+        cost_usd=actual)
+
+
 def _invoke(spec: WorkflowSpec, ctx: _NodeCtx, run_id: str, *,
             entry: str, checkpoint: bool,
             task_input) -> RunResult:
@@ -1764,6 +1896,19 @@ def _invoke(spec: WorkflowSpec, ctx: _NodeCtx, run_id: str, *,
                 final_state=dict(final_state),
                 status="paused",
             )
+        # S1 opt-in 总结:run_done 前一次账本派生的回顾调用。取消照常
+        # 走消费点语义(RunCancelled 直落 run_cancelled);其余任何失败
+        # 只记 run_summary_failed,不改 run 终态。
+        if spec.summary is not None:
+            try:
+                _execute_run_summary(
+                    spec, ctx, run_id, task_input.get("task", ""))
+            except RunCancelled:
+                raise
+            except Exception as e:
+                ctx.log.emit(
+                    "run_summary_failed", run_id=run_id,
+                    error_type=type(e).__name__, error=str(e))
         # 图执行返回后也要守 deadline；调用方忽略 SDK timeout 或本地处理过慢时
         # 不能把已超时的整图记成成功。
         ctx.remaining_timeout(node_id="run_done")

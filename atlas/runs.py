@@ -36,6 +36,78 @@ def derive_run_status(records: list[dict], *, run_id: str, runs_root: Path,
     return "interrupted"
 
 
+def _recap_text(path_str, *, cap: int = 200) -> str:
+    """产物首段单行回顾(终局视图原料);读头部,不做全量 IO。"""
+    if not path_str:
+        return "(无输出)"
+    try:
+        with open(path_str, "rb") as f:
+            raw = f.read(cap * 8)
+    except OSError:
+        return "(产物不可读)"
+    text = raw.decode("utf-8", errors="replace").strip()
+    cut = text.find("\n\n")
+    if cut != -1:
+        text = text[:cut]
+    text = " ".join(text.split())
+    if len(text) > cap:
+        text = text[:cap].rstrip() + "…"
+    return text or "(空输出)"
+
+
+def build_finale(events: list[dict], run_dir: Path) -> dict | None:
+    """S1 零成本终局视图:纯事件账本派生,无 LLM、无新事件。
+
+    Web 终局卡片与 MCP atlas_get_run 的同源数据。run 未到终态时返回
+    None。llm_summary 是 opt-in 总结调用的产物回顾,始终标注
+    「LLM 叙述,事实以账本为准」。
+    """
+    folded = fold_events(events)
+    if folded["status"] not in ("done", "failed", "cancelled"):
+        return None
+    nodes = []
+    for e in events:
+        if e["type"] != "node_done":
+            continue
+        nodes.append({
+            "node": e["node"],
+            "model_used": e.get("model_used"),
+            "duration_s": e.get("duration_s"),
+            "input_tokens": e.get("input_tokens"),
+            "output_tokens": e.get("output_tokens"),
+            "cost_usd": e.get("cost_usd"),
+            "ts": e.get("ts"),
+            "recap": _recap_text(e.get("output_path")),
+        })
+    llm_summary = None
+    written = next((e for e in reversed(events)
+                    if e["type"] == "run_summary_written"), None)
+    if written is not None:
+        llm_summary = {
+            "model": written.get("model"),
+            "sha256": written.get("sha256"),
+            "path": written.get("path"),
+            "text": _recap_text(written.get("path"), cap=4000),
+            "input_tokens": written.get("input_tokens"),
+            "output_tokens": written.get("output_tokens"),
+            "cost_usd": written.get("cost_usd"),
+            "note": "LLM 叙述,事实以账本为准",
+        }
+    summary_failed = next((e for e in reversed(events)
+                           if e["type"] == "run_summary_failed"), None)
+    return {
+        "status": folded["status"],
+        "started_ts": events[0].get("ts") if events else None,
+        "finished_ts": events[-1].get("ts") if events else None,
+        "nodes": nodes,
+        "llm_summary": llm_summary,
+        "llm_summary_error": (
+            {"error_type": summary_failed.get("error_type"),
+             "error": summary_failed.get("error")}
+            if summary_failed is not None else None),
+    }
+
+
 def build_run_summary(run_id: str, *, runs_root: Path) -> dict:
     """单个 run 的完整摘要(P4 起 Web/MCP 共用的领域函数)。
 
@@ -100,6 +172,7 @@ def build_run_summary(run_id: str, *, runs_root: Path) -> dict:
         "overrides": started.get("overrides", []),
         "effective_workflow": effective_workflow,
         "failed_error": failed.get("error") if failed else None,
+        "finale": build_finale(events, Path(runs_root) / run_id),
     }
 
 

@@ -58,6 +58,9 @@ def spec_fingerprint(spec: "WorkflowSpec") -> str:
     # 引擎升级不会误杀旧 run 的续跑/批复(M4 审查🟠5)
     if spec.entries:
         payload["entries"] = list(spec.entries)
+    # summary 同理只在配置时进指纹:未总结的图与旧版指纹完全一致
+    if spec.summary is not None:
+        payload["summary"] = asdict(spec.summary)
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -73,6 +76,7 @@ def spec_to_snapshot(spec: "WorkflowSpec") -> dict:
         "entry": spec.entry,
         "entries": list(spec.entries),
         "guards": asdict(spec.guards),
+        "summary": asdict(spec.summary) if spec.summary is not None else None,
         "meta": spec.meta.as_dict(),   # 展示用;旧快照没有此键也能恢复
     }
 
@@ -90,6 +94,7 @@ def spec_from_snapshot(data: dict, *, source: str = "snapshot") -> "WorkflowSpec
         nodes=nodes, edges=edges, entry=data.get("entry", ""),
         guards=Guards(**data.get("guards", {})),
         entries=tuple(data.get("entries", ()) or ()),
+        summary=_parse_summary(data.get("summary"), source=source),
         meta=meta,
     )
     validate_spec(spec, source=source)
@@ -464,6 +469,40 @@ class Guards:
 
 
 @dataclass(frozen=True)
+class SummarySpec:
+    """图级 opt-in 总结配置(S1):run_done 前一次总结调用。
+
+    语义字段,进规格指纹与快照——它改变执行(多一次计费调用),
+    不像 meta 那样只作展示。默认缺省 = 不总结。
+    """
+    model: str                    # 总结调用的模型引用(与节点 model 同一命名法)
+    prompt_hint: str = ""         # 追加给总结员的用户要求(可选)
+
+
+_SUMMARY_FIELDS = frozenset({"model", "prompt_hint"})
+
+
+def _parse_summary(d: object, *, source: str) -> SummarySpec | None:
+    if d is None:
+        return None
+    if not isinstance(d, dict):
+        raise SpecError(
+            f"{source} 的 summary 必须是映射(model[, prompt_hint]),"
+            f"实际是 {type(d).__name__}")
+    unknown = {k for k in d if isinstance(k, str)} - _SUMMARY_FIELDS
+    if unknown:
+        raise SpecError(f"summary 里有未知字段:{sorted(unknown)}。"
+                        f"可用:model/prompt_hint")
+    model = d.get("model")
+    if not isinstance(model, str) or not model.strip():
+        raise SpecError("summary.model 必须是非空字符串(总结调用的模型引用)")
+    hint = d.get("prompt_hint", "")
+    if not isinstance(hint, str):
+        raise SpecError("summary.prompt_hint 必须是字符串")
+    return SummarySpec(model=model.strip(), prompt_hint=hint)
+
+
+@dataclass(frozen=True)
 class NodeSpec:
     id: str
     type: str                                   # 必须命中 NODE_TYPES
@@ -627,6 +666,7 @@ class WorkflowSpec:
     description: str = ""
     guards: Guards = field(default_factory=Guards)
     entries: tuple[str, ...] = ()               # 全部入口(M4 多入口;空=单入口)
+    summary: SummarySpec | None = None          # S1 opt-in 总结(run_done 前一次调用)
     meta: WorkflowMeta = field(default_factory=WorkflowMeta)   # 展示用,不进指纹
 
     def node(self, node_id: str) -> NodeSpec:
@@ -646,7 +686,7 @@ class WorkflowSpec:
 
 
 _TOP_FIELDS = frozenset({"name", "description", "entry", "nodes", "edges",
-                         "guards", "meta"})
+                         "guards", "summary", "meta"})
 _NODE_FIELDS = frozenset({
     "id", "type", "model", "prompt", "consumes", "output_schema", "fallback",
     "route_field", "workdir", "max_turns", "max_output_tokens", "thinking",
@@ -680,7 +720,7 @@ def spec_from_yaml(text: str, *, source: str = "YAML") -> WorkflowSpec:
         field = sorted(unknown_top)[0]
         raise _located_error(
             f"{source} 顶层有未知字段:{sorted(unknown_top)}。"
-            f"可用:name/description/entry/nodes/edges/guards/meta",
+            f"可用:name/description/entry/nodes/edges/guards/summary/meta",
             (field,), marks)
 
     name = raw.get("name")
@@ -735,6 +775,12 @@ def spec_from_yaml(text: str, *, source: str = "YAML") -> WorkflowSpec:
         raise _relocate_error(e, path, marks,
                               fallback_paths=(("guards",),)) from e
 
+    try:
+        summary = _parse_summary(raw.get("summary"), source=source)
+    except SpecError as e:
+        raise _relocate_error(e, ("summary",), marks,
+                              fallback_paths=(("summary",),)) from e
+
     spec = WorkflowSpec(
         name=name.strip(),
         description=str(raw.get("description", "") or ""),
@@ -743,6 +789,7 @@ def spec_from_yaml(text: str, *, source: str = "YAML") -> WorkflowSpec:
         entry=entry,
         guards=guards,
         entries=entries,
+        summary=summary,
     )
     resolved = validate_spec(spec, source=source, _marks=marks)
     # meta 在结构校验之后解析:requires 的一致性检查需要先有 spec
@@ -755,7 +802,7 @@ def spec_from_yaml(text: str, *, source: str = "YAML") -> WorkflowSpec:
     spec = WorkflowSpec(
         name=spec.name, description=spec.description, nodes=spec.nodes,
         edges=spec.edges, entry=spec.entry, guards=spec.guards,
-        entries=spec.entries, meta=meta,
+        entries=spec.entries, summary=summary, meta=meta,
     )
     # 把解析出的入口写回。**只有完全没写 entry 时**才推断:
     # 写了单值 entry 就只跑那一条腿(多根图里其余根会因不可达被拒收,
@@ -767,7 +814,7 @@ def spec_from_yaml(text: str, *, source: str = "YAML") -> WorkflowSpec:
         spec = WorkflowSpec(
             name=spec.name, description=spec.description, nodes=spec.nodes,
             edges=spec.edges, entry=resolved, guards=spec.guards,
-            entries=all_entries, meta=meta,
+            entries=all_entries, summary=summary, meta=meta,
         )
     return spec
 

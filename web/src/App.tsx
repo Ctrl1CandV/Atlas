@@ -23,6 +23,7 @@ import { GraphView } from './GraphView';
 import { GuidePage } from './GuidePage';
 import { NodeDetail } from './NodeDetail';
 import { deriveModelOptions } from './modelOptions';
+import { FinaleCard } from './FinaleCard';
 import { SettingsPage } from './SettingsPage';
 import { hrefFor, useRoute } from './router';
 import { applyDeletedRuns } from './runCleanup';
@@ -618,6 +619,7 @@ export default function App() {
         </motion.div>
       ) : (
       <motion.div className="body" {...enter(0.06)}>
+        {summary?.finale && <FinaleCard finale={summary.finale} />}
         <DockWorkspace>
         <aside className="sidebar dock-left">
           <h4>工作流</h4>

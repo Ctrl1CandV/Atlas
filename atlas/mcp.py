@@ -504,6 +504,23 @@ def _dry_run_warnings(spec, *, provider_cfgs=None, capabilities=None,
                         f" 的 {provider_id} 条目里提高")
             if spec.guards.max_cost_usd is not None and not rates_known_fn(ref):
                 unknown_pricing.append(f"{n.id} 的候选 {ref}")
+    if spec.summary is not None:
+        # S1:总结调用也是一个计费候选,同一套警告口径覆盖它。
+        ref = spec.summary.model
+        provider_id = ref.partition(":")[0]
+        cfg = provider_cfgs.get(provider_id)
+        vendor_cap = cfg.max_output_tokens if cfg is not None else None
+        kind = capabilities.get(ref, {}).get("kind", "unknown")
+        if kind in ("effort", "budget"):
+            effective_cap = vendor_cap or 8192   # 总结调用没有节点级输出上限
+            if effective_cap < REASONING_OUTPUT_TOKEN_FLOOR:
+                warnings.append(
+                    f"run 总结的 {ref} 是已探测推理型(kind={kind}),"
+                    f"max_output_tokens 生效值 {effective_cap} 低于 "
+                    f"{REASONING_OUTPUT_TOKEN_FLOOR}:隐性思考会烧掉输出预算,"
+                    f"总结可能截断;在 providers.json 的 {provider_id} 条目里提高")
+        if spec.guards.max_cost_usd is not None and not rates_known_fn(ref):
+            unknown_pricing.append(f"run 总结的候选 {ref}")
     if unknown_pricing:
         deduped = ";".join(dict.fromkeys(unknown_pricing))
         warnings.append(
@@ -606,6 +623,11 @@ def dry_run_impl(workflow_id: str, task: str, node_overrides=None, *,
         "guards": {"max_iterations_effective": spec.guards.effective_max_iterations,
                    "max_cost_usd": spec.guards.max_cost_usd,
                    "timeout_s": spec.guards.timeout_s},
+        "summary": ({"model": spec.summary.model,
+                     "prompt_hint": spec.summary.prompt_hint or None,
+                     "note": "run 结束前将执行 1 次总结调用"
+                             "(计入成本与 max_cost_usd 守卫)"}
+                    if spec.summary is not None else None),
         "warnings": _dry_run_warnings(spec),
         "base_spec_sha256": effective.base_fingerprint,
         "effective_spec_sha256": effective.effective_fingerprint,

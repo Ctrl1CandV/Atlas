@@ -11,6 +11,7 @@
 | `entry` | 可选入口 id 或 id 数组；有环时必须显式给出 |
 | `edges` | `from`、`to`，条件边另有 `when` |
 | `guards` | `max_iterations`、`max_cost_usd`、`timeout_s` |
+| `summary` | 可选总结配置 `{model, prompt_hint?}`：run 结束前用指定模型做一次回顾调用，产物与成本进账本（S1）；默认不总结 |
 
 ## 节点字段
 

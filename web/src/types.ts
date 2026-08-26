@@ -209,6 +209,37 @@ export interface RunNode {
   runner?: 'local_cli' | 'injected';
 }
 
+export interface FinaleNodeRecap {
+  node: string;
+  model_used: string | null;
+  duration_s: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cost_usd: number | null;
+  ts: string | null;
+  recap: string;
+}
+
+export interface FinaleLlmSummary {
+  model: string | null;
+  sha256: string | null;
+  path: string | null;
+  text: string;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cost_usd: number | null;
+  note: string;
+}
+
+export interface Finale {
+  status: string;
+  started_ts: string | null;
+  finished_ts: string | null;
+  nodes: FinaleNodeRecap[];
+  llm_summary: FinaleLlmSummary | null;
+  llm_summary_error: { error_type: string | null; error: string | null } | null;
+}
+
 export interface RunSummary {
   run_id: string;
   graph: string | null;
@@ -227,6 +258,7 @@ export interface RunSummary {
     cost_usd: number | null;
   };
   failed_error: string | null;
+  finale?: Finale | null;
   effective_workflow?: WorkflowSpec;
   effective_spec?: WorkflowSpec;
   model_bindings?: Record<string, string>;

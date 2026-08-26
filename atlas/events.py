@@ -179,6 +179,14 @@ def fold_events(records: list[dict]) -> dict:
             # 终态/产物的语义。fold 显式忽略;删掉这些事件后重放结果必须
             # 与保留时完全一致(回归测试锁定,见 test_p9_heartbeat)。
             pass
+        elif t == "run_summary_written":
+            # S1:总结产物增强可读性,读取走专用事件/产物路径,不入 fold
+            # 状态——删掉它,fold 结果必须与保留时一致(回归测试锁定)。
+            pass
+        elif t == "run_summary_failed":
+            # S1:总结失败不改 run 终态(锚点合同);run_done/run_failed
+            # 照常由原有写点决定。
+            pass
         elif t == "run_paused":
             state["status"] = "paused"
         elif t == "node_done":

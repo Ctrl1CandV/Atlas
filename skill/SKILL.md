@@ -61,7 +61,9 @@ A `coding_agent` requires an existing `workdir`. YAML does not expand `${ATLAS_H
 
 ## YAML contract
 
-Top-level fields: `name`, optional `description`, optional `meta`, `nodes`, optional `entry`, `edges`, and optional `guards`. Set `meta.title` for a human-friendly display name (e.g. Chinese) and `meta.kind: custom` so the Web list badges the graph as custom; the file id stays ASCII for safe cross-platform paths.
+Top-level fields: `name`, optional `description`, optional `meta`, `nodes`, optional `entry`, `edges`, optional `guards`, and optional `summary`. Set `meta.title` for a human-friendly display name (e.g. Chinese) and `meta.kind: custom` so the Web list badges the graph as custom; the file id stays ASCII for safe cross-platform paths.
+
+- Optional `summary: {model, prompt_hint?}` adds one summarizer call before the run finishes (S1): it reviews each node's work from the ledger, its cost is guarded like any other call, its output is a write-once artifact plus a `run_summary_written` event, and a summary failure never changes the run's terminal state. Terminal runs also get a zero-cost finale card in the Web run page (pure ledger derivation, no LLM).
 
 - Node fields: `id`, closed `type` (`llm`, `research`, `coding_agent`, `human`), `prompt`, and `consumes`.
 - `llm`: `model`, `fallback`, `thinking`, `max_output_tokens`, `temperature`, `seed`, `timeout_s`, `retry`, `output_schema`, `route_field`.

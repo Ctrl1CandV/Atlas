@@ -36,7 +36,7 @@ from atlas.engine import (RunConflictError, RunNotFoundError, acquire_run_lock,
                           validate_interrupted_run_locked)
 from atlas.events import EventReader, fold_events
 from atlas import launcher
-from atlas.runs import derive_run_status, list_run_summaries
+from atlas.runs import (build_finale, derive_run_status, list_run_summaries)
 from atlas.integrity import TASK_MAX_BYTES
 from atlas.spec import SpecError, spec_from_snapshot, spec_from_yaml_file
 from atlas.thinking import load_capabilities, model_capability
@@ -611,7 +611,9 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                 "cost_warnings": cost_warnings,
                 "effective_workflow": effective_workflow,
                 "failed_error": next((e.get("error") for e in reversed(events)
-                                      if e["type"] == "run_failed"), None)}
+                                      if e["type"] == "run_failed"), None),
+                # S1 终局视图:与 MCP atlas_get_run 同一构建函数,纯账本派生
+                "finale": build_finale(events, runs_dir / rid)}
 
     @app.get("/api/runs/{rid}/events")
     def stream_events(rid: str, after: int = 0):
