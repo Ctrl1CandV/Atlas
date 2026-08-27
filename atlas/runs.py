@@ -1,28 +1,27 @@
 # -*- coding: utf-8 -*-
 """Run lifecycle views derived from the ledger plus live controller/lock evidence."""
 import json
+import os
+import shutil
+import sys
+import time
 from pathlib import Path
 
 from atlas.costs import fold_cost_accounting
-from atlas.engine import (RunConflictError, acquire_run_lock,
-                          release_run_lock)
+from atlas.engine import (RunConflictError, RunNotFoundError,
+                          acquire_run_lock, release_run_lock)
 from atlas.spec import SpecError
 from atlas.events import EventReader, fold_events
 from atlas.spec import spec_from_snapshot, spec_to_snapshot
 
 
-def derive_run_status(records: list[dict], *, run_id: str, runs_root: Path,
-                      active_controller: bool = False) -> str:
-    """Return the dynamic run status without persisting synthetic events.
-
-    A persisted ``running`` status becomes ``interrupted`` only when the caller
-    has no active local controller and the stable per-run OS lock is provably
-    free. Held locks and all probe errors fail closed as ``running``.
-    """
-    persisted = fold_events(records)["status"]
+def _resolve_live_status(persisted: str, *, run_id: str, runs_root: Path,
+                         active_controller: bool = False) -> str:
+    """从**已算出的持久状态**解析对外可见状态(LIST 索引与 derive 共用):
+    非 running 原样透出;持久 running 且无活跃 controller 时锁探针裁决
+    interrupted/running(fail-closed 方向与原实现一致)。"""
     if persisted != "running" or active_controller:
         return persisted
-
     acquired = False
     try:
         acquire_run_lock(run_id, runs_root=Path(runs_root))
@@ -35,6 +34,19 @@ def derive_run_status(records: list[dict], *, run_id: str, runs_root: Path,
         if acquired:
             release_run_lock(run_id, runs_root=Path(runs_root))
     return "interrupted"
+
+
+def derive_run_status(records: list[dict], *, run_id: str, runs_root: Path,
+                      active_controller: bool = False) -> str:
+    """Return the dynamic run status without persisting synthetic events.
+
+    A persisted ``running`` status becomes ``interrupted`` only when the caller
+    has no active local controller and the stable per-run OS lock is provably
+    free. Held locks and all probe errors fail closed as ``running``.
+    """
+    return _resolve_live_status(fold_events(records)["status"],
+                                run_id=run_id, runs_root=runs_root,
+                                active_controller=active_controller)
 
 
 def _recap_text(path_str, *, cap: int = 200) -> str:
@@ -191,6 +203,51 @@ def build_run_summary(run_id: str, *, runs_root: Path) -> dict:
     }
 
 
+_INDEX_FILENAME = ".runs-index.json"
+_INDEX_VERSION = "p10-index-v1"
+
+
+def _events_fingerprint(events_path: Path) -> list:
+    """账本字节指纹:append-only 契约保证 size+mtime_ns 变化 ⇔ 出现新事件。
+    stat 成本 O(1),替代整本重读——这是索引存在的前提。"""
+    st = events_path.stat()
+    return [st.st_size, st.st_mtime_ns]
+
+
+def _load_runs_index(root: Path) -> dict:
+    """可丢弃缓存读取:缺失/损坏/版本不符一律按空处理(重建由调用方
+    完成)。事件仍是唯一真相,索引错顶多多读几次账本,绝不错报。"""
+    path = root / _INDEX_FILENAME
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("version") != _INDEX_VERSION:
+            return {}
+        runs = data.get("runs")
+        return runs if isinstance(runs, dict) else {}
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        print(f"[atlas] 运行索引 {_INDEX_FILENAME} 损坏,忽略并重建",
+              file=sys.stderr)
+        return {}
+
+
+def _save_runs_index(root: Path, index: dict) -> None:
+    """原子写回;失败不影响列表结果(缓存可丢),向 stderr 记账。"""
+    try:
+        (root / ".trash").mkdir(parents=True, exist_ok=True)
+        tmp = root / ".trash" / (_INDEX_FILENAME + ".partial")
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump({"version": _INDEX_VERSION, "runs": index}, handle,
+                      ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, root / _INDEX_FILENAME)
+    except OSError as exc:
+        print(f"[atlas] 运行索引写回失败(仅影响下次列表速度):{exc}",
+              file=sys.stderr)
+
+
 def list_run_summaries(runs_root: Path, *, limit: int = 20,
                        cursor: str | None = None,
                        active_ids: set[str] | None = None) -> dict:
@@ -199,10 +256,17 @@ def list_run_summaries(runs_root: Path, *, limit: int = 20,
     cursor 语义:传上一页的 next_cursor,返回严格小于它的后续条目。
     active_ids 是当前进程的活跃 controller 集合(launcher.REGISTRY),
     用于 interrupted 动态判定的 fail-closed 方向修正。
+
+    P10:每个条目的 fold 结果缓存在 .runs-index.json(键=run_id,值带
+    events.jsonl 的 size+mtime 指纹);指纹不符/缺失才整本重读。动态
+    interrupted 判定永远不走缓存——liveness 探针每次现查。索引是纯
+    加速:损坏即重建,列表结果与 full-fold 逐字段一致。
     """
     root = Path(runs_root)
     active = active_ids or set()
     entries: list[tuple[str, dict]] = []
+    index = _load_runs_index(root) if root.exists() else {}
+    dirty = False
     if root.exists():
         for d in sorted(root.iterdir(), reverse=True):
             name = d.name
@@ -210,25 +274,60 @@ def list_run_summaries(runs_root: Path, *, limit: int = 20,
                 continue
             if cursor is not None and name >= cursor:
                 continue
-            if not (d / "events.jsonl").exists():
+            events_path = d / "events.jsonl"
+            if not events_path.exists():
                 continue
-            events = EventReader(d / "events.jsonl").all()
-            if not events:
-                continue
-            folded = fold_events(events)
-            status = derive_run_status(
-                events, run_id=name, runs_root=root,
-                active_controller=name in active)
+            cache = index.get(name)
+            graph = persisted = started = None
+            nodes_done: list = []
+            fp = None
+            try:
+                fp = _events_fingerprint(events_path)
+            except OSError:
+                pass   # 竞态窗口(如 retention 正隔离):下轮列表自然收敛
+            if fp is not None and isinstance(cache, dict) \
+                    and cache.get("fp") == fp \
+                    and all(k in cache for k in
+                            ("graph", "persisted", "nodes_done", "started")):
+                graph = cache["graph"]
+                persisted = cache["persisted"]
+                nodes_done = list(cache["nodes_done"])
+                started = cache["started"]
+            else:
+                events = EventReader(events_path).all()
+                if not events:
+                    continue
+                folded = fold_events(events)
+                graph = folded["graph"]
+                persisted = folded["status"]
+                nodes_done = folded["nodes_done"]
+                started = next((e["ts"] for e in events
+                                if e["type"] == "run_started"), None)
+                if fp is not None:
+                    index[name] = {"fp": fp, "graph": graph,
+                                   "persisted": persisted,
+                                   "nodes_done": nodes_done,
+                                   "started": started}
+                    dirty = True
             entries.append((name, {
                 "run_id": name,
-                "graph": folded["graph"],
-                "status": status,
-                "nodes_done": folded["nodes_done"],
-                "started": next((e["ts"] for e in events
-                                 if e["type"] == "run_started"), None),
+                "graph": graph,
+                "status": _resolve_live_status(
+                    persisted, run_id=name, runs_root=root,
+                    active_controller=name in active),
+                "nodes_done": nodes_done,
+                "started": started,
             }))
             if len(entries) >= max(1, limit):
                 break
+    # 剪枝必须对照 runs_root 的**全量**当前成员(分页的 seen 只覆盖
+    # 游标之后的片段,不能作为删除依据)
+    live_ids = ({name for name, _ in _scan_run_dirs(root)}
+                if root.exists() else set())
+    if dirty or set(index) - live_ids:
+        for stale in set(index) - live_ids:
+            del index[stale]
+        _save_runs_index(root, index)
     next_cursor = entries[-1][0] if len(entries) == max(1, limit) else None
     return {
         "runs": [entry for _, entry in entries],
@@ -363,3 +462,292 @@ def precheck_imports(*, imports_spec, runs_root: Path) -> None:
                 f"导入源 {imp.run!r} 持久状态是 {status!r}:只有静稳终态"
                 f"({', '.join(_IMPORTABLE_STATUSES)} 除 running 外)可作为"
                 f"导入来源;运行中/中断的 run 拒绝引用")
+
+
+# ─────────────────────────── P10 retention / star / 删除执行 ───────────────────────────
+
+# 与 Web DELETE 端点同一口径:只有这三个持久终态可删;running/paused/
+# interrupted 永不自动删(P10 保护名单),star 标记同样挡刀。
+_DELETABLE_STATUSES = ("done", "failed", "cancelled")
+_STAR_FILENAME = "star.json"
+_RETENTION_MAX_RUNS_ENV = "ATLAS_RETENTION_MAX_RUNS"
+_RETENTION_MAX_AGE_DAYS_ENV = "ATLAS_RETENTION_MAX_AGE_DAYS"
+
+
+class RunNotDeletable(Exception):
+    """run 因终态不符或 star 标记而拒绝删除;reason ∈ {status, starred}。"""
+
+    def __init__(self, run_id: str, reason: str, detail: str = "") -> None:
+        self.run_id = run_id
+        self.reason = reason
+        super().__init__(
+            f"运行 {run_id!r} 不可删除({reason})"
+            + (f":{detail}" if detail else ""))
+
+
+def is_sharing_violation(exc: OSError) -> bool:
+    """Windows 文件占用/共享冲突;调用方映射为可重试路径。"""
+    return getattr(exc, "winerror", None) in (5, 32, 33)
+
+
+def rmtree_no_follow(path: Path) -> None:
+    """删除 tombstone,但绝不沿 symlink/junction 进入运行目录之外。"""
+    if path.is_symlink():
+        path.unlink()
+        return
+    if path.is_junction():
+        path.rmdir()
+        return
+    for root, dirs, _files in os.walk(path, topdown=True, followlinks=False):
+        root_path = Path(root)
+        for name in list(dirs):
+            child = root_path / name
+            if child.is_symlink():
+                child.unlink()
+                dirs.remove(name)
+            elif child.is_junction():
+                child.rmdir()
+                dirs.remove(name)
+    shutil.rmtree(path)
+
+
+def star_marker_path(runs_root: Path, run_id: str) -> Path:
+    return Path(runs_root) / run_id / _STAR_FILENAME
+
+
+def has_star(runs_root: Path, run_id: str) -> bool:
+    return star_marker_path(runs_root, run_id).is_file()
+
+
+def set_star(run_id: str, *, runs_root: Path, note: str = "") -> dict:
+    """P10 write-once star 标记:一旦存在拒绝覆写(改注记走删除重建,
+    而删除又被 star 挡住——取消 star 是显式手工动作 rm 该文件,不设 API,
+    防止自动化误清保护标记)。任何有账本的 run 都可 star(含 running:
+    先标记再跑长任务正是典型用法)。"""
+    _check_like_run_id(run_id)
+    run_dir = Path(runs_root) / run_id
+    if not (run_dir / "events.jsonl").is_file():
+        raise RunNotFoundError(f"run {run_id!r} 不存在(没有 events.jsonl)")
+    marker = star_marker_path(runs_root, run_id)
+    if marker.exists():
+        raise FileExistsError(f"run {run_id!r} 已有 star 标记(write-once)")
+    payload = {"starred_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+               "note": note}
+    tmp = marker.with_suffix(".json.partial")
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, marker)
+    finally:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+    return payload
+
+
+def read_star(run_id: str, *, runs_root: Path) -> dict | None:
+    marker = star_marker_path(runs_root, run_id)
+    if not marker.is_file():
+        return None
+    try:
+        return json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        # 标记文件存在即保护成立;内容损坏如实报缺失但不放行删除
+        return {"corrupt": True}
+
+
+def isolate_and_delete_run(run_id: str, *, runs_root: Path) -> dict:
+    """P10 共享删除执行器(Web DELETE 端点与 retention sweep 同一实现)。
+
+    合同:持权威 stable lock → 同卷 replace 进 .trash tombstone →
+    no-follow 清理;tombstone 残留由相同调用重试完成,绝不复活成 run;
+    非 {done,failed,cancelled} 终态或带 star 标记的 run 在锁内拒删。
+    运行中锁被占 → RunConflictError 当场失败(retention 不等待)。
+    """
+    _check_like_run_id(run_id)
+    runs_root = Path(runs_root)
+    run_dir = runs_root / run_id
+    trash_dir = runs_root / ".trash"
+    tombstone = trash_dir / run_id
+    try:
+        acquire_run_lock(run_id, runs_root=runs_root)
+    except RunConflictError as exc:
+        raise RunConflictError(
+            f"运行 {run_id!r} 正被其他操作占用(.locks),请稍后重试") from exc
+    try:
+        # 清理失败留下的 tombstone 可由相同调用重试,但绝不恢复成 run。
+        if tombstone.exists():
+            if run_dir.exists():
+                raise RuntimeError(
+                    f"运行 {run_id!r} 同时存在活动目录和删除 tombstone")
+        else:
+            events_path = run_dir / "events.jsonl"
+            if not events_path.is_file():
+                raise RunNotFoundError(f"没有这个运行:{run_id}")
+            records = EventReader(events_path).all()
+            if not records:
+                raise RunNotFoundError(f"没有这个运行:{run_id}")
+            status = fold_events(records)["status"]
+            if status not in _DELETABLE_STATUSES:
+                raise RunNotDeletable(
+                    run_id, "status",
+                    f"当前状态 {status!r};只有 done/failed/cancelled 可以删除")
+            if has_star(runs_root, run_id):
+                raise RunNotDeletable(run_id, "starred", "star 标记的运行受保护")
+            trash_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                run_dir.replace(tombstone)
+            except OSError as exc:
+                if is_sharing_violation(exc):
+                    raise RunConflictError(
+                        f"运行 {run_id!r} 的文件仍被占用,请稍后重试") from exc
+                raise RuntimeError(
+                    f"隔离运行 {run_id!r} 失败:{exc}") from exc
+        try:
+            rmtree_no_follow(tombstone)
+        except OSError as exc:
+            if is_sharing_violation(exc):
+                raise RunConflictError(
+                    f"运行 {run_id!r} 已隔离但文件仍被占用,可重试删除") from exc
+            raise RuntimeError(
+                f"运行 {run_id!r} 已隔离但清理失败,可重试:{exc}") from exc
+        return {"deleted": run_id}
+    finally:
+        release_run_lock(run_id, runs_root=runs_root)
+
+
+def _check_like_run_id(run_id: str) -> None:
+    from atlas.spec import _NODE_ID_RE   # 同一字符白名单复用
+    if not isinstance(run_id, str) or not _NODE_ID_RE.match(run_id):
+        raise ValueError(f"非法 run id:{run_id!r}")
+
+
+def _scan_run_dirs(runs_root: Path) -> list[tuple[str, Path]]:
+    root = Path(runs_root)
+    out: list[tuple[str, Path]] = []
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue           # .locks / .trash 等治理目录不参与
+        if (entry / "events.jsonl").is_file():
+            out.append((entry.name, entry))
+    return out
+
+
+def select_retention_candidates(runs_root: Path, *, max_runs: int | None = None,
+                                max_age_days: float | None = None,
+                                now: float | None = None,
+                                active_ids=()) -> dict:
+    """P10 候选选择(纯函数,不动磁盘状态):在可删除池里按"最旧优先"
+    挑出超龄者与超出配额者并集。
+
+    决策确定性合同:
+    - 只有持久 fold 为 {done,failed,cancelled} 且无 star、不在
+      active_ids 的 run 进入可删除池(running/paused/interrupted/starred
+      全部保护);
+    - max_runs 是**可删除池内保留的最新 N 条**,保护对象不占配额;
+    - max_age_days 按 started 时间戳相对 now 计算(缺 started 的 run
+      无从判龄,保守归入保护侧——绝不凭空猜年龄);
+    - 两个阈值都给时取两者并集,各自独立判定。
+    """
+    if max_runs is not None and max_runs < 1:
+        raise ValueError("max_runs 必须 ≥1")
+    if max_age_days is not None and max_age_days <= 0:
+        raise ValueError("max_age_days 必须是正数")
+    now = time.time() if now is None else now
+    active = set(active_ids)
+
+    eligible: list[dict] = []          # 可删除池,按 started 升序
+    protected_count = 0
+    for run_id, run_dir in _scan_run_dirs(runs_root):
+        records = EventReader(run_dir / "events.jsonl").all()
+        folded = fold_events(records)
+        started = next((e["ts"] for e in records
+                        if e.get("type") == "run_started"), None)
+        starred = has_star(runs_root, run_id)
+        deletable_status = folded["status"] in _DELETABLE_STATUSES
+        if (not deletable_status or starred or run_id in active
+                or started is None):
+            protected_count += 1
+            continue
+        eligible.append({"run_id": run_id, "started": started})
+
+    eligible.sort(key=lambda item: item["started"])
+    by_age: set[str] = set()
+    if max_age_days is not None:
+        threshold = now - max_age_days * 86400.0
+        for item in eligible:
+            if _parse_ts(item["started"]) < threshold:
+                by_age.add(item["run_id"])
+    over_quota: set[str] = set()
+    if max_runs is not None and len(eligible) > max_runs:
+        evicted = eligible[: len(eligible) - max_runs]   # 最旧的先出池
+        over_quota = {item["run_id"] for item in evicted}
+    candidates = [item["run_id"] for item in eligible
+                  if item["run_id"] in by_age or item["run_id"] in over_quota]
+    return {"candidates": candidates, "eligible": len(eligible),
+            "protected": protected_count}
+
+
+def _parse_ts(ts: str) -> float | None:
+    import datetime as _dt
+    try:
+        parsed = _dt.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return parsed.timestamp()
+
+
+def resolve_retention_config(environ=None) -> dict:
+    """环境变量解析(ATLAS_RETENTION_MAX_RUNS / ATLAS_RETENTION_MAX_AGE_DAYS)。
+    默认全 null = 特性关闭,永不自动删;显式配了才生效。坏值大声失败。"""
+    environ = os.environ if environ is None else environ
+
+    def _int_env(name: str) -> int | None:
+        raw = environ.get(name)
+        if raw is None or raw.strip() == "":
+            return None
+        value = int(raw)          # ValueError 向上抛,坏配置不当静默
+        if value < 1:
+            raise ValueError(f"{name} 必须 ≥1,得到 {value}")
+        return value
+
+    def _float_env(name: str) -> float | None:
+        raw = environ.get(name)
+        if raw is None or raw.strip() == "":
+            return None
+        value = float(raw)        # ValueError 向上抛
+        if value <= 0:
+            raise ValueError(f"{name} 必须是正数,得到 {value}")
+        return value
+
+    return {"max_runs": _int_env(_RETENTION_MAX_RUNS_ENV),
+            "max_age_days": _float_env(_RETENTION_MAX_AGE_DAYS_ENV)}
+
+
+def apply_retention(*, runs_root: Path, active_ids=(), environ=None) -> dict | None:
+    """P10 清扫入口:解析 env 配置 → 选候选 → 逐个调共享执行器。
+
+    未配置(max_runs 与 max_age_days 全空)→ 直接返回 None(永不自动删,
+    这是默认)。单个候选删除失败只记账不中断本轮(下一轮重试),全部结果
+    如实回传给调用方记录——不吞异常,但也不让清理失败毁掉已完成的 run。
+    """
+    config = resolve_retention_config(environ)
+    if config["max_runs"] is None and config["max_age_days"] is None:
+        return None
+    selection = select_retention_candidates(
+        runs_root, max_runs=config["max_runs"],
+        max_age_days=config["max_age_days"], active_ids=active_ids)
+    results: list[dict] = []
+    for run_id in selection["candidates"]:
+        try:
+            isolate_and_delete_run(run_id, runs_root=runs_root)
+            results.append({"run_id": run_id, "deleted": True})
+        except (RunConflictError, RunNotDeletable, RunNotFoundError,
+                OSError, RuntimeError) as exc:
+            results.append({"run_id": run_id, "deleted": False,
+                            "error": f"{type(exc).__name__}: {exc}"})
+    return {**selection, "results": results,
+            "config": {k: v for k, v in config.items()}}

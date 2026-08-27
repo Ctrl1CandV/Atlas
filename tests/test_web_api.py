@@ -17,6 +17,7 @@ from atlas.engine import (acquire_run_lock, execute_graph, release_approval_run_
 from atlas.web import create_app
 import atlas.engine as engine_module
 import atlas.web as web_module
+import atlas.runs as runs_module
 
 from conftest import (GRAPHS, TASK_TEXT, good_review_text, good_writer_text,
                       load_graph, make_registry)
@@ -297,7 +298,7 @@ def test_delete_cleanup_failure_leaves_retryable_hidden_tombstone(tmp_path, monk
     api = create_app(workflows_dir=tmp_path / "workflows", runs_dir=runs,
                      registry_factory=lambda _: make_registry(FakeProvider()),
                      api_only=True)
-    real_rmtree = web_module.shutil.rmtree
+    real_rmtree = runs_module.shutil.rmtree
     calls = 0
 
     def fail_once(path):
@@ -307,7 +308,7 @@ def test_delete_cleanup_failure_leaves_retryable_hidden_tombstone(tmp_path, monk
             raise OSError("cleanup failed")
         real_rmtree(path)
 
-    monkeypatch.setattr(web_module.shutil, "rmtree", fail_once)
+    monkeypatch.setattr(runs_module.shutil, "rmtree", fail_once)
     with TestClient(api, base_url="http://127.0.0.1") as client:
         first = client.delete("/api/runs/cleanup-run", headers=_delete_headers())
         assert first.status_code == 500
@@ -328,14 +329,14 @@ def test_concurrent_duplicate_delete_has_one_success_and_one_404(tmp_path, monke
                      api_only=True)
     entered = threading.Event()
     release = threading.Event()
-    real_rmtree = web_module.shutil.rmtree
+    real_rmtree = runs_module.shutil.rmtree
 
     def blocking_rmtree(path):
         entered.set()
         assert release.wait(timeout=5)
         real_rmtree(path)
 
-    monkeypatch.setattr(web_module.shutil, "rmtree", blocking_rmtree)
+    monkeypatch.setattr(runs_module.shutil, "rmtree", blocking_rmtree)
 
     def request_delete():
         with TestClient(api, base_url="http://127.0.0.1") as client:

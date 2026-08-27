@@ -317,6 +317,7 @@ age/count 决策确定；star 和非终态保护；清理崩溃可重试；索�
 
 - **模块**：`atlas/runs.py` 拆"候选选择"与"删除执行"两步；删除复用 stable run lock、同卷 tombstone、no-follow 清理，禁止直接 `rmtree`；star 是 run 目录内 write-once 标记文件；轻量索引（run_id、状态、时间、star、成本摘要）为可丢弃缓存，损坏即重建，事件仍是唯一真相。
 - **配置**：`max_runs`/`max_age_days` 默认 null（永不自动删）；running/paused/interrupted 与 star 标记永不自动删。
+  - **实施偏差（2026-08-27 已交付）**：清理阈值走环境变量而非图守卫配置（保留治理是目录级运营面,不属于工作流规格）；触发点是"每次图执行完成顺路清扫"与手工 DELETE；索引接线进 `list_run_summaries`(指纹命中即免整本重读),成本摘要列暂未纳入(列表本不展示成本);star 取消无 API(write-once,手工删文件)。
 - **联动**：与账本 16MiB 治理合并设计——retention 是控容量的主路径，分段账本+索引是备选；P7 lineage 引用的源 run 有 import 标记时不自动删（或删除前校验无引用）。
 - **测试**：age/count 决策确定性；star 与非终态保护；清理进程崩溃后可重试且无半删状态；索引与抽样 full fold 一致；P7 lineage 不悬空。
 

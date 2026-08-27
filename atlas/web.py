@@ -36,7 +36,9 @@ from atlas.engine import (RunConflictError, RunNotFoundError, acquire_run_lock,
                           validate_interrupted_run_locked)
 from atlas.events import EventReader, fold_events
 from atlas import launcher
-from atlas.runs import (build_finale, derive_run_status, list_run_summaries)
+from atlas.runs import (RunNotDeletable, build_finale, derive_run_status,
+                        has_star, isolate_and_delete_run, list_run_summaries,
+                        read_star, set_star)
 from atlas.integrity import TASK_MAX_BYTES
 from atlas.spec import SpecError, spec_from_snapshot, spec_from_yaml_file
 from atlas.thinking import load_capabilities, model_capability
@@ -61,32 +63,6 @@ def _check_id(value: str, what: str) -> str:
     if not _SAFE_ID_RE.match(value) or ".." in value:
         raise HTTPException(404, f"没有这个{what}:{value!r}")
     return value
-
-
-def _is_sharing_violation(exc: OSError) -> bool:
-    """Windows 文件占用/共享冲突；调用方映射为可重试响应。"""
-    return getattr(exc, "winerror", None) in (5, 32, 33)
-
-
-def _rmtree_no_follow(path: Path) -> None:
-    """删除 tombstone，但绝不沿 symlink/junction 进入运行目录之外。"""
-    if path.is_symlink():
-        path.unlink()
-        return
-    if path.is_junction():
-        path.rmdir()
-        return
-    for root, dirs, _files in os.walk(path, topdown=True, followlinks=False):
-        root_path = Path(root)
-        for name in list(dirs):
-            child = root_path / name
-            if child.is_symlink():
-                child.unlink()
-                dirs.remove(name)
-            elif child.is_junction():
-                child.rmdir()
-                dirs.remove(name)
-    shutil.rmtree(path)
 
 
 def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
@@ -422,59 +398,53 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
             "status": r["status"],
             "nodes_done": len(r["nodes_done"]),
             "started": r["started"],
+            # P10:star 保护标记(有标记的 run 拒绝删除/retention)
+            "star": has_star(runs_dir, r["run_id"]),
         } for r in listing["runs"]]
 
-    def _delete_run_locked(rid: str):
-        """持权威运行锁将终态 run 原子隔离，再清理 tombstone。"""
+    @app.post("/api/runs/{rid}/star")
+    def star_run(rid: str, body: dict | None = None):
+        """P10 write-once star 标记:任何有账本的 run(含 running)可标,
+        已标 → 409;取消 star 无 API(手工删文件),防自动化误清保护。"""
         _check_id(rid, "运行")
-        run_dir = runs_dir / rid
-        trash_dir = runs_dir / ".trash"
-        tombstone = trash_dir / rid
+        body = body or {}
+        unknown = set(body) - {"note"}
+        if unknown:
+            raise HTTPException(400, f"未知字段:{sorted(unknown)}")
+        note = body.get("note", "")
+        if not isinstance(note, str):
+            raise HTTPException(400, "note 必须是字符串")
         try:
-            acquire_run_lock(rid, runs_root=runs_dir)
+            payload = set_star(rid, runs_root=runs_dir, note=note)
+        except RunNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except FileExistsError as exc:
+            raise HTTPException(409, f"运行 {rid!r} 已有 star 标记") from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"starred": rid, **payload}
+
+    @app.get("/api/runs/{rid}/star")
+    def get_star(rid: str):
+        _check_id(rid, "运行")
+        if not (runs_dir / rid / "events.jsonl").is_file():
+            raise HTTPException(404, f"没有这个运行:{rid}")
+        return read_star(rid, runs_root=runs_dir)
+
+    def _delete_run_locked(rid: str):
+        """HTTP 映射层:删除语义全部在 runs.isolate_and_delete_run(P10 起
+        与 retention sweep 共用同一实现),这里只做错误→状态码翻译。"""
+        _check_id(rid, "运行")
+        try:
+            return isolate_and_delete_run(rid, runs_root=runs_dir)
         except RunConflictError as exc:
-            raise HTTPException(
-                423, f"运行 {rid!r} 正被其他操作占用(.locks),请稍后重试") from exc
-
-        try:
-            # 清理失败留下的 tombstone 可由相同 DELETE 重试，但绝不恢复成 run。
-            if tombstone.exists():
-                if run_dir.exists():
-                    raise HTTPException(
-                        500, f"运行 {rid!r} 同时存在活动目录和删除 tombstone")
-            else:
-                events_path = run_dir / "events.jsonl"
-                if not events_path.is_file():
-                    raise HTTPException(404, f"没有这个运行:{rid}")
-                events = EventReader(events_path).all()
-                if not events:
-                    raise HTTPException(404, f"没有这个运行:{rid}")
-                status = fold_events(events)["status"]
-                if status not in ("done", "failed", "cancelled"):
-                    raise HTTPException(
-                        409, f"运行 {rid!r} 当前状态为 {status!r};"
-                        "只有 done/failed/cancelled 的运行可以删除")
-                trash_dir.mkdir(parents=True, exist_ok=True)
-                try:
-                    run_dir.replace(tombstone)
-                except OSError as exc:
-                    if _is_sharing_violation(exc):
-                        raise HTTPException(
-                            423, f"运行 {rid!r} 的文件仍被占用,请稍后重试") from exc
-                    raise HTTPException(
-                        500, f"隔离运行 {rid!r} 失败:{exc}") from exc
-
-            try:
-                _rmtree_no_follow(tombstone)
-            except OSError as exc:
-                if _is_sharing_violation(exc):
-                    raise HTTPException(
-                        423, f"运行 {rid!r} 已隔离但文件仍被占用,可重试删除") from exc
-                raise HTTPException(
-                    500, f"运行 {rid!r} 已隔离但清理失败,可重试:{exc}") from exc
-            return {"deleted": rid}
-        finally:
-            release_run_lock(rid, runs_root=runs_dir)
+            raise HTTPException(423, str(exc)) from exc
+        except RunNotFoundError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except RunNotDeletable as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (RuntimeError, OSError) as exc:
+            raise HTTPException(500, str(exc)) from exc
 
     @app.delete("/api/runs/{rid}")
     def delete_run(rid: str):

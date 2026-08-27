@@ -179,6 +179,8 @@ export interface RunListItem {
   status: RunStatus;
   nodes_done: number;
   started: string | null;
+  /** P10:star 保护标记(有标记的 run 拒绝删除/retention 清扫) */
+  star?: boolean;
 }
 
 export interface ModelAttempt {

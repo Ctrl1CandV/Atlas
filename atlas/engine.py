@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -1291,6 +1292,25 @@ def new_run_id() -> str:
     return time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
 
 
+def _post_run_retention_sweep(runs_root: Path) -> None:
+    """P10 清扫钩子(默认关闭=env 未配置时零成本直返)。清扫失败只向
+    stderr 大声记账,绝不影响刚完成的 run 的结果语义;单个候选删除失败
+    留给下一轮重试(tombstone 语义保证重试安全)。"""
+    try:
+        from atlas.runs import apply_retention   # 函数内导入:runs 反向依赖 engine
+        report = apply_retention(runs_root=Path(runs_root))
+    except Exception as exc:
+        print(f"[atlas] P10 retention 清扫失败(不影响本次运行):{exc!r}",
+              file=sys.stderr)
+        return
+    if report is None:
+        return
+    failed = [r for r in report["results"] if not r["deleted"]]
+    if failed:
+        print(f"[atlas] P10 retention 有 {len(failed)} 个候选未清掉"
+              f"(下一轮重试):{failed}", file=sys.stderr)
+
+
 def execute_graph(
     spec: WorkflowSpec,
     *,
@@ -1438,10 +1458,14 @@ def execute_graph(
 
         initial_artifacts = {"task": task_ref.as_dict()}
         initial_artifacts.update(imported_artifacts)
-        return _invoke(
+        result = _invoke(
             spec, ctx, run_id, entry=prepared.entry, checkpoint=checkpoint,
             task_input={"task": task, "artifacts": initial_artifacts},
         )
+        # P10:本次执行收尾后顺路清扫(默认 env 未配置=零成本直返);
+        # 失败只记账不影响已完成 run。
+        _post_run_retention_sweep(Path(runs_root))
+        return result
     finally:
         release_run_lock(run_id, runs_root=runs_root)
 

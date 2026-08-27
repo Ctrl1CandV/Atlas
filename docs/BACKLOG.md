@@ -12,7 +12,8 @@
 - **P3 异常 taxonomy + 节点 on_error** ✅（2026-08-26）：`atlas/exc.py` 分类层（治理永不可吞，未登记 fail-closed）；节点级 `on_error: stop/continue/branch`（默认零变化、默认值不进指纹）；branch 走保留键 `__failed__`（校验期强制）；软失败写 write-once 错误产物 + `node_failed_soft`，fold 显式忽略（删事件回归锁定）；Web/MCP/dry-run 同源展示。
 - **P7 artifact import + invocation hash** ✅（2026-08-27）：imports 字节复制（源锁内校验+原子落盘+写后复验）、`artifact_imported` lineage、`invocation_sha256` 入账（node_started）、invocation 全等自动 skip（`node_imported_reused`）、删源不影响克隆、缺源/运行中/锁竞争全部确定性 fail-closed、dry-run 明示导入清单。
 - **P13 fork 与失效闭包** ✅（2026-08-27）：图级 `fork: {run}`；静态重放两侧 invocation 身份得 changed 集，闭包=changed+全部后代（条件边计入、循环按 SCC 整体失效、join 命中 changed 分支必重跑）；闭包内禁止显式 imports；闭包外合成导入走同一 P7 准入链；`fork_planned` 全量入账、fork.run 进指纹、dry-run 预演、五类图+failed/paused 源测试。顺带修复：P7 skip 计划的运行时输入复核（预测过期委托真实执行）与多节点源产物错配（兜底分支核对事件节点即生产者）。
-- **体验债小件打包 E** ✅（2026-08-26）：预留额展示、跨入口运行列表轮询、完整账本下载入口(`GET /api/runs/{id}/events.jsonl`)、agents.json 状态卡片(只读,预检事实含失败原因)、seed/temperature 回显核对(node_done `param_audit`:echo_ok/not_echoed/mismatch)、`--help` 契约误判报错带版本、`_resume_graph_replay` 收敛为显式 `_test_only` 测试专用、`_NODE_FACTORIES` 统一分发。熔断持久化与 16MiB 分段账本随 P10;max_parallelism 与 D4 retry 默认策略待 RFC 裁决。
+
+- **P10 retention/star/run index** ✅（2026-08-27）：env 双变量默认全 null 永不自动删；候选选择纯函数（done/failed/cancelled+无 star 才进池,保护对象不占配额,数量留最新 N/年龄严格更老/双阈值并集）；共享删除执行器(stable lock+.trash 同卷隔离+no-follow,tombstone 重试),Web DELETE 与清扫同一实现；star write-once 标记(POST 端点可带注记,取消无 API)+列表 flag；`.runs-index.json` 轻量索引(指纹命中/变更单账本重读/全量成员剪枝/损坏重建),动态 interrupted 判定不走缓存,与 full-fold 一致契约测试。engine 完成后顺路清扫,失败大声记账不影响本次 run。- **体验债小件打包 E** ✅（2026-08-26）：预留额展示、跨入口运行列表轮询、完整账本下载入口(`GET /api/runs/{id}/events.jsonl`)、agents.json 状态卡片(只读,预检事实含失败原因)、seed/temperature 回显核对(node_done `param_audit`:echo_ok/not_echoed/mismatch)、`--help` 契约误判报错带版本、`_resume_graph_replay` 收敛为显式 `_test_only` 测试专用、`_NODE_FACTORIES` 统一分发。熔断持久化与 16MiB 分段账本随 P10;max_parallelism 与 D4 retry 默认策略待 RFC 裁决。
 - **P2 残余强化 D1–D3** ✅（2026-08-26）：Web 取消按钮（running/paused 可见,确认后走 `/api/runs/{id}/cancel`,HTTP 契约 403/404/409/paused 直写有测试）；`local_cli` 取消终止整棵进程树（watcher 轮询 cancel.request → taskkill /T /F 或 killpg,真实孙进程 kill 测试,树杀失败保持 AgentCliError fail-closed）；`--max-budget-usd ≤0` 派发前拒绝（有效映射/缺参预检/超支报告已有测试）。**D4(agent retry RFC 决策)未含——等用户裁决后再实施。**
 - **S1 终局可视化 + 总结节点** ✅（2026-08-26）：终态 run 顶部零成本终局卡片（纯账本派生,Web/MCP 同源 `build_finale`）;图级 opt-in `summary: {model, prompt_hint?}` 在 run_done 前一次总结调用,write-once 产物 + `run_summary_written`,失败记 `run_summary_failed` 不改终态,成本受 `max_cost_usd` 约束,dry-run 明示;**不做离线导出**（用户定案）。
 
@@ -26,7 +27,7 @@
 | 第二批b | S1 | 执行终局可视化与总结节点 | run 结束后 Web 顶部"终局总结"卡片（零成本、纯账本派生）+ opt-in 总结节点（最终结果+各节点工作回顾，write-once 产物+事件）；2026-08-23 用户定案，**不做离线报告导出**（原 Stage E 条目移除） | 5–8 人日 | 中 | P4 的 summary builder（✅ 已完成,见上） |
 | 第三批 | P7 | artifact import + invocation hash | 新 run 可安全复用旧 run 的昂贵上游产物（字节复制 + lineage 事件）；执行身份相同可自动 skip | 7–11 人日 | **高** | 现有 SHA 合同（✅ 已完成,见上） |
 | 第三批 | P13 | fork 与失效闭包 | 改一个节点的 prompt/model 后只重跑它和受影响后代，兄弟分支结果保留 | 4–7 人日 | 高 | P7（✅ 已完成,见上） |
-| 第三批 | P10 | retention / star / run index | 按数量/年龄自动清理运行（star 保护），轻量索引加速列表 | 4–7 人日 | 中 | P7 先行 |
+| 第三批 | P10 | retention / star / run index | 按数量/年龄自动清理运行（star 保护），轻量索引加速列表 | 4–7 人日 | 中 | P7（✅ 已完成,见上） |
 | 第三批 | P11 | request_changes / routed approval | 审批从 approve/reject 二值扩展为三分支："要求修改"成为有审计、受循环上限约束的控制流 | 4–7 人日 | 中 | 现有审批校验 |
 
 ## Stage E（独立价值项，各自 RFC）
