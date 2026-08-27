@@ -90,13 +90,14 @@ uv run atlas-web
 - Web 只绑回环地址，没有多用户认证；不要暴露到网络。
 - 编程 agent 通过 Claude CLI 以**当前用户身份下的宿主进程**运行（需 `config/agents.json` 显式 `"runner": "local_cli"`，供应商须提供 `anthropicBaseUrl` 与凭据）。目录副本不是 OS 沙箱：进程理论上能访问当前用户有权访问的任何路径。`allowed_paths`、回环绑定都不是安全边界。Atlas 不写原目录，diff 由冻结 baseline 的普通文件字节清单生成完整文本 unified diff，二进制变更大声失败。
 - `allow_web: false` 只是不授予 Claude CLI 的 WebSearch/WebFetch 工具；可写 agent 有 Bash，仍可能联网。`max_turns` 是校验过的规格字段，但当前 Claude CLI 没有硬轮次参数，硬限制来自 deadline 与已配置预算。
+- research/coding_agent 节点缺省不自动重跑（retry 缺省 0）；显式声明 `retry: N` 后，dry-run 必须出现放大风险警告。
 - 成本帽只在费率已知的调用上精确生效；费率未知时保守占满剩余预算，但不能证明供应商实际账单没超。
 - "多厂商辩论"等名称只表达拓扑；只有绑定了真实不同的供应商，意见才独立。
 - 审批证据绑定 `baseline_digest`、`result_digest` 与 `patch_digest` 三摘要；可写 coding agent 与 `allowed_paths` 的组合会在创建 run 前被拒绝（Claude `--add-dir` 不是只读边界）。
 
 ## 测试与验证
 
-2026-08-27 基线：Python 测试 **602 passed**（另有 5 个真实供应商测试默认排除、需主动运行且可能收费）；Web 测试 22 passed、lint 0 告警、生产构建通过；公开 CI 在 main 分支双 job 通过。10 节点自定义图经 MCP HTTP 端点真实运行全链路通过（含人工审批，见上文真实案例）。
+2026-08-27 基线：Python 测试 **610 passed**（另有 5 个真实供应商测试默认排除、需主动运行且可能收费）；Web 测试 22 passed、lint 0 告警、生产构建通过；公开 CI 在 main 分支双 job 通过。10 节点自定义图经 MCP HTTP 端点真实运行全链路通过（含人工审批，见上文真实案例）。
 
 2026-08-19 发布基线：Python 测试 **427 passed**；Web 测试 22 passed、lint 0 告警、生产构建通过；六个示例工作流严格离线 validate/dry-run，0 次供应商调用；发布 sdist 100 个条目、0 扫描发现。数字对应当时的源状态，详见 [`docs/STATUS.md`](docs/STATUS.md)。
 

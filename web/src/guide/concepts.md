@@ -29,6 +29,8 @@
 
 生产执行要求 `config/agents.json` 显式 `runner: local_cli`，且所选模型的供应商配置 `anthropicBaseUrl` 与当前凭据；默认 fail-closed。`allow_web` 默认 `false`，开启时只增加 `WebSearch`/`WebFetch`，不是网络隔离；coding `Bash` 仍可能联网。当前 Claude CLI 不支持硬轮次参数，因此 `max_turns` 是保留的规格元数据，硬限制由 deadline 和已配置预算承担。
 
+research/coding_agent 节点缺省不自动重跑（retry 缺省 0）；显式声明 `retry: N` 后，dry-run 必须出现放大风险警告——每次重跑都会把整份 CLI 开销原样复制，警告会说明重跑次数与成本约束有无（未设 `max_cost_usd` 就是没有任何总量约束）。
+
 ## workdir 事实
 
 解析器要求目录已存在，但不会展开 `${ATLAS_HOME}`。示例的相对 `demo-project` 仅在从源码根目录启动时解析正确；其他场景用本次运行覆盖传入绝对路径。Atlas 不写原目录；执行前冻结 baseline，随后比较 baseline/result 的普通文件字节清单并生成完整文本 unified diff。采集不执行 Git add/filter/hook/attributes/textconv/external diff；二进制变更 fail-loud，审批绑定 `baseline_digest`、`result_digest` 与 `patch_digest`。

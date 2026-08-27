@@ -91,12 +91,13 @@ First start generates local configuration from templates (never overwriting exis
 - The Web binds to loopback only, with no multi-user auth; do not expose it.
 - Coding agents run through Claude CLI as a **same-user host process** (requires explicit `"runner": "local_cli"` in `config/agents.json`; the provider must supply `anthropicBaseUrl` and credentials). A directory copy is not an OS sandbox: the process can theoretically reach every host path available to that user. `allowed_paths` and loopback binding are not security boundaries. Atlas does not write the original directory; diffs are complete textual unified diffs generated from frozen-baseline ordinary-file byte manifests, and binary changes fail loudly. Approval evidence binds `baseline_digest`, `result_digest`, and `patch_digest`.
 - `allow_web: false` only withholds Claude CLI's WebSearch/WebFetch tools; a writable agent has Bash and may still reach the network. `max_turns` remains a validated spec field, but the current Claude CLI has no hard turn-count parameter; hard limits come from deadlines and configured budgets.
+- Research and coding-agent nodes never auto-rerun by default (`retry` defaults to 0); once `retry: N` is declared explicitly, dry-run must surface the amplification-risk warning.
 - Cost caps are exact only where prices are known; unknown prices conservatively consume remaining budget locally but cannot prove the provider's actual bill stayed under the cap.
 - Names like "multi-vendor debate" describe topology only; opinions are independent only when genuinely distinct providers are bound.
 
 ## Testing and verification
 
-2026-08-27 baseline: Python tests **602 passed** (plus 5 real-provider tests excluded by default — opt-in and possibly billable); Web tests 22 passed, lint clean, production build OK; public CI passes both jobs on main. A 10-node custom graph ran end-to-end over the MCP HTTP endpoint including human approval (see the real runs above).
+2026-08-27 baseline: Python tests **610 passed** (plus 5 real-provider tests excluded by default — opt-in and possibly billable); Web tests 22 passed, lint clean, production build OK; public CI passes both jobs on main. A 10-node custom graph ran end-to-end over the MCP HTTP endpoint including human approval (see the real runs above).
 
 2026-08-19 release baseline: Python tests **427 passed** (plus 5 real-provider tests excluded by default — opt-in and possibly billable); Web tests 22 passed, lint clean, production build OK; strict offline validate/dry-run of all six example workflows with 0 provider calls; release sdist scanned at 100 entries with 0 findings. These numbers describe that source state; see [`docs/STATUS.md`](docs/STATUS.md).
 

@@ -26,7 +26,7 @@
 | 失败策略（P3） | 治理类异常永不可吞（费用/守卫/取消/deadline/规格/接线/路由/完整性/账本/审批/锁，未登记类型 fail-closed 按治理处理）；内容类失败（候选全部失败，含假成功与超时耗尽）可节点级 `on_error: stop/continue/branch`（默认 stop，旧图零变化，默认值不进指纹）；branch 走保留键 `__failed__`（校验期强制，每源至多一条，可与成功路径边型共存）；continue 拒绝条件出边；下游可消费 `<branch节点>.error`；软失败写 write-once 错误产物 + `node_failed_soft`，fold 显式忽略；__failed__ 路由按「节点最近一次结局」的 route_facts 事实判定（checkpoint 持久化，重入成功后不被残留错误产物误判）；AgentCliError 单独分类、白名单为空；Web/MCP 同源展示错误类与产物入口，dry-run 列出非默认 on_error 节点 |
 | 终局可视化与总结（S1） | 终态 run 顶部零成本终局卡片：每节点一句话回顾（模型/耗时/token/成本/输出首段）+ 时间线，纯账本派生，Web 与 `atlas_get_run` 同源（`build_finale`）；图级 opt-in `summary: {model, prompt_hint?}` 在 run_done 前一次总结调用（进规格指纹与快照），成本走 CostLedger 受 `max_cost_usd` 约束，write-once 产物 + `run_summary_written`；失败记 `run_summary_failed` 不改终态；总结文本标注「LLM 叙述，事实以账本为准」；不做离线报告导出 |
 | 工作流文件管理 | Web 页面可删除工作流；保存走 MCP 的 `expected_sha256` 读-改-写闭环（乐观锁防覆盖） |
-| 零成本预检 | validate 与 dry-run 不调用供应商；`expected_execution_sha256` 可绑定预演与真跑身份 |
+| 零成本预检 | validate 与 dry-run 不调用供应商；`expected_execution_sha256` 可绑定预演与真跑身份；dry-run 对显式 `retry>0` 的 research/coding_agent 节点必现放大风险警告（K，RFC 已实施关闭），Web preview 与 MCP 同源透出 |
 | 可审计运行 | append-only JSONL 事件、write-once 产物、读取时 SHA-256 断言、有效规格快照 |
 | 成本保护（P0min） | 有 `max_cost_usd` 时派发前持久化 reservation；未知费率保守占用剩余预算；无 cap 不虚构金额 |
 | 崩溃恢复（P1） | 动态派生 `interrupted`；只有 interrupted 可 resume；paused 只能 approve/reject |
@@ -61,7 +61,7 @@
 
 2026-08-23 公开 CI 基线（`main` @ `7eac07b`，GitHub Actions）：
 
-- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-27 起为 602 passed，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
+- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-27 批次 K 起为 610 passed，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
 - Ubuntu 兼容性信号 job（`continue-on-error`，明确不支持）同样通过：跨平台 agent CLI 桩修复后它反映真实兼容性。
 - `real-api.yml` 仅手动触发（`environment: real-api` 保护），不计入常规 CI。
 

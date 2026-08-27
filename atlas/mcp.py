@@ -460,11 +460,15 @@ REASONING_OUTPUT_TOKEN_FLOOR = 16384
 
 def _dry_run_warnings(spec, *, provider_cfgs=None, capabilities=None,
                       rates_known_fn=None) -> list[str]:
-    """A2/C1 · dry-run 的醒目警告(建议性信息,不改变准入)。
+    """A2/C1/K · dry-run 的醒目警告(建议性信息,不改变准入)。
 
     只用已探测数据:能力表里没有的模型(A2)或费率表读不到(C1)就不警告,
     不猜。真正的准入失败仍由 prepare_execution fail-closed,这里读不到
     配置时只是少警告,不让渲染失败。
+    K(D4 收官,RFC 2026-08-27 决议):对显式声明 retry>0 的 agent 节点发
+    放大风险组合警告。触发刻意排除 llm——单次 API 调用失败重试近乎免费,
+    warn 会稀释注意力;agent 的执行单元是 CLI 自主多轮循环,重跑一次等于
+    把整份开销原样复制($10.508 事故路径,见 docs/rfcs/agent-retry-budget.md)。
     """
     warnings: list[str] = []
     if provider_cfgs is None:
@@ -529,6 +533,25 @@ def _dry_run_warnings(spec, *, provider_cfgs=None, capabilities=None,
             f"({deduped}):守卫对未知费率会保守占用剩余预算,实测只放行首个"
             "计费节点就拦下后续(2026-08-22 run 20260822-113908-531dab);"
             "填入确认过的 config/pricing.json 单价,或改用结构性约束控本")
+    # K-2:retry>0 的 agent 节点合并成一条列表型警告(同图多命中不刷屏)。
+    # 措辞红线:只提示/警示,不得表述成已阻止(警告不改变任何准入行为)。
+    retry_agents = [n for n in spec.nodes
+                    if n.type in ("research", "coding_agent") and n.retry > 0]
+    if retry_agents:
+        rerun_desc = ", ".join(
+            f"{n.id} 失败后将自动重跑至多 {n.retry} 次" for n in retry_agents)
+        if spec.guards.max_cost_usd is None:
+            cost_note = "该图未设 max_cost_usd:重跑没有任何总量约束"
+        else:
+            cost_note = ("已设 max_cost_usd,但 agent CLI 会话费用不来自费率表:"
+                         "预算按保守口径占用(每次派发前预留剩余预算全额),"
+                         "不能证明实际花费未超帽")
+        warnings.append(
+            f"放大风险提示:agent 节点{rerun_desc}(每次重跑把整份 CLI 开销"
+            f"原样复制,而失败的常见原因是确定性错误);{cost_note}。"
+            "建议去掉 retry,改用 max_iterations / timeout_s / 更便宜模型控本;"
+            "瞬时故障请人工重跑(图的失败分支 on_error/branch 当前仅对 llm "
+            "节点开放,agent 节点失败会终止整图)")
     return warnings
 
 

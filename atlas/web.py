@@ -292,6 +292,8 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
 
         模型未配置(示例在新机器上的正常状态)不是错误:返回
         unconfigured_nodes 清单,图与覆盖仍可预览;运行接口才会拒绝。
+        warnings 与 MCP dry-run 同一构建函数(K:agent retry 放大风险等
+        建议性警告),两个控制面不得各说各话。
         """
         _check_id(wid, "工作流")
         unknown = set(body) - {"node_overrides"}
@@ -310,6 +312,7 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                 execution_sha256 = prepared.execution_sha256
         except Exception as e:
             raise HTTPException(400, f"运行前预览不通过:{e}")
+        from atlas.mcp import _dry_run_warnings
         return {
             "effective_workflow": _workflow_payload(effective.spec, wid),
             "base_spec_sha256": effective.base_fingerprint,
@@ -320,6 +323,7 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
             "unconfigured_nodes": list(effective.unconfigured_nodes),
             "prompt_overridden": list(effective.prompt_overridden),
             "param_defaults": _param_defaults(effective.spec),
+            "warnings": _dry_run_warnings(effective.spec),
         }
 
     # ── 运行 ───────────────────────────────────────────────────

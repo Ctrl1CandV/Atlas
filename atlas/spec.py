@@ -636,7 +636,11 @@ class NodeSpec:
     allow_web: bool | None = None               # agent:默认关，必须在 YAML 显式开启
     allowed_paths: list[str] = field(default_factory=list)  # 仅不可写 agent:附加目录
     timeout_s: float | None = None              # 全部:节点级覆盖 guards.timeout_s
-    retry: int = 0                              # 全部:同模型传输失败重试(与失败链正交)
+    # 全部:同模型传输失败重试(与失败链正交)。research/coding_agent 缺省 0
+    # =「agent 节点缺省永不自动重跑」的书面产品承诺(2026-08-27 用户裁决,
+    # 决议节:docs/rfcs/agent-retry-budget.md;选项 B 准入硬拦已否决,不实施)。
+    # 禁止任何版本把缺省改回 >0;要翻案必须新开提案,不得静默改行为。
+    retry: int = 0
     # P3 失败策略:内容类失败(候选全部失败)可 stop/continue/branch;
     # 治理类异常永不可吞。branch 走保留键 __failed__ 的条件边。
     on_error: str = "stop"
