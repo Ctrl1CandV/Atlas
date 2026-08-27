@@ -6,6 +6,7 @@ from pathlib import Path
 from atlas.costs import fold_cost_accounting
 from atlas.engine import (RunConflictError, acquire_run_lock,
                           release_run_lock)
+from atlas.spec import SpecError
 from atlas.events import EventReader, fold_events
 from atlas.spec import spec_from_snapshot, spec_to_snapshot
 
@@ -233,3 +234,124 @@ def list_run_summaries(runs_root: Path, *, limit: int = 20,
         "runs": [entry for _, entry in entries],
         "next_cursor": next_cursor,
     }
+
+
+# ─────────────────────────── P7 artifact import ───────────────────────────
+
+
+_IMPORTABLE_STATUSES = ("done", "failed", "cancelled", "paused")
+
+
+def _latest_artifact_entry(events: list[dict], logical: str) -> dict | None:
+    """倒序找最近一条携带该逻辑名产物的事件(node_done 的 output/diff、
+    node_failed_soft 的 error 各归其位);返回统一条目。"""
+    for e in reversed(events):
+        for item in e.get("artifacts") or []:
+            if isinstance(item, dict) and item.get("name") == logical:
+                return item
+        if e.get("type") == "node_done" and logical.endswith(".output")                 and e.get("output_sha256"):
+            return {"name": logical, "path": e["output_path"],
+                    "sha256": e["output_sha256"]}
+    return None
+
+
+def resolve_imports(*, run_dir: Path, imports_spec, runs_root: Path) -> list[dict]:
+    """P7 启动准入:在每个源 run 的 stable lock **全程持锁**下核验并复制。
+
+    两阶段都发生在锁内——先集中校验(存在性/静稳终态/最新 provenance/
+    producer invocation),再逐条字节复制+写后复验。"与源删除竞争时锁
+    行为确定"由这里保证:锁被其他 controller 占用 → SpecError 当场
+    fail-closed(稍后重试),绝不半持有或等待。任何一条失败都让启动
+    fail-closed,不存在部分导入后继续跑的运行。
+
+    返回 engine 需要的 lineage 计划列表(含 skip 判定所需的源 invocation)。
+    """
+    from atlas.artifacts import IMPORT_ALGO_VERSION, copy_imported_artifact
+    from atlas.engine import RunNotFoundError
+    from atlas.events import EventReader
+
+    held_locks: list[str] = []
+    try:
+        sources: dict[str, tuple[Path, list[dict]]] = {}
+        staged: list[dict] = []
+        for imp in imports_spec:
+            src_id = imp.run
+            if src_id not in sources:
+                src_dir = Path(runs_root) / src_id
+                if not (src_dir / "events.jsonl").exists():
+                    raise RunNotFoundError(
+                        f"导入源 {src_id!r} 不存在(没有 events.jsonl)")
+                acquire_run_lock(src_id, runs_root=Path(runs_root))
+                held_locks.append(src_id)
+                events = EventReader(src_dir / "events.jsonl").all()
+                status = fold_events(events)["status"]
+                if status not in _IMPORTABLE_STATUSES or status == "running":
+                    raise SpecError(
+                        f"导入源 {src_id!r} 持久状态是 {status!r}:只有静稳"
+                        f"终态({', '.join(_IMPORTABLE_STATUSES)} 除 running 外)"
+                        f"可作为导入来源;运行中/中断的 run 拒绝引用")
+                sources[src_id] = (src_dir, events)
+            _, events = sources[src_id]
+
+            entry = _latest_artifact_entry(events, imp.name)
+            if entry is None:
+                raise SpecError(
+                    f"导入源 {src_id!r} 的事件里找不到 {imp.name!r} 的"
+                    f"最新产物记录")
+            sha256 = entry.get("sha256")
+            path_str = entry.get("path")
+            if not sha256 or not path_str:
+                raise SpecError(
+                    f"导入源 {src_id!r} 的 {imp.name!r} 记录缺少 sha256/path")
+            producer = imp.name.rsplit(".", 1)[0]
+            started = next((e for e in reversed(events)
+                            if e.get("type") == "node_started"
+                            and e.get("node") == producer), None)
+            staged.append({
+                "source_run": src_id,
+                "source_name": imp.name,
+                "source_sha256": sha256,
+                "path_str": path_str,
+                "producer": producer,
+                "algo_version": IMPORT_ALGO_VERSION,
+                "source_invocation": (
+                    started.get("invocation_sha256") if started else None),
+            })
+
+        results: list[dict] = []
+        for plan in staged:   # 校验全部通过,锁仍握着:现在才动字节
+            ref = copy_imported_artifact(
+                source_path=Path(plan.pop("path_str")),
+                source_sha256=plan["source_sha256"],
+                run_dir=run_dir, name=plan["source_name"])
+            results.append({**plan, "ref": ref.as_dict()})
+        return results
+    finally:
+        for src_id in reversed(held_locks):
+            release_run_lock(src_id, runs_root=Path(runs_root))
+
+
+def precheck_imports(*, imports_spec, runs_root: Path) -> None:
+    """P7 只读预检:源存在且为静稳终态,否则启动失败且不留 run 目录。
+
+    与 resolve_imports 的完整锁内校验互补:这里只查"值不值得开 run"
+    (缺源/running 源立刻拒绝);哈希/provenance/字节复制仍由
+    resolve_imports 在源锁内完成——两段之间源可能变化,完整校验兜底。
+    """
+    from atlas.engine import RunNotFoundError
+
+    seen: set[str] = set()
+    for imp in imports_spec:
+        if imp.run in seen:
+            continue
+        seen.add(imp.run)
+        events_path = Path(runs_root) / imp.run / "events.jsonl"
+        if not events_path.exists():
+            raise RunNotFoundError(
+                f"导入源 {imp.run!r} 不存在(没有 events.jsonl)")
+        status = fold_events(EventReader(events_path).all())["status"]
+        if status not in _IMPORTABLE_STATUSES or status == "running":
+            raise SpecError(
+                f"导入源 {imp.run!r} 持久状态是 {status!r}:只有静稳终态"
+                f"({', '.join(_IMPORTABLE_STATUSES)} 除 running 外)可作为"
+                f"导入来源;运行中/中断的 run 拒绝引用")

@@ -9,7 +9,11 @@ coding agent 的 patch 因此从未被稳定暴露。本模块把产物统一为
 角色是封闭枚举,不参与执行语义(consumes 仍按逻辑名引用),只服务于
 展示与下载;执行层照旧只认 {name, path, sha256}(ArtifactRef 同构)。
 """
+import os
 from pathlib import Path
+
+from atlas.integrity import (ArtifactRef, IntegrityError, read_artifact,
+                             sha256_bytes)
 
 # 封闭清单:加角色要改这里,不接受 YAML/外部输入发明新角色
 ARTIFACT_ROLES = frozenset({"report", "output", "diff", "projection", "raw",
@@ -83,3 +87,45 @@ def artifacts_from_event(event: dict) -> list[dict]:
             sha256=event.get("diff_sha256") or "", size_bytes=-1,
             media_type="text/x-diff"))
     return legacy
+
+
+IMPORT_ALGO_VERSION = "p7-import-v1"
+
+
+def copy_imported_artifact(*, source_path: Path, source_sha256: str,
+                           run_dir: Path, name: str,
+                           iteration: int = 0) -> ArtifactRef:
+    """P7:把源 run 的产物逐字节复制进本 run 的 write-once 产物库。
+
+    原子性:先写临时文件、fsync、再 os.replace 到终名——复制中途被 kill
+    只会留下临时残片,绝不会出现"半份正式产物"(验收合同)。写后用
+    read_artifact 带哈希断言读回一次,证明落盘字节与声明的 source sha 一致。
+    """
+    content = Path(source_path).read_bytes()
+    digest = sha256_bytes(content)
+    if digest != source_sha256:
+        raise IntegrityError(
+            f"导入 {name}:源文件内容哈希 {digest[:16]}… 与事件记录的 "
+            f"{source_sha256[:16]}… 不符——源在锁内仍发生了漂移,拒绝复制")
+    filename = f"{name}.imported{iteration}.bin"
+    artifacts_dir = run_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    final_path = artifacts_dir / filename
+    stem, suffix = final_path.stem, final_path.suffix
+    counter = 0
+    while final_path.exists():          # 与 _unique_path 同法:绝不覆盖既有产物
+        counter += 1
+        final_path = artifacts_dir / f"{stem}.{counter}{suffix}"
+    tmp_path = final_path.with_name(final_path.name + ".partial")
+    try:
+        with open(tmp_path, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, final_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+    ref = ArtifactRef(name=name, path=final_path, sha256=digest)
+    read_artifact(ref)   # 写后复验:任何不一致在此响亮失败
+    return ref

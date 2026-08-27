@@ -192,6 +192,11 @@ def fold_events(records: list[dict]) -> dict:
             # fold 显式忽略;删掉该事件后重放结果必须与保留时一致
             # (反例回归锁定,见 test_p3_on_error)。
             pass
+        elif t in ("artifact_imported", "node_imported_reused"):
+            # P7 导入血缘与复用标记:产物经字节克隆进本 run 产物库、随
+            # task_input 初始 state 流转,不携带终态语义;删掉这些事件后
+            # fold 结果必须与保留时一致(回归锁定,见 test_p7_import)。
+            pass
         elif t == "run_paused":
             state["status"] = "paused"
         elif t == "node_done":

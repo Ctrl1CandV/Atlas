@@ -17,7 +17,7 @@
 
 所有节点需要 `id`、封闭 `type`、非空 `prompt` 和 `consumes`。`consumes` 接受 `task`、`<node>.output`、`<coding-node>.diff`，以及 `on_error: branch` 节点的 `<node>.error`（软失败的错误上下文产物）。
 
-- `llm`：`model`、`fallback`、`thinking`、`max_output_tokens`、`temperature`、`seed`、`timeout_s`、`retry`、`output_schema`、`route_field`、`on_error`。
+- `llm`：`model`、`fallback`、`thinking`、`max_output_tokens`、`temperature`、`seed`、`timeout_s`、`retry`、`output_schema`、`route_field`、`on_error`、`imports`（从终态 run 字节导入上游产物,身份全等时免费复用）。
 - `research`：agent 模型与 `max_turns`、`allow_web`、`allowed_paths`、`timeout_s`、`retry`。
 - `coding_agent`：agent 字段以及必填 `workdir`、`writable`；`allowed_paths` 仅在 `writable: false` 时合法。可写节点比较冻结 baseline 与 agent 结果的普通文件字节清单，生成完整文本 unified diff。
 - `human`：暂停并等待本机界面的批准或驳回。

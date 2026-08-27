@@ -19,6 +19,7 @@
 | 共享 launcher（P4） | Web 启动/恢复/审批续跑与 MCP 走同一进程内 controller registry（每 run 唯一 controller）；运行摘要由账本派生，Web/MCP 共用同一构建函数 |
 | 协作式取消（P2+D） | `atlas_cancel_run` 与 Web 运行页取消按钮(运行中/等待批准可见,确认框明示不可撤回)走同一请求文件；running 由 controller 在节点入口/候选切换/重试等待消费并唯一写 `run_cancelled`；paused/interrupted 由取消入口持锁直写终态；`local_cli` 在途执行收到取消即终止整棵进程树(Windows taskkill /T /F、POSIX killpg,真实子进程测试证明无孤儿),树杀失败大声失败不吞；SDK 模型调用仍跑完当次；`cancelled` 可删除、拒绝 resume/approve，请求不可撤回 |
 | Controller 心跳（P9） | 每次 attempt 的派发窗口内定时写 `node_progress`（node/iteration/attempt/model/elapsed_ms/phase=waiting|retry）；只证明 controller 在等待，不声称模型内部进度或百分比；间隔默认与下限 30s，`ATLAS_NODE_HEARTBEAT_INTERVAL_S` run 级可配（低于下限大声拒绝）；窗口在 attempt 结束/失败/取消/终态后闭合，迟到 tick 被拒绝；fold 显式忽略该类型；容量代价如实计入：30s 一条 ≈ 每节点每天 2880 条（16 MiB 账本治理随 P10） |
+| 产物导入与调用身份（P7） | 节点级 `imports: [{run, name}]` 从静稳终态 run 复制上游产物：源 stable lock 内校验 provenance 后字节克隆（temp+fsync+原子改名，写后复验），`artifact_imported` lineage 入账；每次 LLM 派发在 `node_started` 记 `invocation_sha256`（执行字段/有效 prompt/有序输入/后端身份，算法版本化）；invocation 完全相等且节点为无条件边 stop 策略 LLM 时零成本跳过（`node_imported_reused`），任一因子改变都不复用；删除源 run 不影响已导入 run（克隆在本 run 内，绝不跨 run 路径引用）；缺源/运行中源在创建 run 目录前拒绝，源锁竞争确定性失败 |
 | 失败策略（P3） | 治理类异常永不可吞（费用/守卫/取消/deadline/规格/接线/路由/完整性/账本/审批/锁，未登记类型 fail-closed 按治理处理）；内容类失败（候选全部失败，含假成功与超时耗尽）可节点级 `on_error: stop/continue/branch`（默认 stop，旧图零变化，默认值不进指纹）；branch 走保留键 `__failed__`（校验期强制，每源至多一条，可与成功路径边型共存）；continue 拒绝条件出边；下游可消费 `<branch节点>.error`；软失败写 write-once 错误产物 + `node_failed_soft`，fold 显式忽略；__failed__ 路由按「节点最近一次结局」的 route_facts 事实判定（checkpoint 持久化，重入成功后不被残留错误产物误判）；AgentCliError 单独分类、白名单为空；Web/MCP 同源展示错误类与产物入口，dry-run 列出非默认 on_error 节点 |
 | 终局可视化与总结（S1） | 终态 run 顶部零成本终局卡片：每节点一句话回顾（模型/耗时/token/成本/输出首段）+ 时间线，纯账本派生，Web 与 `atlas_get_run` 同源（`build_finale`）；图级 opt-in `summary: {model, prompt_hint?}` 在 run_done 前一次总结调用（进规格指纹与快照），成本走 CostLedger 受 `max_cost_usd` 约束，write-once 产物 + `run_summary_written`；失败记 `run_summary_failed` 不改终态；总结文本标注「LLM 叙述，事实以账本为准」；不做离线报告导出 |
 | 工作流文件管理 | Web 页面可删除工作流；保存走 MCP 的 `expected_sha256` 读-改-写闭环（乐观锁防覆盖） |
@@ -57,7 +58,7 @@
 
 2026-08-23 公开 CI 基线（`main` @ `7eac07b`，GitHub Actions）：
 
-- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-26 起为 542 passed，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
+- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-27 起为 550 passed，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
 - Ubuntu 兼容性信号 job（`continue-on-error`，明确不支持）同样通过：跨平台 agent CLI 桩修复后它反映真实兼容性。
 - `real-api.yml` 仅手动触发（`environment: real-api` 保护），不计入常规 CI。
 

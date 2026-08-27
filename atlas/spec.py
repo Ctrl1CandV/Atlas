@@ -53,6 +53,8 @@ def spec_fingerprint(spec: "WorkflowSpec") -> str:
         # 旧图的指纹变化(续跑/批复/预检身份都会校验指纹)
         if d.get("on_error") in (None, "stop"):
             d.pop("on_error", None)
+        if not d.get("imports"):
+            d.pop("imports", None)
         return d
 
     payload = {
@@ -91,7 +93,13 @@ def spec_to_snapshot(spec: "WorkflowSpec") -> dict:
 
 def spec_from_snapshot(data: dict, *, source: str = "snapshot") -> "WorkflowSpec":
     """从快照重建 spec(走同一套结构校验,快照损坏会大声失败)。"""
-    nodes = [NodeSpec(**n) for n in data["nodes"]]
+    nodes = []
+    for ni, n in enumerate(data["nodes"]):
+        # asdict 会把 tuple 序列化成 list;空 list 归一为空 tuple
+        raw_imports = list(n.get("imports") or [])
+        imports = _parse_imports(raw_imports,
+                                 where=f"{source} nodes[{ni}]")
+        nodes.append(NodeSpec(**{**n, "imports": imports}))
     edges = [EdgeSpec(**e) for e in data["edges"]]
     raw_meta = data.get("meta") or {}
     # 快照里的 meta 已经过一轮校验;再用封闭解析兜一遍(损坏会大声失败)
@@ -490,6 +498,55 @@ class SummarySpec:
 _SUMMARY_FIELDS = frozenset({"model", "prompt_hint"})
 
 
+@dataclass(frozen=True)
+class ArtifactImport:
+    """节点级产物导入声明(P7):从某个终态 run 复制一份昂贵上游结果。
+
+    校验期只做形状;源 run 的存在性/终态/事件 provenance 在启动准入
+    (execute_graph 的源 run stable lock 内)核验——spec 校验必须零成本、
+    不碰文件系统。非默认(空)时才进指纹:旧图指纹零变化。
+    """
+    run: str                      # 源 run id
+    name: str                     # 源逻辑名(<producer>.output / .diff / .error)
+
+    def as_dict(self) -> dict:
+        return {"run": self.run, "name": self.name}
+
+
+_IMPORT_ENTRY_FIELDS = frozenset({"run", "name"})
+_IMPORT_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*\.(output|diff|error)$")
+
+
+def _parse_imports(raw: object, *, where: str) -> tuple[ArtifactImport, ...]:
+    if raw is None or raw == []:
+        return ()
+    if not isinstance(raw, list):
+        raise SpecError(f"{where} 必须是数组或省略")
+    out: list[ArtifactImport] = []
+    seen: set[tuple[str, str]] = set()
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise SpecError(f"{where}[{i}] 必须是映射(run, name)")
+        unknown = {k for k in entry if isinstance(k, str)} - _IMPORT_ENTRY_FIELDS
+        if unknown:
+            raise SpecError(f"{where}[{i}] 有未知字段:{sorted(unknown)}。"
+                            f"可用:run/name")
+        run = entry.get("run")
+        name = entry.get("name")
+        if not isinstance(run, str) or not _NODE_ID_RE.match(run):
+            raise SpecError(f"{where}[{i}].run 必须是合法 run id")
+        if not isinstance(name, str) or _IMPORT_NAME_RE.match(name) is None:
+            raise SpecError(
+                f"{where}[{i}].name 必须形如 '<producer>.output' / '.diff' / "
+                f"'.error',得到 {name!r}")
+        key = (run, name)
+        if key in seen:
+            raise SpecError(f"{where} 里 ({run}, {name}) 重复声明")
+        seen.add(key)
+        out.append(ArtifactImport(run=run, name=name))
+    return tuple(out)
+
+
 def _parse_summary(d: object, *, source: str) -> SummarySpec | None:
     if d is None:
         return None
@@ -540,6 +597,9 @@ class NodeSpec:
     # P3 失败策略:内容类失败(候选全部失败)可 stop/continue/branch;
     # 治理类异常永不可吞。branch 走保留键 __failed__ 的条件边。
     on_error: str = "stop"
+    # P7 产物导入:从终态 run 复制上游结果作为本节点输入的替代来源。
+    # 空元组 = 未声明;仅非空进指纹与快照语义有效值。
+    imports: tuple[ArtifactImport, ...] = ()
 
     @property
     def output_name(self) -> str:
@@ -707,7 +767,7 @@ _NODE_FIELDS = frozenset({
     "id", "type", "model", "prompt", "consumes", "output_schema", "fallback",
     "route_field", "workdir", "max_turns", "max_output_tokens", "thinking",
     "temperature", "seed", "writable", "allow_web", "allowed_paths",
-    "timeout_s", "retry", "on_error",
+    "timeout_s", "retry", "on_error", "imports",
 })
 _EDGE_FIELDS = frozenset({"from", "to", "when"})
 _GUARD_FIELDS = frozenset({"max_iterations", "max_cost_usd", "timeout_s"})
@@ -855,14 +915,14 @@ def _parse_node(rn, *, where: str) -> NodeSpec:
                          "workdir", "max_turns", "max_output_tokens",
                          "thinking", "temperature", "seed", "writable",
                          "allow_web", "allowed_paths", "timeout_s", "retry",
-                         "on_error"}
+                         "on_error", "imports"}
     if unknown:
         raise SpecError(f"{where} 有未知字段:{sorted(unknown)}。"
                         f"可用:id/type/model/prompt/consumes/output_schema/"
                         f"fallback/route_field/workdir/max_turns/"
                         f"max_output_tokens/thinking/temperature/seed/"
                         f"writable/allow_web/allowed_paths/timeout_s/retry/"
-                        f"on_error")
+                        f"on_error/imports")
 
     nid = rn.get("id")
     if not isinstance(nid, str) or not _NODE_ID_RE.match(nid):
@@ -1064,6 +1124,12 @@ def _parse_node(rn, *, where: str) -> NodeSpec:
         # 校验期拒绝而不是运行期静默忽略
         _only({"llm"}, "on_error")
 
+    try:
+        imports = _parse_imports(rn.get("imports"),
+                                 where=f"{where}(节点 {nid})")
+    except SpecError:
+        raise
+
     return NodeSpec(id=nid, type=ntype, model=model, prompt=prompt,
                     consumes=list(consumes), required_fields=required,
                     fallback=list(fallback), route_field=route_field,
@@ -1071,7 +1137,8 @@ def _parse_node(rn, *, where: str) -> NodeSpec:
                     max_output_tokens=max_output_tokens, thinking=thinking,
                     temperature=temperature, seed=seed, writable=writable,
                     allow_web=allow_web, allowed_paths=list(allowed_paths),
-                    timeout_s=timeout_s, retry=retry, on_error=on_error)
+                    timeout_s=timeout_s, retry=retry, on_error=on_error,
+                    imports=imports)
 
 
 def validate_node_spec(node: NodeSpec, *, where: str = "node") -> NodeSpec:
@@ -1117,6 +1184,8 @@ def validate_node_spec(node: NodeSpec, *, where: str = "node") -> NodeSpec:
         raw["retry"] = node.retry
     if node.on_error != "stop":
         raw["on_error"] = node.on_error
+    if node.imports:
+        raw["imports"] = [i.as_dict() for i in node.imports]
     return _parse_node(raw, where=where)
 
 

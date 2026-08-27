@@ -96,7 +96,7 @@ First start generates local configuration from templates (never overwriting exis
 
 ## Testing and verification
 
-2026-08-26 baseline: Python tests **542 passed** (plus 5 real-provider tests excluded by default — opt-in and possibly billable); Web tests 22 passed, lint clean, production build OK; public CI passes both jobs on main. A 10-node custom graph ran end-to-end over the MCP HTTP endpoint including human approval (see the real runs above).
+2026-08-26 baseline: Python tests **550 passed** (plus 5 real-provider tests excluded by default — opt-in and possibly billable); Web tests 22 passed, lint clean, production build OK; public CI passes both jobs on main. A 10-node custom graph ran end-to-end over the MCP HTTP endpoint including human approval (see the real runs above).
 
 2026-08-19 release baseline: Python tests **427 passed** (plus 5 real-provider tests excluded by default — opt-in and possibly billable); Web tests 22 passed, lint clean, production build OK; strict offline validate/dry-run of all six example workflows with 0 provider calls; release sdist scanned at 100 entries with 0 findings. These numbers describe that source state; see [`docs/STATUS.md`](docs/STATUS.md).
 

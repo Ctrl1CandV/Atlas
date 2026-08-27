@@ -478,6 +478,98 @@ class NodeHeartbeat:
         return True
 
 
+# P7 invocation identity:同一次"调用"的完整决定因素集合。算法版本化,
+# 字段只增不改——升级算法时换版本号,旧账本的 invocation 永远可解释。
+# v2 = v1 + required_fields(2026-08-27 审查阻塞项:output_schema 的
+# 结构化验收是执行等价性的决定因子——schema 改严后,同一模型输出
+# 可能从"合格"变 DegradedOutput,invocation 必须能区分这两种执行)
+INVOCATION_ALGO_VERSION = "p7-invocation-v2"
+
+
+def compute_node_invocation_sha256(*, node, prompt_sha256: str,
+                                   inputs: list[dict],
+                                   backend_sha256: str) -> str:
+    """节点的 invocation_sha256:模型执行字段 + 有效 prompt + 有序输入哈希
+    + 后端执行身份(prepared.backend_sha256:provider/runner registry
+    + agent runner 的打包指纹),
+    规范 JSON 后 SHA-256。inputs 是 [{name, sha256}](consumes 的实际供给)。"""
+    payload = {
+        "algo": INVOCATION_ALGO_VERSION,
+        "node": node.id,
+        "model_ref": node.model,
+        "fallback": list(node.fallback),
+        "thinking": node.thinking,
+        "temperature": node.temperature,
+        "seed": node.seed,
+        "max_output_tokens": node.max_output_tokens,
+        "retry": node.retry,
+        "timeout_s": node.timeout_s,
+        "required_fields": list(node.required_fields or []),
+        "prompt_sha256": prompt_sha256,
+        "inputs": sorted(inputs, key=lambda item: item["name"]),
+        "backend_sha256": backend_sha256,
+    }
+    return sha256_bytes(json.dumps(
+        payload, ensure_ascii=False, sort_keys=True).encode("utf-8"))
+
+
+def _input_hashes_for(consumes, artifacts: Mapping) -> list[dict] | None:
+    """consumes 清单 → [{name, sha256}](runtime 与静态复用判定共用同一条
+    抽取规则;"task" 是初始 state 里的普通逻辑名)。任一成员缺哈希 →
+    None:不可判定就诚实退出,绝不猜。"""
+    out: list[dict] = []
+    for name in consumes:
+        ref = artifacts.get(name)
+        if not isinstance(ref, dict) or not ref.get("sha256"):
+            return None
+        out.append({"name": name, "sha256": ref["sha256"]})
+    return out
+
+
+def _compute_reuse_plans(spec, import_plans, *, task_sha256,
+                         backend_sha256) -> Mapping:
+    """P7 自动 skip 判定(全部保守门槛,任何一条不满足就不复用):
+
+    - 该节点的 <id>.output 被 imports 命中,且源账本记录了当时的
+      invocation_sha256(旧账本没有该字段 → 不复用);
+    - llm 节点、on_error=stop、无条件出边(条件/__failed__ 路由行为的
+      正确性依赖真实执行产物,不赌);
+    - 全部 consumes 都能由 task/导入克隆静态供给;
+    - 本地重算 invocation == 源侧记录(模型/prompt/参数/后端身份/
+      输入字节任一改变都不相等)。
+    """
+    if not import_plans:
+        return MappingProxyType({})
+    by_name = {p["source_name"]: p for p in import_plans}
+    available: dict[str, dict] = {"task": {"name": "task",
+                                           "sha256": task_sha256}}
+    for p in import_plans:
+        available[p["source_name"]] = p["ref"]
+    conditional_sources = {e.source for e in spec.edges if e.when is not None}
+    plans: dict[str, dict] = {}
+    for node in spec.nodes:
+        plan = by_name.get(node.output_name)
+        if plan is None or not plan.get("source_invocation"):
+            continue
+        if node.type != "llm" or node.on_error != "stop":
+            continue
+        if node.id in conditional_sources:
+            continue
+        inputs = _input_hashes_for(list(node.consumes), available)
+        if inputs is None:
+            continue
+        local_hash = compute_node_invocation_sha256(
+            node=node,
+            prompt_sha256=sha256_bytes(node.prompt.encode("utf-8")),
+            inputs=inputs, backend_sha256=backend_sha256)
+        if local_hash != plan["source_invocation"]:
+            continue
+        plans[node.id] = {"invocation": local_hash,
+                          "source_run": plan["source_run"],
+                          "source_name": plan["source_name"]}
+    return MappingProxyType(plans)
+
+
 @dataclass
 class _NodeCtx:
     run_dir: Path
@@ -491,6 +583,11 @@ class _NodeCtx:
     timeout_s: float | None = field(default=None, repr=False)
     cost_cap: float | None = field(default=None, repr=False)
     heartbeat_interval_s: float | None = field(default=None, repr=False)
+    # P7:backend 执行身份(prepared.execution_sha256;invocation 因子)与
+    # 已判定的"跳过执行、直接复用导入产物"计划(node_id → plan dict)。
+    backend_identity: str = field(default="", repr=False)
+    reuse_plans: Mapping = field(default_factory=lambda: MappingProxyType({}),
+                                 repr=False)
     cost_ledger: CostLedger | None = field(default=None, repr=False)
     _wall_start: datetime | None = field(default=None, repr=False)
     _agent_runner_raw: object = field(default=None, repr=False)
@@ -679,6 +776,27 @@ def _project_node_cost(node, projection_chars: int) -> float | None:
     return compute_cost_usd(node.model, est_in, est_out)
 
 
+def _make_reused_node_fn(node, ctx: _NodeCtx):
+    """P7 复用节点:零调用、零成本,只把"这段执行被导入结果顶替"如实入账。"""
+    plan = ctx.reuse_plans[node.id]
+
+    def run(state: AtlasState) -> dict:
+        iteration = state.get("iterations", {}).get(node.id, 0) + 1
+        if ctx.cancel_requested():
+            raise RunCancelled(f"节点 {node.id}(复用)执行前收到取消请求")
+        ctx.log.emit(
+            "node_imported_reused", run_id=ctx.run_dir.name,
+            node=node.id, iteration=iteration,
+            invocation_sha256=plan["invocation"],
+            source_run=plan["source_run"],
+            source_artifact=plan["source_name"],
+            note="invocation 身份与源完全一致;本次未调用任何模型,"
+                 "产物为源字节克隆(经哈希复验)")
+        return {"iterations": {node.id: 1}}
+
+    return run
+
+
 def _soft_fail_node(node, ctx: _NodeCtx, exc: Exception, iteration: int) -> dict:
     """P3 内容类失败的 soft 落账:write-once 错误产物 + node_failed_soft。
 
@@ -796,8 +914,21 @@ def _make_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
                            "占用预算，直到结算获得可信费用。",
                 )
             if not started_emitted:
+                # P7:node_started 携带本次调用的 invocation 身份(派发前
+                # 计算完备时;输入缺失记 null,不阻塞执行)。时序仍在预算
+                # 预留与持久化之后——被守卫拦截不得误报已派发。
+                runtime_inputs = _input_hashes_for(
+                    list(node.consumes), state["artifacts"])
+                invocation = None
+                if runtime_inputs is not None:
+                    invocation = compute_node_invocation_sha256(
+                        node=node,
+                        prompt_sha256=sha256_bytes(node.prompt.encode("utf-8")),
+                        inputs=runtime_inputs,
+                        backend_sha256=ctx.backend_identity)
                 ctx.log.emit("node_started", node=node.id, iteration=iteration,
-                             model_requested=node.model)
+                             model_requested=node.model,
+                             invocation_sha256=invocation)
                 started_emitted = True
             heartbeat.set_context(attempt=attempt, model=cand)
             return reservation
@@ -1031,7 +1162,11 @@ _NODE_FACTORIES = {
 def _build_compiled_graph(spec: WorkflowSpec, ctx: _NodeCtx, checkpointer):
     builder = StateGraph(AtlasState)
     for n in spec.nodes:
-        builder.add_node(n.id, _NODE_FACTORIES[n.type](n, spec, ctx))
+        if n.id in ctx.reuse_plans:
+            # P7:invocation 完全相等的节点跳过执行,直接复用导入产物
+            builder.add_node(n.id, _make_reused_node_fn(n, ctx))
+        else:
+            builder.add_node(n.id, _NODE_FACTORIES[n.type](n, spec, ctx))
     for e in spec.all_entries():      # 多入口:全部从 START 并行开跑
         builder.add_edge(START, e)
 
@@ -1169,7 +1304,37 @@ def execute_graph(
         tombstone = Path(runs_root) / ".trash" / run_id
         if run_dir.exists() or tombstone.exists():
             raise RunConflictError(f"run {run_id!r} 已存在或仍在删除清理中,拒绝重复执行")
+
+        # ── P7 只读预检(在任何目录创建之前;失败不留 run 目录)──────
+        # 存在性/静稳终态先查一遍——锁竞争与运行中源在这里就拒绝;
+        # 字节复制仍放在锁内的 resolve_imports(下方,run 目录已可写)。
+        from atlas.runs import precheck_imports   # 函数内导入:runs 反向依赖 engine
+        precheck_imports(
+            imports_spec=[imp for node in spec.nodes for imp in node.imports],
+            runs_root=runs_root)
+
         log = EventLog(run_dir)
+
+        task_ref = store_artifact(
+            run_dir, name="task", filename="task.txt", content=task.encode("utf-8"),
+            max_bytes=TASK_MAX_BYTES,
+        )
+
+        # ── P7 artifact imports ──────────────────────────────────────
+        # 启动准入在源 run stable lock 内完成(resolve_imports 持锁校验并
+        # 复制);到这里失败会向上抛,run 不启动——不存在部分导入的运行。
+        declared_imports = [imp for node in spec.nodes for imp in node.imports]
+        from atlas.runs import resolve_imports   # 函数内导入:runs 反向依赖 engine
+        import_plans = resolve_imports(
+            run_dir=run_dir, imports_spec=declared_imports, runs_root=runs_root)
+        imported_artifacts = {plan["source_name"]: plan["ref"]
+                              for plan in import_plans}
+        reuse_plans = _compute_reuse_plans(
+            spec, import_plans, task_sha256=task_ref.sha256,
+            backend_sha256=prepared.backend_sha256)
+        pending_lineage = list(import_plans)
+
+
         ctx = _NodeCtx(run_dir=run_dir, log=log, registry=prepared.registry,
                        reader=EventReader(run_dir / "events.jsonl"),
                        agent_runner=prepared.agent_runner,
@@ -1179,12 +1344,10 @@ def execute_graph(
                        }),
                        timeout_s=spec.guards.timeout_s,
                        cost_ledger=CostLedger(spec.guards.max_cost_usd),
-                       heartbeat_interval_s=heartbeat_interval_s)
+                       heartbeat_interval_s=heartbeat_interval_s,
+                       backend_identity=prepared.backend_sha256,
+                       reuse_plans=reuse_plans)
 
-        task_ref = store_artifact(
-            run_dir, name="task", filename="task.txt", content=task.encode("utf-8"),
-            max_bytes=TASK_MAX_BYTES,
-        )
         (run_dir / "spec.snapshot.json").write_text(
             json.dumps(spec_to_snapshot(spec), ensure_ascii=False, indent=1),
             encoding="utf-8")
@@ -1199,9 +1362,20 @@ def execute_graph(
                  bindings=list(binding_summary),
                  overrides=list(override_summary))
 
+        # P7 lineage:紧跟 run 身份落账,顺序确定;产物实体已在初始 state。
+        for plan in pending_lineage:
+            log.emit("artifact_imported", run_id=run_id,
+                     source_run=plan["source_run"],
+                     source_name=plan["source_name"],
+                     source_sha256=plan["source_sha256"],
+                     path=plan["ref"]["path"], sha256=plan["ref"]["sha256"],
+                     algo_version=plan["algo_version"])
+
+        initial_artifacts = {"task": task_ref.as_dict()}
+        initial_artifacts.update(imported_artifacts)
         return _invoke(
             spec, ctx, run_id, entry=prepared.entry, checkpoint=checkpoint,
-            task_input={"task": task, "artifacts": {"task": task_ref.as_dict()}},
+            task_input={"task": task, "artifacts": initial_artifacts},
         )
     finally:
         release_run_lock(run_id, runs_root=runs_root)
@@ -1327,7 +1501,8 @@ def _resume_graph_locked(
                    }),
                    timeout_s=spec.guards.timeout_s,
                    cost_ledger=CostLedger(spec.guards.max_cost_usd,
-                                          spent=_settled_spent_usd(events)))
+                                          spent=_settled_spent_usd(events)),
+                   backend_identity=prepared.backend_sha256)
     if legacy:
         log.emit("legacy_execution_identity", run_id=run_id,
                  reason="旧运行缺少 execution_sha256，按 spec-only 兼容继续")
@@ -1650,7 +1825,8 @@ def approve_run(
                            for token in prepared.source_baseline_tokens
                        }),
                        timeout_s=spec.guards.timeout_s,
-                       cost_ledger=CostLedger(spec.guards.max_cost_usd, spent=spent))
+                       cost_ledger=CostLedger(spec.guards.max_cost_usd, spent=spent),
+                       backend_identity=prepared.backend_sha256)
         if legacy_identity:
             log.emit("legacy_execution_identity", run_id=run_id,
                      spec_sha256=prepared.spec_sha256,

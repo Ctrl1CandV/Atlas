@@ -592,6 +592,11 @@ def dry_run_impl(workflow_id: str, task: str, node_overrides=None, *,
             entry["chain"] = [n.model, *n.fallback] if n.model else []
         if n.on_error != "stop":
             entry["on_error"] = n.on_error   # P3:非默认失败策略必须在预演可见
+        if n.imports:
+            # P7:导入清单必须在预演可见——"将从哪个 run 复制什么"是
+            # 计费/身份决策的一部分(imports 进 spec 指纹)
+            entry["imports"] = [
+                {"run": i.run, "name": i.name} for i in n.imports]
         renders.append(entry)
     unconfigured = list(effective.unconfigured_nodes)
     execution_sha256 = None
