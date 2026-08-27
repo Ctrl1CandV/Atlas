@@ -89,6 +89,7 @@ const STATUS_LABEL: Record<string, string> = {
   done: '已完成',
   cancelled: '已取消',
   failed: '失败',
+  failed_soft: '软失败(图继续)',
 };
 
 const KIND_BADGE: Record<string, { label: string; cls: string }> = {

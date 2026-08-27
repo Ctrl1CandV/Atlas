@@ -186,7 +186,7 @@ export interface ModelAttempt {
 
 export interface RunNode {
   id: string;
-  status: 'pending' | 'running' | 'done' | 'failed';
+  status: 'pending' | 'running' | 'done' | 'failed' | 'failed_soft';
   attempts: ModelAttempt[];
   model_requested?: string;
   model_used?: string;
@@ -207,6 +207,8 @@ export interface RunNode {
   iteration?: number;
   cost_usd?: number | null;
   runner?: 'local_cli' | 'injected';
+  error_class?: string;
+  on_error?: string;
 }
 
 export interface FinaleNodeRecap {

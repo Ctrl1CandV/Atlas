@@ -30,6 +30,7 @@ from langgraph.types import Command, interrupt
 from atlas.adapters import (AdapterRegistry, AllCandidatesFailed,
                             RunCancelled, call_with_fallback,
                             recover_json_object)
+from atlas.exc import can_soft_fail, error_class_name
 from atlas.artifacts import artifact_entry
 from atlas.costs import (CostLedger, CostLimitError, compute_cost_usd,
                          fold_cost_accounting)
@@ -48,9 +49,9 @@ from atlas.integrity import (
     read_artifact,
     sha256_bytes,
 )
-from atlas.spec import (EdgeSpec, SpecError, WorkflowSpec, spec_fingerprint,
-                        spec_from_snapshot, spec_to_snapshot, validate_node_spec,
-                        validate_spec)
+from atlas.spec import (FAILED_EDGE_KEY, EdgeSpec, SpecError, WorkflowSpec,
+                        spec_fingerprint, spec_from_snapshot, spec_to_snapshot,
+                        validate_node_spec, validate_spec)
 
 
 class GuardViolation(Exception):
@@ -260,6 +261,11 @@ class AtlasState(TypedDict, total=False):
     task: str
     artifacts: Annotated[dict, merge_dicts]    # 逻辑名 → ArtifactRef.as_dict()
     iterations: Annotated[dict, merge_counts]  # node_id → 已完成执行次数
+    # P3:每个节点「最近一次执行」的结局(ok / __failed__)。路由判定的事实源:
+    # 成功与软失败各自覆写自己的键(merge_dicts 更新者胜),随 checkpoint 持久化,
+    # resume 后语义不变。不能拿 .error 产物存在性代替——产物键只增不清,
+    # branch 节点重入成功后残留的旧错误产物会把成功误判成软失败。
+    route_facts: Annotated[dict, merge_dicts]
 
 
 # ─────────────────────────── 路由:纯查表 ───────────────────────────
@@ -300,14 +306,32 @@ def resolve_route(spec: WorkflowSpec, node_id: str, output: dict) -> str:
     raise NoRouteError(f"节点 {node_id} 路由命中 {value!r} 但没有对应边")  # 不可达
 
 
+# 引擎内部的「成功」路由键前缀:__failed__ 与无条件扇出共存时,成功路径
+# 不需要任何路由判定,落到这些键上(每条无条件边一个键;LangGraph 的
+# path_map 值必须是可哈希单目标,扇出靠路由器返回键列表)
+OK_ROUTE_KEY = "__ok__"
+
+
 def _make_router(spec: WorkflowSpec, src: str, path_map: dict):
     """LangGraph 条件边的回调:读产物原文(哈希断言)→ 返回 when 键。
 
     路由依据与落盘真相是同一份字节(带哈希断言的读回)。
+    P3:节点软失败(产物库里有 {src}.error 错误产物)时优先走保留键
+    __failed__;成功路径上模型输出保留键字面量属于不可判定的路由,
+    大声拒绝(NoRouteError 是治理错误)。
     """
     node = spec.node(src)
 
     def router(state: AtlasState) -> str:
+        if FAILED_EDGE_KEY in path_map:
+            fact = (state.get("route_facts") or {}).get(src)
+            if fact == FAILED_EDGE_KEY:
+                return FAILED_EDGE_KEY
+        ok_keys = sorted(k for k in path_map
+                         if k.startswith(OK_ROUTE_KEY))
+        if ok_keys:
+            # 成功且无需路由判定:单目标返回键,多目标返回键列表(扇出)
+            return ok_keys if len(ok_keys) > 1 else ok_keys[0]
         ref_dict = state.get("artifacts", {}).get(node.output_name)
         if ref_dict is None:
             raise NoRouteError(
@@ -334,7 +358,12 @@ def _make_router(spec: WorkflowSpec, src: str, path_map: dict):
             raise NoRouteError(
                 f"节点 {src} 的产物不是 JSON 对象,无法读取路由字段"
             )
-        return _route_value(node, src, parsed, sorted(path_map))
+        value = _route_value(node, src, parsed, sorted(path_map))
+        if value == FAILED_EDGE_KEY:
+            raise NoRouteError(
+                f"节点 {src} 成功返回了保留路由值 {FAILED_EDGE_KEY!r}。"
+                f"该值只在软失败时由引擎使用;请让模型输出其他路由值")
+        return value
 
     return router
 
@@ -650,6 +679,39 @@ def _project_node_cost(node, projection_chars: int) -> float | None:
     return compute_cost_usd(node.model, est_in, est_out)
 
 
+def _soft_fail_node(node, ctx: _NodeCtx, exc: Exception, iteration: int) -> dict:
+    """P3 内容类失败的 soft 落账:write-once 错误产物 + node_failed_soft。
+
+    continue 与 branch 共用同一落账(错误产物进 state 产物库,消费方与
+    路由器都能看到),差别只在图结构:branch 节点的 __failed__ 边由
+    路由器按错误产物判定。节点没有 output 产物——依赖它的下游会在
+    投影期 WiringError(治理错误,不吞)。
+    """
+    payload = json.dumps({
+        "node": node.id,
+        "iteration": iteration,
+        "on_error": node.on_error,
+        "error_class": error_class_name(exc),
+        "error": str(exc),
+        "attempts": [
+            {"model": a.model, "error_type": a.error_type, "reason": a.reason}
+            for a in getattr(exc, "attempts", ())],
+    }, ensure_ascii=False, indent=1).encode("utf-8")
+    ref = store_artifact(
+        ctx.run_dir, name=f"{node.id}.error",
+        filename=f"{node.id}.error.{iteration}.json", content=payload)
+    entry = artifact_entry(
+        name=ref.name, role="error", path=ref.path, sha256=ref.sha256,
+        size_bytes=len(payload), media_type="application/json")
+    ctx.log.emit(
+        "node_failed_soft", node=node.id, iteration=iteration,
+        on_error=node.on_error, error_class=error_class_name(exc),
+        error=str(exc)[:2000], output_path=str(ref.path),
+        output_sha256=ref.sha256, artifacts=[entry])
+    return {"artifacts": {ref.name: entry}, "iterations": {node.id: 1},
+            "route_facts": {node.id: FAILED_EDGE_KEY}}
+
+
 def _make_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
     def run(state: AtlasState) -> dict:
         started = time.monotonic()
@@ -785,31 +847,40 @@ def _make_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
 
         # 2. 调模型:失败链 + 假成功检测 + M4 节点参数
         try:
-            outcome = call_with_fallback(
-                registry=ctx.registry,
-                log=ctx.log,
-                node_id=node.id,
-                iteration=iteration,
-                model_ref=node.model,
-                fallback_refs=node.fallback,
-                prompt=projection.decode("utf-8"),
-                required_fields=node.required_fields,
-                thinking_tier=node.thinking,
-                temperature=node.temperature,
-                seed=node.seed,
-                max_output_tokens=node.max_output_tokens,
-                timeout_s=node.timeout_s,
-                retry=node.retry,
-                before_attempt=_reserve,
-                after_attempt=_settle,
-                remaining_timeout=lambda: ctx.remaining_timeout(node_id=node.id),
-                cancel_requested=ctx.cancel_requested,
-                heartbeat=heartbeat,
-            )
-        finally:
-            # 兜底停心跳:派发窗口的正常开合在 call_with_fallback 内部,
-            # 这里覆盖取消消费点抛 RunCancelled、意外异常等所有离开路径。
-            heartbeat.end()
+            try:
+                outcome = call_with_fallback(
+                    registry=ctx.registry,
+                    log=ctx.log,
+                    node_id=node.id,
+                    iteration=iteration,
+                    model_ref=node.model,
+                    fallback_refs=node.fallback,
+                    prompt=projection.decode("utf-8"),
+                    required_fields=node.required_fields,
+                    thinking_tier=node.thinking,
+                    temperature=node.temperature,
+                    seed=node.seed,
+                    max_output_tokens=node.max_output_tokens,
+                    timeout_s=node.timeout_s,
+                    retry=node.retry,
+                    before_attempt=_reserve,
+                    after_attempt=_settle,
+                    remaining_timeout=lambda: ctx.remaining_timeout(
+                        node_id=node.id),
+                    cancel_requested=ctx.cancel_requested,
+                    heartbeat=heartbeat,
+                )
+            finally:
+                # 兜底停心跳:派发窗口的正常开合在 call_with_fallback 内部,
+                # 这里覆盖取消消费点抛 RunCancelled、意外异常等所有离开路径。
+                heartbeat.end()
+        except Exception as e:
+            # P3:内容类失败(候选全部失败)在 stop 策略或治理类异常面前
+            # 原样上抛——run_failed/run_cancelled 语义零变化;只有
+            # continue/branch 配置且异常可 soft-fail 时才走软失败落账。
+            if node.on_error == "stop" or not can_soft_fail(e):
+                raise
+            return _soft_fail_node(node, ctx, e, iteration)
 
         # 3. 产物落盘 + 事件
         ext = ".json" if node.required_fields else ".txt"
@@ -850,7 +921,8 @@ def _make_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
         )
         # state 里的产物与事件里的类型化条目同构(A6:重放 == 运行时状态)
         return {"artifacts": {ref.name: out_entry},
-                "iterations": {node.id: 1}}
+                "iterations": {node.id: 1},
+                "route_facts": {node.id: "ok"}}
 
     return run
 
@@ -967,14 +1039,29 @@ def _build_compiled_graph(spec: WorkflowSpec, ctx: _NodeCtx, checkpointer):
     for e in spec.edges:
         outgoing.setdefault(e.source, []).append(e)
     for src, edges in outgoing.items():
-        conditional = [e for e in edges if e.when is not None]
-        if conditional:
+        # P3:__failed__ 是失败专用条件边,与成功路径的边型共存:
+        # - 正常条件边 + __failed__:成功按 when 路由,软失败走保留键;
+        # - 无条件边 + __failed__:成功扇出全部无条件目标(OK_ROUTE_KEY);
+        # - 只有 __failed__:成功即图收尾(OK_ROUTE_KEY → END)。
+        failed = [e for e in edges if e.when == FAILED_EDGE_KEY]
+        conditional = [e for e in edges
+                       if e.when is not None and e.when != FAILED_EDGE_KEY]
+        unconditional = [e for e in edges if e.when is None]
+        if conditional or failed:
             path_map = {e.when: (END if e.target == "END" else e.target)
                         for e in conditional}
+            for e in failed:
+                path_map[FAILED_EDGE_KEY] = (END if e.target == "END"
+                                             else e.target)
+            ok_targets = ([END if e.target == "END" else e.target
+                           for e in unconditional] if unconditional
+                          else ([END] if not conditional else []))
+            for i, target in enumerate(ok_targets):
+                path_map[f"{OK_ROUTE_KEY}{i}"] = target
             builder.add_conditional_edges(src, _make_router(spec, src, path_map),
                                           path_map)
         else:
-            for e in edges:
+            for e in unconditional:
                 builder.add_edge(src, END if e.target == "END" else e.target)
     for n in spec.nodes:  # 无出边的节点显式接 END
         if n.id not in outgoing:

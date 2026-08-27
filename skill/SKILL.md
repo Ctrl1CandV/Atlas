@@ -66,10 +66,11 @@ Top-level fields: `name`, optional `description`, optional `meta`, `nodes`, opti
 - Optional `summary: {model, prompt_hint?}` adds one summarizer call before the run finishes (S1): it reviews each node's work from the ledger, its cost is guarded like any other call, its output is a write-once artifact plus a `run_summary_written` event, and a summary failure never changes the run's terminal state. Terminal runs also get a zero-cost finale card in the Web run page (pure ledger derivation, no LLM).
 
 - Node fields: `id`, closed `type` (`llm`, `research`, `coding_agent`, `human`), `prompt`, and `consumes`.
+- `llm`: `model`, `fallback`, `thinking`, `max_output_tokens`, `temperature`, `seed`, `timeout_s`, `retry`, `output_schema`, `route_field`, and `on_error: stop|continue|branch` (P3, default `stop`): a content failure (all candidates failed) can continue the graph, or route along an edge with `when: __failed__` (validation requires that edge for `branch`; `continue` is rejected on nodes with conditional outgoing edges). Governance exceptions — cost guards, loop guards, cancellation, deadline, wiring/routing, integrity, approval rejection — are never swallowed by any strategy. Downstream nodes may consume `<branch-node>.error` (a write-once JSON artifact with the error class and per-attempt reasons).
 - `llm`: `model`, `fallback`, `thinking`, `max_output_tokens`, `temperature`, `seed`, `timeout_s`, `retry`, `output_schema`, `route_field`.
 - Agent schema: `model`, `max_turns`, `timeout_s`, `retry`, `allow_web`, and `allowed_paths`; coding also accepts `workdir` and `writable`. `allowed_paths` is valid only for `research` or `coding_agent` with `writable: false`; writable coding plus `allowed_paths` is rejected before run creation because Claude `--add-dir` is not a read-only boundary.
 - `human` accepts a prompt and pauses until approval/rejection in the Web UI.
-- `consumes` accepts `task`, `<node>.output`, and `<coding-node>.diff`.
+- `consumes` accepts `task`, `<node>.output`, `<coding-node>.diff`, and `<branch-node>.error`.
 - Conditional edges use `when`; the routed field must appear in `output_schema.required`, and prompts must constrain legal route values.
 - Every cycle needs an explicit entry, a conditional exit, and `guards.max_iterations`.
 - `guards.timeout_s` limits graph wall time. With `max_cost_usd`, verified prices reserve the projected amount; unknown prices conservatively reserve all remaining budget so it cannot be reused, but cannot prove the provider's actual charge stayed below the cap.

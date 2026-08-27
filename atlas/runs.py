@@ -132,6 +132,20 @@ def build_run_summary(run_id: str, *, runs_root: Path) -> dict:
                 "duration_s": e.get("duration_s"),
                 "output_path": e["output_path"],
             }
+        elif e["type"] == "node_failed_soft":
+            # P3:内容类失败按 on_error 策略继续/分支——同源展示错误类与
+            # 错误产物入口(MCP atlas_get_run 与 Web 共用本函数)
+            nodes[e["node"]] = {
+                "model_used": None,
+                "degraded": False,
+                "input_tokens": None,
+                "output_tokens": None,
+                "duration_s": None,
+                "output_path": e.get("output_path"),
+                "soft_failed": True,
+                "error_class": e.get("error_class"),
+                "on_error": e.get("on_error"),
+            }
         elif e["type"] == "run_paused":
             nodes.setdefault(e.get("node"), {})["status"] = "等待批准"
     failed = next((e for e in reversed(events) if e["type"] == "run_failed"), None)

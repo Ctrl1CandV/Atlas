@@ -370,6 +370,7 @@ input:focus, textarea:focus {
 }
 .atlas-node.status-done { border-color: color-mix(in srgb, var(--color-done) 60%, transparent); }
 .atlas-node.status-failed { border-color: color-mix(in srgb, var(--color-fail) 70%, transparent); }
+.atlas-node.status-failed_soft { border-color: color-mix(in srgb, var(--color-degraded) 60%, transparent); }
 .atlas-node.status-interrupted {
   border-color: var(--color-degraded);
   border-style: dashed;

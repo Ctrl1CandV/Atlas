@@ -12,7 +12,8 @@ coding agent 的 patch 因此从未被稳定暴露。本模块把产物统一为
 from pathlib import Path
 
 # 封闭清单:加角色要改这里,不接受 YAML/外部输入发明新角色
-ARTIFACT_ROLES = frozenset({"report", "output", "diff", "projection", "raw"})
+ARTIFACT_ROLES = frozenset({"report", "output", "diff", "projection", "raw",
+                            "error"})
 
 _ROLE_TITLES = {
     "report": "执行报告",
@@ -20,6 +21,7 @@ _ROLE_TITLES = {
     "diff": "代码改动",
     "projection": "输入投影",
     "raw": "原始产物",
+    "error": "错误上下文",   # P3 soft failure 的 write-once 错误产物
 }
 
 

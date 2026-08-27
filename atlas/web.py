@@ -553,6 +553,17 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                 slot["output_truncated"] = True
             elif t == "output_json_recovered":
                 slot["json_recovered"] = e.get("how", "")
+            elif t == "node_failed_soft":
+                # P3 软失败:节点按 on_error 继续/分支,图仍在跑
+                slot.update({
+                    "status": "failed_soft",
+                    "error_class": e.get("error_class"),
+                    "on_error": e.get("on_error"),
+                    "output_path": e.get("output_path"),
+                    "output_sha256": e.get("output_sha256"),
+                    "artifacts": e.get("artifacts", []),
+                    "iteration": e.get("iteration"),
+                })
             elif t == "node_done":
                 slot.update({
                     "status": "done",

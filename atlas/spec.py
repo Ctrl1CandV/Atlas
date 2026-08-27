@@ -47,9 +47,17 @@ def spec_fingerprint(spec: "WorkflowSpec") -> str:
     不允许拿改过的图恢复旧 run(那会产出混合拓扑的假账本)。"""
     import hashlib
 
+    def _node_payload(n) -> dict:
+        d = asdict(n)
+        # on_error 只在非默认时进指纹:stop 是既有行为,加了字段不该让
+        # 旧图的指纹变化(续跑/批复/预检身份都会校验指纹)
+        if d.get("on_error") in (None, "stop"):
+            d.pop("on_error", None)
+        return d
+
     payload = {
         "name": spec.name,
-        "nodes": [asdict(n) for n in spec.nodes],
+        "nodes": [_node_payload(n) for n in spec.nodes],
         "edges": [asdict(e) for e in spec.edges],
         "entry": spec.entry,
         "guards": asdict(spec.guards),
@@ -502,6 +510,11 @@ def _parse_summary(d: object, *, source: str) -> SummarySpec | None:
     return SummarySpec(model=model.strip(), prompt_hint=hint)
 
 
+# P3 失败策略与保留路由键(锚点:on_error 闭合枚举;branch 只走 __failed__)
+ON_ERROR_VALUES = ("stop", "continue", "branch")
+FAILED_EDGE_KEY = "__failed__"
+
+
 @dataclass(frozen=True)
 class NodeSpec:
     id: str
@@ -524,6 +537,9 @@ class NodeSpec:
     allowed_paths: list[str] = field(default_factory=list)  # 仅不可写 agent:附加目录
     timeout_s: float | None = None              # 全部:节点级覆盖 guards.timeout_s
     retry: int = 0                              # 全部:同模型传输失败重试(与失败链正交)
+    # P3 失败策略:内容类失败(候选全部失败)可 stop/continue/branch;
+    # 治理类异常永不可吞。branch 走保留键 __failed__ 的条件边。
+    on_error: str = "stop"
 
     @property
     def output_name(self) -> str:
@@ -691,7 +707,7 @@ _NODE_FIELDS = frozenset({
     "id", "type", "model", "prompt", "consumes", "output_schema", "fallback",
     "route_field", "workdir", "max_turns", "max_output_tokens", "thinking",
     "temperature", "seed", "writable", "allow_web", "allowed_paths",
-    "timeout_s", "retry",
+    "timeout_s", "retry", "on_error",
 })
 _EDGE_FIELDS = frozenset({"from", "to", "when"})
 _GUARD_FIELDS = frozenset({"max_iterations", "max_cost_usd", "timeout_s"})
@@ -838,13 +854,15 @@ def _parse_node(rn, *, where: str) -> NodeSpec:
                          "output_schema", "fallback", "route_field",
                          "workdir", "max_turns", "max_output_tokens",
                          "thinking", "temperature", "seed", "writable",
-                         "allow_web", "allowed_paths", "timeout_s", "retry"}
+                         "allow_web", "allowed_paths", "timeout_s", "retry",
+                         "on_error"}
     if unknown:
         raise SpecError(f"{where} 有未知字段:{sorted(unknown)}。"
                         f"可用:id/type/model/prompt/consumes/output_schema/"
                         f"fallback/route_field/workdir/max_turns/"
                         f"max_output_tokens/thinking/temperature/seed/"
-                        f"writable/allow_web/allowed_paths/timeout_s/retry")
+                        f"writable/allow_web/allowed_paths/timeout_s/retry/"
+                        f"on_error")
 
     nid = rn.get("id")
     if not isinstance(nid, str) or not _NODE_ID_RE.match(nid):
@@ -1035,6 +1053,17 @@ def _parse_node(rn, *, where: str) -> NodeSpec:
     if not isinstance(route_field, str) or not route_field:
         raise SpecError(f"{where}(节点 {nid})的 route_field 必须是非空字符串")
 
+    on_error = rn.get("on_error", "stop")
+    if on_error is None:
+        on_error = "stop"
+    if not isinstance(on_error, str) or on_error not in ON_ERROR_VALUES:
+        raise SpecError(f"{where}(节点 {nid})的 on_error 必须是 "
+                        f"{list(ON_ERROR_VALUES)} 之一,得到 {on_error!r}")
+    if "on_error" in rn and on_error != "stop":
+        # 内容类失败只发生在 llm 节点;其他类型的 on_error 是无效承诺,
+        # 校验期拒绝而不是运行期静默忽略
+        _only({"llm"}, "on_error")
+
     return NodeSpec(id=nid, type=ntype, model=model, prompt=prompt,
                     consumes=list(consumes), required_fields=required,
                     fallback=list(fallback), route_field=route_field,
@@ -1042,7 +1071,7 @@ def _parse_node(rn, *, where: str) -> NodeSpec:
                     max_output_tokens=max_output_tokens, thinking=thinking,
                     temperature=temperature, seed=seed, writable=writable,
                     allow_web=allow_web, allowed_paths=list(allowed_paths),
-                    timeout_s=timeout_s, retry=retry)
+                    timeout_s=timeout_s, retry=retry, on_error=on_error)
 
 
 def validate_node_spec(node: NodeSpec, *, where: str = "node") -> NodeSpec:
@@ -1086,6 +1115,8 @@ def validate_node_spec(node: NodeSpec, *, where: str = "node") -> NodeSpec:
         if node.timeout_s is not None:
             raw["timeout_s"] = node.timeout_s
         raw["retry"] = node.retry
+    if node.on_error != "stop":
+        raw["on_error"] = node.on_error
     return _parse_node(raw, where=where)
 
 
@@ -1139,19 +1170,25 @@ def validate_spec(spec: WorkflowSpec, *, source: str = "spec",
             # 精确匹配 <节点id>.output / <节点id>.diff(coding_agent 的第二产物):
             # 前缀匹配会放过 node_a.output.output 这类笔误,把接线错误留到运行期才炸
             ok = False
-            for suffix, producer_type in ((".output", None), (".diff", "coding_agent")):
+            for suffix, producer_type, need_on_error in (
+                    (".output", None, None),
+                    (".diff", "coding_agent", None),
+                    (".error", "llm", "branch")):
                 if c.endswith(suffix):
                     producer = c[: -len(suffix)]
-                    if producer in by_id and (
-                            producer_type is None
-                            or by_id[producer].type == producer_type):
-                        ok = True
+                    if producer in by_id:
+                        pnode = by_id[producer]
+                        if ((producer_type is None or pnode.type == producer_type)
+                                and (need_on_error is None
+                                     or pnode.on_error == need_on_error)):
+                            ok = True
                     break
             if not ok:
                 raise _located_error(
                     f"{source}:节点 {n.id} 消费 {c!r},但不存在能产出它的节点。"
-                    f"consumes 只能引用 'task'、'<节点id>.output' 或 "
-                    f"coding_agent 节点的 '<节点id>.diff'(已知节点:{sorted(ids)})",
+                    f"consumes 只能引用 'task'、'<节点id>.output'、coding_agent "
+                    f"节点的 '<节点id>.diff',或 on_error: branch 节点的 "
+                    f"'<节点id>.error'(已知节点:{sorted(ids)})",
                     ("nodes", node_index, "consumes", consume_index), _marks,
                     fallback_paths=(("nodes", node_index, "consumes"),
                                     ("nodes", node_index)),
@@ -1171,27 +1208,84 @@ def validate_spec(spec: WorkflowSpec, *, source: str = "spec",
 
     _check_edge_groups(spec, source=source, by_id=by_id,
                        node_indexes=node_indexes, marks=_marks)
+    _check_on_error(spec, source=source, by_id=by_id,
+                    node_indexes=node_indexes, marks=_marks)
     entry = _resolve_entry(spec, source=source, by_id=by_id, marks=_marks)
     _check_reachable(spec, entry, source=source, marks=_marks)
     _check_cycles(spec, source=source, by_id=by_id, marks=_marks)
     return entry
 
 
+def _check_on_error(spec, *, source, by_id, node_indexes,
+                    marks: _SourceMarks | None = None) -> None:
+    """P3:on_error 与保留路由键 __failed__ 的结构校验(校验期强制)。
+
+    - when: __failed__ 的边只出现在 on_error: branch 的节点上(保留键);
+    - on_error: branch 必须有至少一条 __failed__ 出边——失败处理器要显式
+      接线,不能等运行期现猜;
+    - on_error: continue 不能带条件出边:软失败后节点没有输出,条件路由
+      不可判定(NoRouteError 是治理错误,continue 吞不掉它)。
+    """
+    out: dict[str, list[EdgeSpec]] = {}
+    for e in spec.edges:
+        out.setdefault(e.source, []).append(e)
+    for n in spec.nodes:
+        edges = out.get(n.id, [])
+        failed_edges = [e for e in edges if e.when == FAILED_EDGE_KEY]
+        node_path = ("nodes", node_indexes[n.id])
+        if failed_edges and n.on_error != "branch":
+            raise _located_error(
+                f"{source}:节点 {n.id} 有 when: {FAILED_EDGE_KEY} 的边,但它的"
+                f" on_error 不是 branch。{FAILED_EDGE_KEY} 是保留路由键,只在"
+                f" on_error: branch 的节点上合法",
+                node_path + ("on_error",), marks, fallback_paths=(node_path,))
+        if n.on_error == "branch" and not failed_edges:
+            raise _located_error(
+                f"{source}:节点 {n.id} 声明 on_error: branch,但没有一条 "
+                f"when: {FAILED_EDGE_KEY} 的出边。失败处理器必须在校验期"
+                f"显式接线,不能运行期现猜",
+                node_path + ("on_error",), marks, fallback_paths=(node_path,))
+        if n.on_error == "continue":
+            conditional = [e for e in edges if e.when is not None]
+            if conditional:
+                raise _located_error(
+                    f"{source}:节点 {n.id} 声明 on_error: continue,但它有条件"
+                    f"出边(when)。软失败后节点没有输出,条件路由不可判定;"
+                    f"要图继续就用无条件出边,要接失败处理器就用 branch",
+                    node_path + ("on_error",), marks, fallback_paths=(node_path,))
+
+
 def _check_edge_groups(spec, *, source, by_id, node_indexes,
                        marks: _SourceMarks | None = None) -> None:
     """同一来源的出边:无条件边(可多条=并行扇出)与条件边(全部带 when,值互不相同)
-    不可混用——混用的话「这条边走不走」没有可判定的答案。"""
+    不可混用——混用的话「这条边走不走」没有可判定的答案。
+
+    例外(P3):保留键 when: __failed__ 是失败专用边,可与成功路径的任意
+    边型共存(成功→无条件扇出或正常条件路由;软失败→保留键),但每个
+    来源最多一条——路由表按键寻址,重复键没有可判定的目标。
+    """
     out: dict[str, list[tuple[int, EdgeSpec]]] = {}
     for edge_index, e in enumerate(spec.edges):
         out.setdefault(e.source, []).append((edge_index, e))
     for src, indexed_edges in out.items():
-        conditional = [(i, e) for i, e in indexed_edges if e.when is not None]
+        conditional = [(i, e) for i, e in indexed_edges
+                       if e.when is not None and e.when != FAILED_EDGE_KEY]
         unconditional = [(i, e) for i, e in indexed_edges if e.when is None]
+        failed = [(i, e) for i, e in indexed_edges
+                  if e.when == FAILED_EDGE_KEY]
+        if len(failed) > 1:
+            edge_index = failed[1][0]
+            raise _located_error(
+                f"{source}:节点 {src} 有 {len(failed)} 条 when: {FAILED_EDGE_KEY}"
+                f" 的边,最多一条(路由表按键寻址)",
+                ("edges", edge_index, "when"), marks,
+                fallback_paths=(("edges", edge_index),))
         if conditional and unconditional:
             edge_index = conditional[0][0]
             raise _located_error(
                 f"{source}:节点 {src} 的出边混用了条件与无条件边。"
-                f"要么只写无条件边(多条=并行扇出),要么全部带 when",
+                f"要么只写无条件边(多条=并行扇出),要么全部带 when"
+                f"(when: {FAILED_EDGE_KEY} 的失败专用边除外)",
                 ("edges", edge_index, "when"), marks,
                 fallback_paths=(("edges", edge_index),))
         seen_whens: set[str] = set()
@@ -1208,7 +1302,7 @@ def _check_edge_groups(spec, *, source, by_id, node_indexes,
                 ("edges", duplicate_index, "when"), marks,
                 fallback_paths=(("edges", duplicate_index),))
         node = by_id[src]
-        if conditional:
+        if conditional:   # 正常条件边才要求路由字段;纯 __failed__ 不需要
             node_index = node_indexes[src]
             if node.required_fields is None:
                 raise _located_error(

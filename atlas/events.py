@@ -187,6 +187,11 @@ def fold_events(records: list[dict]) -> dict:
             # S1:总结失败不改 run 终态(锚点合同);run_done/run_failed
             # 照常由原有写点决定。
             pass
+        elif t == "node_failed_soft":
+            # P3 软失败:节点按 on_error 策略继续/分支,不是 run 失败。
+            # fold 显式忽略;删掉该事件后重放结果必须与保留时一致
+            # (反例回归锁定,见 test_p3_on_error)。
+            pass
         elif t == "run_paused":
             state["status"] = "paused"
         elif t == "node_done":

@@ -15,14 +15,14 @@
 
 ## 节点字段
 
-所有节点需要 `id`、封闭 `type`、非空 `prompt` 和 `consumes`。`consumes` 只接受 `task`、`<node>.output`、`<coding-node>.diff`。
+所有节点需要 `id`、封闭 `type`、非空 `prompt` 和 `consumes`。`consumes` 接受 `task`、`<node>.output`、`<coding-node>.diff`，以及 `on_error: branch` 节点的 `<node>.error`（软失败的错误上下文产物）。
 
-- `llm`：`model`、`fallback`、`thinking`、`max_output_tokens`、`temperature`、`seed`、`timeout_s`、`retry`、`output_schema`、`route_field`。
+- `llm`：`model`、`fallback`、`thinking`、`max_output_tokens`、`temperature`、`seed`、`timeout_s`、`retry`、`output_schema`、`route_field`、`on_error`。
 - `research`：agent 模型与 `max_turns`、`allow_web`、`allowed_paths`、`timeout_s`、`retry`。
 - `coding_agent`：agent 字段以及必填 `workdir`、`writable`；`allowed_paths` 仅在 `writable: false` 时合法。可写节点比较冻结 baseline 与 agent 结果的普通文件字节清单，生成完整文本 unified diff。
 - `human`：暂停并等待本机界面的批准或驳回。
 
-条件路由按 `route_field` 查找边的 `when`；该字段必须列入 `output_schema.required`，prompt 必须明确合法值。环必须有条件出口和 `max_iterations`。
+条件路由按 `route_field` 查找边的 `when`；该字段必须列入 `output_schema.required`，prompt 必须明确合法值。环必须有条件出口和 `max_iterations`。`llm` 节点可声明 `on_error: stop|continue|branch`（默认 stop）：内容类失败（候选全部失败）可让图继续（continue，不能带条件出边），或走 `when: __failed__` 的失败分支（branch，校验期必须接线，下游可消费 `<node>.error`）；费用、守卫、取消、完整性等治理异常任何策略都不可吞。
 
 ## Agent 字段事实
 
