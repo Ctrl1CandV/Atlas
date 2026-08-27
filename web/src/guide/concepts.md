@@ -21,7 +21,7 @@
 - `llm`：`model`、`fallback`、`thinking`、`max_output_tokens`、`temperature`、`seed`、`timeout_s`、`retry`、`output_schema`、`route_field`、`on_error`、`imports`（从终态 run 字节导入上游产物,身份全等时免费复用）。
 - `research`：agent 模型与 `max_turns`、`allow_web`、`allowed_paths`、`timeout_s`、`retry`。
 - `coding_agent`：agent 字段以及必填 `workdir`、`writable`；`allowed_paths` 仅在 `writable: false` 时合法。可写节点比较冻结 baseline 与 agent 结果的普通文件字节清单，生成完整文本 unified diff。
-- `human`：暂停并等待本机界面的批准或驳回。
+- `human`：暂停并等待本机界面的批准或驳回；可选 `approval_mode: routed`（P11）解锁第三决策「要求修改」：必填非空意见，经校验期强制的 `when: __changes__` 回边进入修订节点（消耗 max_iterations），修改要求以 write-once `<节点id>.changes` 产物供修订节点消费；默认 binary 只认批准/驳回。
 
 条件路由按 `route_field` 查找边的 `when`；该字段必须列入 `output_schema.required`，prompt 必须明确合法值。环必须有条件出口和 `max_iterations`。`llm` 节点可声明 `on_error: stop|continue|branch`（默认 stop）：内容类失败（候选全部失败）可让图继续（continue，不能带条件出边），或走 `when: __failed__` 的失败分支（branch，校验期必须接线，下游可消费 `<node>.error`）；费用、守卫、取消、完整性等治理异常任何策略都不可吞。
 

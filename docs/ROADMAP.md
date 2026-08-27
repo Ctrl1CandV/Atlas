@@ -352,6 +352,7 @@ human 只有 approve/reject。
 
 - **模块**：`atlas/engine.py` human 节点增 `approval_mode: binary|routed`（默认 binary，旧图零变化）与闭合 `decisions` 枚举（approve/reject/request_changes）；复用 `_verify_approval_material` 的三摘要校验，三种 decision 全部先验 projection/consumed/baseline/result/patch 再持久化；`atlas/web.py` 与 `atlas/mcp.py` 同枚举同领域函数。
 - **循环语义**：request_changes 必填非空 comment，经有界回边返回生产者节点；回边轮输入沿用静态 `consumes`（循环携带反馈的完整语义仍是独立 RFC，见 Stage E）；`max_iterations` 消耗与 reject 一致。
+  - **实施偏差（2026-08-27 已交付）**：回边用保留路由键 `when: __changes__` 显式接线到修订节点——不隐式指向"生产者",因为修订者未必是直接上游;配套 `_check_cycles` 新例外:SCC 含 __changes__ 回边且有无条件逃逸边即视为有界合法环;修改要求以 write-once `<node>.changes` 产物承载,反馈可见由消费它的修订节点达成(完整循环携带反馈仍归 Stage E)。
 - **测试**：旧图兼容；三分支决策可重放；缺 comment 拒绝；任何摘要/role/sha/consumed 篡改对三种 decision 都在写事件前拒绝；与 P3 `on_error` 组合不产生旁路。
 
 ## 11. Stage E：独立价值项

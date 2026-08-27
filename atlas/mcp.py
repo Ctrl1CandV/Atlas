@@ -599,6 +599,9 @@ def dry_run_impl(workflow_id: str, task: str, node_overrides=None, *,
             # 计费/身份决策的一部分(imports 进 spec 指纹)
             entry["imports"] = [
                 {"run": i.run, "name": i.name} for i in n.imports]
+        if n.approval_mode != "binary":
+            # P11:routed 审批是计费后的第二次交互点,预演必须可见
+            entry["approval_mode"] = n.approval_mode
         renders.append(entry)
     unconfigured = list(effective.unconfigured_nodes)
     execution_sha256 = None

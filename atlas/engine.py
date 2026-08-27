@@ -50,7 +50,8 @@ from atlas.integrity import (
     read_artifact,
     sha256_bytes,
 )
-from atlas.spec import (FAILED_EDGE_KEY, EdgeSpec, SpecError, WorkflowSpec,
+from atlas.spec import (APPROVAL_DECISIONS, CHANGES_EDGE_KEY, FAILED_EDGE_KEY,
+                        EdgeSpec, SpecError, WorkflowSpec,
                         spec_fingerprint, spec_from_snapshot, spec_to_snapshot,
                         validate_node_spec, validate_spec)
 
@@ -317,17 +318,19 @@ def _make_router(spec: WorkflowSpec, src: str, path_map: dict):
     """LangGraph 条件边的回调:读产物原文(哈希断言)→ 返回 when 键。
 
     路由依据与落盘真相是同一份字节(带哈希断言的读回)。
-    P3:节点软失败(产物库里有 {src}.error 错误产物)时优先走保留键
-    __failed__;成功路径上模型输出保留键字面量属于不可判定的路由,
-    大声拒绝(NoRouteError 是治理错误)。
+    P3:节点软失败时 route_facts 的 __failed__ 优先;P11:routed 审批的
+    request_changes 走 __changes__(同一条事实通道)。成功路径上模型输出
+    保留键字面量属于不可判定的路由,大声拒绝(NoRouteError 是治理错误)。
     """
     node = spec.node(src)
+    reserved_keys = [k for k in (FAILED_EDGE_KEY, CHANGES_EDGE_KEY)
+                     if k in path_map]
 
     def router(state: AtlasState) -> str:
-        if FAILED_EDGE_KEY in path_map:
+        if reserved_keys:
             fact = (state.get("route_facts") or {}).get(src)
-            if fact == FAILED_EDGE_KEY:
-                return FAILED_EDGE_KEY
+            if fact in reserved_keys:
+                return fact
         ok_keys = sorted(k for k in path_map
                          if k.startswith(OK_ROUTE_KEY))
         if ok_keys:
@@ -360,10 +363,12 @@ def _make_router(spec: WorkflowSpec, src: str, path_map: dict):
                 f"节点 {src} 的产物不是 JSON 对象,无法读取路由字段"
             )
         value = _route_value(node, src, parsed, sorted(path_map))
-        if value == FAILED_EDGE_KEY:
-            raise NoRouteError(
-                f"节点 {src} 成功返回了保留路由值 {FAILED_EDGE_KEY!r}。"
-                f"该值只在软失败时由引擎使用;请让模型输出其他路由值")
+        for reserved in reserved_keys:
+            if value == reserved:
+                raise NoRouteError(
+                    f"节点 {src} 成功返回了保留路由值 {reserved!r}。"
+                    "该值只由引擎在失败/要求修改时使用;请让模型输出其他"
+                    "路由值")
         return value
 
     return router
@@ -1119,20 +1124,47 @@ def _make_human_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
         ctx.log.emit("node_started", node=node.id, iteration=iteration,
                      model_requested="human")
 
-        # 暂停在这里。恢复时 answer = {"decision": "approve"|"reject", "comment": str}
+        # 暂停在这里。恢复时 answer = {"decision": ..., "comment": str};
+        # binary 只认 approve|reject,routed 追加 request_changes(P11)。
+        routed = node.approval_mode == "routed"
+        legal = APPROVAL_DECISIONS if routed else ("approve", "reject")
         answer = interrupt({
             "node": node.id,
             "question": node.prompt,
             "consumed": [r.as_dict() for r in consumed],
         })
-        if not isinstance(answer, dict) or answer.get("decision") not in ("approve", "reject"):
+        if not isinstance(answer, dict) or answer.get("decision") not in legal:
             raise HumanRejected(
                 f"human 节点 {node.id} 收到无法解析的批复:{answer!r}。"
-                f"需要 {{decision: approve|reject, comment: ...}}"
+                f"需要 {{decision: {'|'.join(legal)}, comment: ...}}"
             )
+        decision = answer["decision"]
         comment = str(answer.get("comment", "") or "")
-        if answer["decision"] == "reject":
+        validate_approval_decision(decision, comment)
+        if decision == "reject":
             raise HumanRejected(f"human 节点 {node.id} 被人工驳回:{comment or '(无说明)'}")
+
+        if decision == "request_changes":
+            # P11:修改要求落 write-once 产物(修订节点经 consumes 引用),
+            # 路由事实通道指向保留键 __changes__ 的回边;不写 node_done——
+            # 审批轮不是一次成功执行,iterations 已计入循环上限。审计链:
+            # 本次暂停的 run_paused → 审批方的 run_approval(request_changes)
+            # 与变更产物在此落盘。
+            payload = json.dumps({"decision": decision, "comment": comment},
+                                 ensure_ascii=False)
+            ref = store_artifact(
+                ctx.run_dir,
+                name=f"{node.id}.changes",
+                filename=f"{node.id}.changes.{iteration}.json",
+                content=payload.encode("utf-8"),
+            )
+            entry = artifact_entry(
+                name=ref.name, role="changes", path=ref.path,
+                sha256=ref.sha256, size_bytes=len(payload.encode("utf-8")),
+                media_type="application/json")
+            return {"artifacts": {ref.name: entry},
+                    "route_facts": {node.id: CHANGES_EDGE_KEY},
+                    "iterations": {node.id: 1}}
 
         record = json.dumps({"decision": "approve", "comment": comment},
                             ensure_ascii=False)
@@ -1163,7 +1195,10 @@ def _make_human_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
             duration_s=round(time.monotonic() - started, 3),
         )
         return {"artifacts": {ref.name: out_entry},
-                "iterations": {node.id: 1}}
+                "iterations": {node.id: 1},
+                # 覆写最近一次结局:routed 二轮 approve 时必须清掉上一轮
+                # 残留的 __changes__ 事实(merge_dicts 更新者胜;P3 同教训)
+                "route_facts": {node.id: "ok"}}
 
     return run
 
@@ -1194,20 +1229,19 @@ def _build_compiled_graph(spec: WorkflowSpec, ctx: _NodeCtx, checkpointer):
     for e in spec.edges:
         outgoing.setdefault(e.source, []).append(e)
     for src, edges in outgoing.items():
-        # P3:__failed__ 是失败专用条件边,与成功路径的边型共存:
-        # - 正常条件边 + __failed__:成功按 when 路由,软失败走保留键;
-        # - 无条件边 + __failed__:成功扇出全部无条件目标(OK_ROUTE_KEY);
-        # - 只有 __failed__:成功即图收尾(OK_ROUTE_KEY → END)。
-        failed = [e for e in edges if e.when == FAILED_EDGE_KEY]
+        # P3/P11:__failed__ 与 __changes__ 是保留条件边,与成功路径的边型
+        # 共存——失败/要求修改由事实通道判定;成功扇出走 OK_ROUTE_KEY。
+        reserved = [e for e in edges
+                    if e.when in (FAILED_EDGE_KEY, CHANGES_EDGE_KEY)]
         conditional = [e for e in edges
-                       if e.when is not None and e.when != FAILED_EDGE_KEY]
+                       if e.when is not None and e.when not in
+                       (FAILED_EDGE_KEY, CHANGES_EDGE_KEY)]
         unconditional = [e for e in edges if e.when is None]
-        if conditional or failed:
+        if conditional or reserved:
             path_map = {e.when: (END if e.target == "END" else e.target)
                         for e in conditional}
-            for e in failed:
-                path_map[FAILED_EDGE_KEY] = (END if e.target == "END"
-                                             else e.target)
+            for e in reserved:
+                path_map[e.when] = (END if e.target == "END" else e.target)
             ok_targets = ([END if e.target == "END" else e.target
                            for e in unconditional] if unconditional
                           else ([END] if not conditional else []))
@@ -1854,6 +1888,19 @@ def lock_approval_run(run_id: str, *, spec: WorkflowSpec,
         raise
 
 
+def validate_approval_decision(decision: str, comment: str) -> None:
+    """P11 三分支批复的领域校验(Web/MCP/engine 同一实现):
+    decision 闭合枚举;request_changes 必须给出非空修改意见(锚点合同),
+    否则修订回边没有可审计的输入。"""
+    if decision not in APPROVAL_DECISIONS:
+        raise SpecError(
+            f"decision 只能是 {'/'.join(APPROVAL_DECISIONS)},得到 {decision!r}")
+    if decision == "request_changes" and not str(comment or "").strip():
+        raise SpecError(
+            "request_changes 必须填写非空 comment(要求修改而没有意见,"
+            "修订节点无从下手,也留不下审计)")
+
+
 def approve_run(
     run_id: str,
     *,
@@ -1869,13 +1916,14 @@ def approve_run(
 ) -> RunResult:
     """对暂停在 human 节点的运行给出批复并继续执行。
 
-    decision 只认 approve/reject;reject 会让运行以 HumanRejected 失败终止。
+    decision 闭合枚举 approve/reject/request_changes(P11);reject 与
+    request_changes 落 ledger 后行为不同:reject 让运行以 HumanRejected
+    失败终止,request_changes 经保留键 __changes__ 回边修订后再次暂停。
     ``_lock_held`` 仅供 Web 在同步预占锁后交给后台线程继续。
     """
     run_dir = Path(runs_root) / run_id
     try:
-        if decision not in ("approve", "reject"):
-            raise SpecError(f"decision 只能是 approve/reject,得到 {decision!r}")
+        validate_approval_decision(decision, comment)
         prepared = _use_prepared(spec, registry, agent_runner, prepared)
         entry = prepared.entry
         registry = prepared.registry
@@ -1903,6 +1951,15 @@ def approve_run(
                 f"run {run_id!r} 不在暂停状态(当前 {status!r}),"
                 f"只有暂停在 human 节点的运行才能批复")
         approval_evidence = _verify_approval_material(run_dir, events)
+        # P11:binary 图拒绝 request_changes(枚举合法但该节点模式不支持),
+        # 在写任何事件之前拦下
+        if (decision == "request_changes"
+                and spec.node(approval_evidence["node"]).approval_mode
+                != "routed"):
+            raise SpecError(
+                f"human 节点 {approval_evidence['node']!r} 是 binary 审批,"
+                "只认 approve/reject;要支持三分支请把图改为 "
+                "approval_mode: routed 并接线 __changes__ 回边")
 
         log = EventLog(run_dir, continue_seq=True)
         spent = _settled_spent_usd(events)

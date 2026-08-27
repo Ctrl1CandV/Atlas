@@ -55,6 +55,9 @@ def spec_fingerprint(spec: "WorkflowSpec") -> str:
             d.pop("on_error", None)
         if not d.get("imports"):
             d.pop("imports", None)
+        # P11:binary 是既有行为,缺省不进指纹;routed 才是身份的一部分
+        if d.get("approval_mode") in (None, "binary"):
+            d.pop("approval_mode", None)
         return d
 
     payload = {
@@ -604,6 +607,12 @@ def _parse_fork(d: object, *, source: str) -> "ForkSpec | None":
 # P3 失败策略与保留路由键(锚点:on_error 闭合枚举;branch 只走 __failed__)
 ON_ERROR_VALUES = ("stop", "continue", "branch")
 FAILED_EDGE_KEY = "__failed__"
+# P11 三分支审批:routed 模式的 human 节点可走保留键 __changes__ 的回边
+# (request_changes → 修订节点),与 __failed__ 同一保留键机制、同样校验期
+# 强制接线。闭合的 decisions 枚举;binary 模式只认前两个。
+CHANGES_EDGE_KEY = "__changes__"
+APPROVAL_MODES = ("binary", "routed")
+APPROVAL_DECISIONS = ("approve", "reject", "request_changes")
 
 
 @dataclass(frozen=True)
@@ -634,6 +643,10 @@ class NodeSpec:
     # P7 产物导入:从终态 run 复制上游结果作为本节点输入的替代来源。
     # 空元组 = 未声明;仅非空进指纹与快照语义有效值。
     imports: tuple[ArtifactImport, ...] = ()
+    # P11 审批模式:仅 human 节点有意义。binary(默认)= approve/reject
+    # 二分支,旧图零变化;routed 追加 request_changes 三分支(需显式接线
+    # when: __changes__ 的回边)。默认值不进指纹。
+    approval_mode: str = "binary"
 
     @property
     def output_name(self) -> str:
@@ -802,7 +815,7 @@ _NODE_FIELDS = frozenset({
     "id", "type", "model", "prompt", "consumes", "output_schema", "fallback",
     "route_field", "workdir", "max_turns", "max_output_tokens", "thinking",
     "temperature", "seed", "writable", "allow_web", "allowed_paths",
-    "timeout_s", "retry", "on_error", "imports",
+    "timeout_s", "retry", "on_error", "imports", "approval_mode",
 })
 _EDGE_FIELDS = frozenset({"from", "to", "when"})
 _GUARD_FIELDS = frozenset({"max_iterations", "max_cost_usd", "timeout_s"})
@@ -957,14 +970,14 @@ def _parse_node(rn, *, where: str) -> NodeSpec:
                          "workdir", "max_turns", "max_output_tokens",
                          "thinking", "temperature", "seed", "writable",
                          "allow_web", "allowed_paths", "timeout_s", "retry",
-                         "on_error", "imports"}
+                         "on_error", "imports", "approval_mode"}
     if unknown:
         raise SpecError(f"{where} 有未知字段:{sorted(unknown)}。"
                         f"可用:id/type/model/prompt/consumes/output_schema/"
                         f"fallback/route_field/workdir/max_turns/"
                         f"max_output_tokens/thinking/temperature/seed/"
                         f"writable/allow_web/allowed_paths/timeout_s/retry/"
-                        f"on_error/imports")
+                        f"on_error/imports/approval_mode")
 
     nid = rn.get("id")
     if not isinstance(nid, str) or not _NODE_ID_RE.match(nid):
@@ -1172,6 +1185,14 @@ def _parse_node(rn, *, where: str) -> NodeSpec:
     except SpecError:
         raise
 
+    approval_mode = rn.get("approval_mode", "binary")
+    if approval_mode is None:
+        approval_mode = "binary"
+    if (not isinstance(approval_mode, str)
+            or approval_mode not in APPROVAL_MODES):
+        raise SpecError(f"{where}(节点 {nid})的 approval_mode 必须是 "
+                        f"{list(APPROVAL_MODES)} 之一,得到 {approval_mode!r}")
+
     return NodeSpec(id=nid, type=ntype, model=model, prompt=prompt,
                     consumes=list(consumes), required_fields=required,
                     fallback=list(fallback), route_field=route_field,
@@ -1180,7 +1201,7 @@ def _parse_node(rn, *, where: str) -> NodeSpec:
                     temperature=temperature, seed=seed, writable=writable,
                     allow_web=allow_web, allowed_paths=list(allowed_paths),
                     timeout_s=timeout_s, retry=retry, on_error=on_error,
-                    imports=imports)
+                    imports=imports, approval_mode=approval_mode)
 
 
 def validate_node_spec(node: NodeSpec, *, where: str = "node") -> NodeSpec:
@@ -1228,6 +1249,8 @@ def validate_node_spec(node: NodeSpec, *, where: str = "node") -> NodeSpec:
         raw["on_error"] = node.on_error
     if node.imports:
         raw["imports"] = [i.as_dict() for i in node.imports]
+    if node.approval_mode != "binary":
+        raw["approval_mode"] = node.approval_mode
     return _parse_node(raw, where=where)
 
 
@@ -1284,22 +1307,30 @@ def validate_spec(spec: WorkflowSpec, *, source: str = "spec",
             for suffix, producer_type, need_on_error in (
                     (".output", None, None),
                     (".diff", "coding_agent", None),
-                    (".error", "llm", "branch")):
+                    (".error", "llm", "branch"),
+                    (".changes", "human", None)):
                 if c.endswith(suffix):
                     producer = c[: -len(suffix)]
                     if producer in by_id:
                         pnode = by_id[producer]
-                        if ((producer_type is None or pnode.type == producer_type)
-                                and (need_on_error is None
-                                     or pnode.on_error == need_on_error)):
+                        # P11:.changes 只可能由 routed human 产出(binary
+                        # 的批复路径永远不写它),接线错误在校验期拦下
+                        produces = (
+                            (producer_type is None or pnode.type == producer_type)
+                            and (need_on_error is None
+                                 or pnode.on_error == need_on_error)
+                            and (suffix != ".changes"
+                                 or pnode.approval_mode == "routed"))
+                        if produces:
                             ok = True
                     break
             if not ok:
                 raise _located_error(
                     f"{source}:节点 {n.id} 消费 {c!r},但不存在能产出它的节点。"
                     f"consumes 只能引用 'task'、'<节点id>.output'、coding_agent "
-                    f"节点的 '<节点id>.diff',或 on_error: branch 节点的 "
-                    f"'<节点id>.error'(已知节点:{sorted(ids)})",
+                    f"节点的 '<节点id>.diff'、on_error: branch 节点的 "
+                    f"'<节点id>.error',或 routed human 节点的 "
+                    f"'<节点id>.changes'(已知节点:{sorted(ids)})",
                     ("nodes", node_index, "consumes", consume_index), _marks,
                     fallback_paths=(("nodes", node_index, "consumes"),
                                     ("nodes", node_index)),
@@ -1320,6 +1351,8 @@ def validate_spec(spec: WorkflowSpec, *, source: str = "spec",
     _check_edge_groups(spec, source=source, by_id=by_id,
                        node_indexes=node_indexes, marks=_marks)
     _check_on_error(spec, source=source, by_id=by_id,
+                    node_indexes=node_indexes, marks=_marks)
+    _check_approval(spec, source=source, by_id=by_id,
                     node_indexes=node_indexes, marks=_marks)
     entry = _resolve_entry(spec, source=source, by_id=by_id, marks=_marks)
     _check_reachable(spec, entry, source=source, marks=_marks)
@@ -1366,6 +1399,52 @@ def _check_on_error(spec, *, source, by_id, node_indexes,
                     node_path + ("on_error",), marks, fallback_paths=(node_path,))
 
 
+def _check_approval(spec, *, source, by_id, node_indexes,
+                    marks: _SourceMarks | None = None) -> None:
+    """P11:approval_mode 与保留路由键 __changes__ 的结构校验。
+
+    - approval_mode 闭合枚举,且只有 human 节点可声明;
+    - routed 必须显式接线至少一条 when: __changes__ 出边(修订回路不能
+      运行期现猜,与 __failed__ 同纪律);
+    - binary 拒绝 __changes__ 出边(保留键只在 routed 上合法)。
+    """
+    out: dict[str, list[EdgeSpec]] = {}
+    for e in spec.edges:
+        out.setdefault(e.source, []).append(e)
+    for n in spec.nodes:
+        if n.approval_mode not in APPROVAL_MODES:
+            raise _located_error(
+                f"{source}:节点 {n.id} 的 approval_mode 必须是 "
+                f"{'/'.join(APPROVAL_MODES)},得到 {n.approval_mode!r}",
+                ("nodes", node_indexes[n.id], "approval_mode"), marks,
+                fallback_paths=(("nodes", node_indexes[n.id]),))
+        changes_edges = [e for e in out.get(n.id, [])
+                         if e.when == CHANGES_EDGE_KEY]
+        if n.approval_mode == "routed":
+            if n.type != "human":
+                raise _located_error(
+                    f"{source}:节点 {n.id} 是 {n.type},approval_mode 只对 "
+                    "human 节点有意义",
+                    ("nodes", node_indexes[n.id], "approval_mode"), marks,
+                    fallback_paths=(("nodes", node_indexes[n.id]),))
+            if not changes_edges:
+                raise _located_error(
+                    f"{source}:human 节点 {n.id} 声明 approval_mode: routed,"
+                    f" 但没有一条 when: {CHANGES_EDGE_KEY} 的出边。要求修改的"
+                    "回边必须在校验期显式接线到修订节点",
+                    ("nodes", node_indexes[n.id], "approval_mode"), marks,
+                    fallback_paths=(("nodes", node_indexes[n.id]),))
+        elif changes_edges:
+            # 归属校验对**所有**节点生效:binary/非声明节点携带保留键出边
+            # 同样非法(只看 routed 分支会漏掉这个方向)
+            raise _located_error(
+                f"{source}:节点 {n.id} 有 when: {CHANGES_EDGE_KEY} 的边,"
+                "但它的 approval_mode 不是 routed。该键只在 routed human"
+                " 节点上合法",
+                ("nodes", node_indexes[n.id], "approval_mode"), marks,
+                fallback_paths=(("nodes", node_indexes[n.id]),))
+
+
 def _check_edge_groups(spec, *, source, by_id, node_indexes,
                        marks: _SourceMarks | None = None) -> None:
     """同一来源的出边:无条件边(可多条=并行扇出)与条件边(全部带 when,值互不相同)
@@ -1378,17 +1457,28 @@ def _check_edge_groups(spec, *, source, by_id, node_indexes,
     out: dict[str, list[tuple[int, EdgeSpec]]] = {}
     for edge_index, e in enumerate(spec.edges):
         out.setdefault(e.source, []).append((edge_index, e))
+    reserved = {FAILED_EDGE_KEY, CHANGES_EDGE_KEY}
     for src, indexed_edges in out.items():
         conditional = [(i, e) for i, e in indexed_edges
-                       if e.when is not None and e.when != FAILED_EDGE_KEY]
+                       if e.when is not None and e.when not in reserved]
         unconditional = [(i, e) for i, e in indexed_edges if e.when is None]
         failed = [(i, e) for i, e in indexed_edges
                   if e.when == FAILED_EDGE_KEY]
+        changes = [(i, e) for i, e in indexed_edges
+                   if e.when == CHANGES_EDGE_KEY]
         if len(failed) > 1:
             edge_index = failed[1][0]
             raise _located_error(
                 f"{source}:节点 {src} 有 {len(failed)} 条 when: {FAILED_EDGE_KEY}"
                 f" 的边,最多一条(路由表按键寻址)",
+                ("edges", edge_index, "when"), marks,
+                fallback_paths=(("edges", edge_index),))
+        if len(changes) > 1:
+            edge_index = changes[1][0]
+            raise _located_error(
+                f"{source}:节点 {src} 有 {len(changes)} 条 when: "
+                f"{CHANGES_EDGE_KEY} 的边,最多一条(P11 保留键同样按路由表"
+                "按键寻址)",
                 ("edges", edge_index, "when"), marks,
                 fallback_paths=(("edges", edge_index),))
         if conditional and unconditional:
@@ -1578,7 +1668,17 @@ def _check_cycles(spec, *, source, by_id,
             e for nid in comp for e in spec.outgoing(nid)
             if e.when is not None and (e.target == "END" or e.target not in comp_set)
         ]
-        if not exits:
+        # P11 例外:routed 审批的 request_changes 回边(保留键,留在环内)
+        # 配上同分量任一节点的**无条件**逃逸边(approve → 环外/END)构成
+        # 有界循环——退出由人工决定,上限由 max_iterations 兜底。
+        has_changes_back = any(
+            e.when == CHANGES_EDGE_KEY
+            for nid in comp for e in spec.outgoing(nid))
+        has_plain_escape = any(
+            e.when is None and (e.target == "END"
+                                or e.target not in comp_set)
+            for nid in comp for e in spec.outgoing(nid))
+        if not exits and not (has_changes_back and has_plain_escape):
             # 整个 SCC 和多条边共同导致死环，只有相关路径，没有唯一源码位置。
             raise _located_error(
                 f"{source}:环 {sorted(comp)} 没有条件出口——死环,永远退不出去。"

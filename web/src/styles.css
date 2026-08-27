@@ -546,6 +546,8 @@ input:focus, textarea:focus {
 .approval-bar input { flex: 1; }
 .approval-bar .approve { background: var(--color-done); color: #08130d; border: none; border-radius: var(--radius-ctrl); padding: 6px 14px; font-weight: 600; }
 .approval-bar .reject { background: var(--color-fail); color: #fff; border: none; border-radius: var(--radius-ctrl); padding: 6px 14px; font-weight: 600; }
+/* P11:routed 审批的"要求修改"——介于批准与驳回之间的警示中间色 */
+.approval-bar .changes { background: #b7791f; color: #fff; border: none; border-radius: var(--radius-ctrl); padding: 6px 14px; font-weight: 600; }
 .approval-bar .resume { background: var(--color-accent); color: var(--color-canvas); border: none; border-radius: var(--radius-ctrl); padding: 6px 14px; font-weight: 600; }
 .approval-bar .resume:disabled { opacity: 0.55; cursor: wait; }
 /* 暂停态升级为待审材料面板:先看材料,再决策 */

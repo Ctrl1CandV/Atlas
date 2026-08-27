@@ -68,6 +68,8 @@ export interface WFNode {
   consumes: string[];
   required_fields: string[];
   route_field: string;
+  /** P11:human 节点的审批模式(binary=approve/reject;routed 追加 request_changes) */
+  approval_mode?: 'binary' | 'routed';
   thinking?: string | null;
   max_output_tokens?: number | null;
   temperature?: number | null;

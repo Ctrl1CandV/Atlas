@@ -95,9 +95,12 @@ export async function fetchText(url: string): Promise<string> {
   return resp.text();
 }
 
+/** P11 三分支批复;request_changes 由后端强制非空 comment */
+export type ApprovalDecision = 'approve' | 'reject' | 'request_changes';
+
 export async function approveRun(
   rid: string,
-  decision: 'approve' | 'reject',
+  decision: ApprovalDecision,
   comment: string,
 ): Promise<void> {
   const resp = await fetch(`/api/runs/${rid}/approve`, {

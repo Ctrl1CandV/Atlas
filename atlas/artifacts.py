@@ -17,7 +17,9 @@ from atlas.integrity import (ArtifactRef, IntegrityError, read_artifact,
 
 # 封闭清单:加角色要改这里,不接受 YAML/外部输入发明新角色
 ARTIFACT_ROLES = frozenset({"report", "output", "diff", "projection", "raw",
-                            "error"})
+                            "error",
+                            # P11:routed 审批的 request_changes 意见产物
+                            "changes"})
 
 _ROLE_TITLES = {
     "report": "执行报告",
@@ -26,6 +28,7 @@ _ROLE_TITLES = {
     "projection": "输入投影",
     "raw": "原始产物",
     "error": "错误上下文",   # P3 soft failure 的 write-once 错误产物
+    "changes": "修改要求",     # P11 routed 审批的 request_changes 意见
 }
 
 

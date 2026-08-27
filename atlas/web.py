@@ -207,6 +207,7 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                 "consumes": n.consumes,
                 "required_fields": n.required_fields or [],
                 "route_field": n.route_field,
+                "approval_mode": n.approval_mode,
                 "max_output_tokens": n.max_output_tokens,
                 "thinking": n.thinking,
                 "temperature": n.temperature,
@@ -756,15 +757,23 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
 
     @app.post("/api/runs/{rid}/approve")
     def approve(rid: str, body: dict):
-        """对暂停在 human 节点的运行给出批复(approve/reject)。"""
+        """对暂停在 human 节点的运行给出批复(P11 三分支)。
+
+        枚举与 request_changes 的非空意见规则由引擎的
+        validate_approval_decision 统一裁决(Web/MCP 同一领域函数);
+        驳回必填理由是本端点的既有约定。全部同步 400/409,不触碰运行锁。
+        """
         _check_id(rid, "运行")
         decision = str(body.get("decision", ""))
-        if decision not in ("approve", "reject"):
-            raise HTTPException(400, "decision 只能是 approve/reject")
         comment = str(body.get("comment", "") or "")
+        try:
+            from atlas.engine import validate_approval_decision
+            validate_approval_decision(decision, comment)
+        except SpecError as exc:
+            raise HTTPException(400, str(exc)) from exc
         if decision == "reject" and not comment.strip():
             # 驳回不留理由 = 下游(与未来的你)无法追溯为什么否决;
-            # 批准时理由可省。同步 400,不触碰运行锁。
+            # 批准时理由可省。
             raise HTTPException(400, "驳回必须填写理由(comment 不能为空)")
         spec = _spec_for_run(rid)
 

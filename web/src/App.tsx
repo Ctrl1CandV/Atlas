@@ -3,6 +3,7 @@ import { motion, useReducedMotion } from 'motion/react';
 import { ReactFlowProvider } from '@xyflow/react';
 import {
   approveRun,
+  type ApprovalDecision,
   cancelRun,
   deleteRun,
   deleteWorkflow,
@@ -522,10 +523,13 @@ export default function App() {
     }
   };
 
-  const handleApproval = async (decision: 'approve' | 'reject') => {
+  const handleApproval = async (decision: ApprovalDecision) => {
     if (!runId) return;
-    if (decision === 'reject' && !approvalComment.trim()) {
-      setError('驳回必须填写理由:说明哪里不合格、期望怎么改(后端同样强制)。');
+    if ((decision === 'reject' || decision === 'request_changes')
+        && !approvalComment.trim()) {
+      setError(decision === 'reject'
+        ? '驳回必须填写理由:说明哪里不合格、期望怎么改(后端同样强制)。'
+        : '要求修改必须写清意见:改什么、怎么改(后端同样强制)。');
       return;
     }
     try {
@@ -833,6 +837,13 @@ export default function App() {
                 <button className="approve" onClick={() => handleApproval('approve')}>
                   批准
                 </button>
+                {awaitingGate?.spec.approval_mode === 'routed' && (
+                  <button className="changes"
+                    title="要求修改:必填意见,经修订回边返回生产者(消耗 max_iterations)"
+                    onClick={() => handleApproval('request_changes')}>
+                    要求修改
+                  </button>
+                )}
                 <button className="reject" onClick={() => handleApproval('reject')}>
                   驳回
                 </button>
