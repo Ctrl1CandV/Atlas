@@ -112,8 +112,10 @@ P4 shared launcher；复用 P1 状态派生和现有 stable run lock；成本沿
 
 - 所有真实 agent 示例与指南必须要求或强烈建议 `guards.max_cost_usd`，并解释 Atlas cap 只有在价格/runner 预算能落实时才是供应商账单边界。
 - pricing 全为 `null` 且图含 agent 时，preview 显示醒目的 operational warning；不能把 warning 写成已阻止收费。
+  - 批次 K 将补齐 retry 维度的同类 warning（retry>0 的 agent 节点必被提示放大风险）。
 - 明确 Atlas `max_cost_usd` 与 Claude CLI `--max-budget-usd` 的映射、舍入、失败和 unknown 行为；无法传递时 fail-loud 或明确降级，不静默假装已限额。
 - 自动 retry 会放大 agent 花销。先写 RFC 决定“agent 默认 `retry=0`”或“只有存在可执行预算时才允许 retry”；在决策前不改兼容行为。
+  - **已裁决（2026-08-27）**：采纳 agent 缺省 retry=0 的书面承诺 + dry-run 组合警告（批次 K 实施）；准入硬拦否决。见 `rfcs/agent-retry-budget.md` 决议节。
 
 ### 验收
 

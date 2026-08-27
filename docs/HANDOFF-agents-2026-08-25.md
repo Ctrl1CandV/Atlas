@@ -16,7 +16,7 @@
 ## 二、硬性纪律(违反任何一条都算事故)
 
 1. **git**:提交与推送必须经用户明确允许(本文档的批次流程已含"批次完成即提交推送"的授权,但**发布/tag/release 操作始终需要用户单独批准**);推送走上面的 socks5h 命令;绝不提交 `config/.env`、config/ 活动文件(providers.json / capabilities.json / pricing.json / agents.json / models.reference.json)、`runs/`、`runs-archive/`、`workflows/mcp-custom-pipeline.yaml`、本机绝对路径。
-2. **成本红线**:任何真实供应商调用前必须先 validate + dry-run;显式预算或结构性约束控本(retry=0、timeout_s、max_iterations、便宜模型);本机 pricing 全 null 时多节点图**不可设 max_cost_usd**(只放行首个计费节点);agent 真跑必须配预算;自动 retry 的默认策略在 RFC 决策前**不得改动**(见 `docs/rfcs/agent-retry-budget.md`)。
+2. **成本红线**:任何真实供应商调用前必须先 validate + dry-run;显式预算或结构性约束控本(retry=0、timeout_s、max_iterations、便宜模型);本机 pricing 全 null 时多节点图**不可设 max_cost_usd**(只放行首个计费节点);agent 真跑必须配预算;自动 retry 已于 2026-08-27 裁决——采纳 A(缺省不重跑的书面承诺)+C(dry-run 警告),否决 B 准入硬拦,实施=批次 K(见 `docs/rfcs/agent-retry-budget.md` 决议节);K 落地前现状(retry 缺省 0)不变。
 3. **账本纪律**:append-only 事件账本是唯一真相;新事件类型必须有测试,且 `fold_events` 终态语义不得改变(删掉新事件后 fold 结果必须与旧事件流一致);产物 write-once + SHA-256;不吞异常、不静默降级;fail-closed。
 4. **文档纪律**:用户可见变更必须进 CHANGELOG;文档不得声称未验证的能力;数字(测试基线、工具数)必须与代码一致——改了就同步全部出现点。
 5. **界面纪律**:Web 只观测 + 改环境 + 审批/取消类控制,图的读写闭环留给 MCP,不加图编辑器。
@@ -56,6 +56,9 @@
 | 双 Agent 模式 | 剩余阶段交给实施 Agent + 审查 Agent;每批次审查通过才提交 | 2026-08-25 |
 | agent retry 策略 | 先 RFC(`docs/rfcs/agent-retry-budget.md`)后动;建议路径"先警告后默认 retry=0";决策权在用户 | 2026-08-23 |
 | C2 真实单价 | pricing.json 只能由用户填确认过的数字,Agent 永不猜 | 2026-08-23 |
+| D4 retry 裁决 | 采纳 A(缺省 0 升格为书面承诺)+C(dry-run 组合警告),否决 B 准入硬拦;实施=批次 K | 2026-08-27 |
+| C2 状态更新 | **舍弃**——pricing.json 保持可选补充,不再作为待办/提醒;控本以结构性约束为准(retry=0/max_iterations/timeout);provider-reported cost 方向仅存档于 BACKLOG 搁置区 | 2026-08-27 |
+| Stage E 全量立项 | 五项全做,顺序 K → E-1 web_search → E-2 通讯文件(A/B)→ E-3 内置前端 → E-4 浏览器矩阵(先冒烟)→ E-5 沙箱调研;设计与验收详见 `docs/PLAN-stage-e-2026-08-27.md` | 2026-08-27 |
 
 ## 五、剩余批次清单(建议顺序;合同细节见 ROADMAP 对应节)
 
@@ -81,9 +84,11 @@
 **批次 F–I:第六梯队(顺序固定:P7 → P13 → P10 → P11)**
 合同:ROADMAP §7–§10 + 各自锚点。P7(artifact import + invocation hash,高风险,SHA 血缘合同是命门)→ P13(fork 失效闭包)→ P10(retention/star/索引,与账本治理合并设计)→ P11(request_changes 三分支)。
 
-**批次 J+:第七梯队 Stage E(各自 RFC 后立项)**:LLM web_search、Release 内置已构建前端、OS 沙箱调研、浏览器矩阵 GUI 测试、节点通讯文件(`docs/rfcs/node-io-files.md`)。
+**批次 K:D4 收官小批次(先行)**:①retry 默认承诺落档(README×2/skill/concepts/CHANGELOG 固定句式);②`_dry_run_warnings` 对 retry>0 agent 节点的组合警告+反向验证测试。实施清单见 `rfcs/agent-retry-budget.md` 决议节。
 
-**常备任务(非批次)**:C2 用户填真实单价(提醒即可);发现新 flake 按"根因修复优先"处理(先例:锁种子字节)。
+**Stage E 各批(E-1…E-5)**:依 `docs/PLAN-stage-e-2026-08-27.md` 滚动立项,顺序 E-1 → E-2A/B → E-3 → E-4(冒烟先) → E-5;每批仍走「报告→审查→提交」协议。
+
+**常备任务(非批次)**:~~C2 用户填真实单价~~(2026-08-27 舍弃,pricing.json 不再作为待办);发现新 flake 按"根因修复优先"处理(先例:锁种子字节)。
 
 ## 六、设计文档要求(每批次产出的文档义务)
 

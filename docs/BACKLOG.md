@@ -7,7 +7,7 @@
 ## 已完成（2026-08-23）
 
 - **P4 共享 launcher + MCP 异步 + `atlas_list_runs`** ✅：`atlas/launcher.py` controller registry；`wait=false` 预检后返回 run_id；`atlas_list_runs` 降序稳定分页；Web/MCP 共用 `runs.build_run_summary`。
-- **P2 协作式取消** ✅（部分范围）：`run_cancelled` 终态、`atlas_cancel_run`（第 8 工具）、Web API 端点、llm/human/agent 入口与重试等待的消费点、agent retry 预算 RFC 草案。~~CLI 进程树终止、Web 界面取消按钮、`--max-budget-usd` 映射~~ 已随 D1–D3 交付（见下）；剩余 **agent retry 默认策略的 RFC 裁决**（D4）待用户拍板后实施。
+- **P2 协作式取消** ✅（部分范围）：`run_cancelled` 终态、`atlas_cancel_run`（第 8 工具）、Web API 端点、llm/human/agent 入口与重试等待的消费点、agent retry 预算 RFC 草案。~~CLI 进程树终止、Web 界面取消按钮、`--max-budget-usd` 映射~~ 已随 D1–D3 交付（见下）；D4 已裁决（2026-08-27）：采纳 A 承诺 + C 警告、否决 B 硬拦，实施为**批次 K**（见 `rfcs/agent-retry-budget.md` 决议节与 `PLAN-stage-e-2026-08-27.md`）。
 - **P9 controller heartbeat** ✅（2026-08-26）：每次 attempt 派发窗口内 `node_progress`（attempt/model/elapsed_ms/phase）；间隔默认与下限 30s、`ATLAS_NODE_HEARTBEAT_INTERVAL_S` run 级可配；窗口在 attempt 结束/失败/取消/终态后闭合，迟到 tick 拒绝；fold 显式忽略；事件容量代价（30s ≈ 2880 条/节点/天）写入 STATUS,分段账本治理随 P10。
 - **P3 异常 taxonomy + 节点 on_error** ✅（2026-08-26）：`atlas/exc.py` 分类层（治理永不可吞，未登记 fail-closed）；节点级 `on_error: stop/continue/branch`（默认零变化、默认值不进指纹）；branch 走保留键 `__failed__`（校验期强制）；软失败写 write-once 错误产物 + `node_failed_soft`，fold 显式忽略（删事件回归锁定）；Web/MCP/dry-run 同源展示。
 - **P7 artifact import + invocation hash** ✅（2026-08-27）：imports 字节复制（源锁内校验+原子落盘+写后复验）、`artifact_imported` lineage、`invocation_sha256` 入账（node_started）、invocation 全等自动 skip（`node_imported_reused`）、删源不影响克隆、缺源/运行中/锁竞争全部确定性 fail-closed、dry-run 明示导入清单。
@@ -15,8 +15,8 @@
 
 - **P10 retention/star/run index** ✅（2026-08-27）：env 双变量默认全 null 永不自动删；候选选择纯函数（done/failed/cancelled+无 star 才进池,保护对象不占配额,数量留最新 N/年龄严格更老/双阈值并集）；共享删除执行器(stable lock+.trash 同卷隔离+no-follow,tombstone 重试),Web DELETE 与清扫同一实现；star write-once 标记(POST 端点可带注记,取消无 API)+列表 flag；`.runs-index.json` 轻量索引(指纹命中/变更单账本重读/全量成员剪枝/损坏重建),动态 interrupted 判定不走缓存,与 full-fold 一致契约测试。engine 完成后顺路清扫,失败大声记账不影响本次 run。
 - **P11 request_changes / routed approval** ✅（2026-08-27）：human `approval_mode: binary|routed`（默认零变化、缺省不进指纹）；routed 解锁三分支 decision，request_changes 必填非空 comment、经保留键 `when: __changes__` 回边返回修订节点、消耗 max_iterations；三决策共用锁内材料验证与同一领域校验函数（engine/Web/MCP 同源），binary 图收三分支写事件前拒绝；write-once `<node>.changes` 产物（新增 role）由修订节点显式消费；成功覆写 route_facts 防 P3 同款残留误路由。
-- **体验债小件打包 E** ✅（2026-08-26）：预留额展示、跨入口运行列表轮询、完整账本下载入口(`GET /api/runs/{id}/events.jsonl`)、agents.json 状态卡片(只读,预检事实含失败原因)、seed/temperature 回显核对(node_done `param_audit`:echo_ok/not_echoed/mismatch)、`--help` 契约误判报错带版本、`_resume_graph_replay` 收敛为显式 `_test_only` 测试专用、`_NODE_FACTORIES` 统一分发。熔断持久化与 16MiB 分段账本随 P10;max_parallelism 与 D4 retry 默认策略待 RFC 裁决。
-- **P2 残余强化 D1–D3** ✅（2026-08-26）：Web 取消按钮（running/paused 可见,确认后走 `/api/runs/{id}/cancel`,HTTP 契约 403/404/409/paused 直写有测试）；`local_cli` 取消终止整棵进程树（watcher 轮询 cancel.request → taskkill /T /F 或 killpg,真实孙进程 kill 测试,树杀失败保持 AgentCliError fail-closed）；`--max-budget-usd ≤0` 派发前拒绝（有效映射/缺参预检/超支报告已有测试）。**D4(agent retry RFC 决策)未含——等用户裁决后再实施。**
+- **体验债小件打包 E** ✅（2026-08-26）：预留额展示、跨入口运行列表轮询、完整账本下载入口(`GET /api/runs/{id}/events.jsonl`)、agents.json 状态卡片(只读,预检事实含失败原因)、seed/temperature 回显核对(node_done `param_audit`:echo_ok/not_echoed/mismatch)、`--help` 契约误判报错带版本、`_resume_graph_replay` 收敛为显式 `_test_only` 测试专用、`_NODE_FACTORIES` 统一分发。熔断持久化与 16MiB 分段账本随 P10;max_parallelism 搁置（2026-08-27 用户裁定本轮不讨论,重启需先补设计）；D4 retry 已裁决为批次 K；熔断持久化与 16MiB 分段账本同样归入搁置区（P10 的 retention+索引是当前容量治理主路径）。
+- **P2 残余强化 D1–D3** ✅（2026-08-26）：Web 取消按钮（running/paused 可见,确认后走 `/api/runs/{id}/cancel`,HTTP 契约 403/404/409/paused 直写有测试）；`local_cli` 取消终止整棵进程树（watcher 轮询 cancel.request → taskkill /T /F 或 killpg,真实孙进程 kill 测试,树杀失败保持 AgentCliError fail-closed）；`--max-budget-usd ≤0` 派发前拒绝（有效映射/缺参预检/超支报告已有测试）。**D4 已裁决（A 承诺 + C 警告 = 批次 K；B 硬拦否决不做），见 RFC 决议节。**
 - **S1 终局可视化 + 总结节点** ✅（2026-08-26）：终态 run 顶部零成本终局卡片（纯账本派生,Web/MCP 同源 `build_finale`）;图级 opt-in `summary: {model, prompt_hint?}` 在 run_done 前一次总结调用,write-once 产物 + `run_summary_written`,失败记 `run_summary_failed` 不改终态,成本受 `max_cost_usd` 约束,dry-run 明示;**不做离线导出**（用户定案）。
 
 ## 总览表
@@ -32,16 +32,20 @@
 | 第三批 | P10 | retention / star / run index | 按数量/年龄自动清理运行（star 保护），轻量索引加速列表 | 4–7 人日 | 中 | P7（✅ 已完成,见上） |
 | 第三批 | P11 | request_changes / routed approval | 审批从 approve/reject 二值扩展为三分支："要求修改"成为有审计、受循环上限约束的控制流 | 4–7 人日 | 中 | 现有审批校验（✅ 已完成,见上） |
 
-## Stage E（独立价值项，各自 RFC）
+## Stage E（2026-08-27 全量立项，执行设计与验收合同见 [`PLAN-stage-e-2026-08-27.md`](PLAN-stage-e-2026-08-27.md)）
 
-| 项目 | 效果 | 备注 |
-|---|---|---|
-| 循环携带反馈 | 回边重跑轮的输入包含触发重跑的审查意见,多轮收敛的反馈循环成为可表达语义 | 现状(2026-08-22 审查确认):`consumes` 是静态的,回边轮与首轮输入相同——是"有界重试"而非"按批注修订"。两个示例 YAML 与 skill 文档已改为如实措辞;反馈可见需像 mcp-adhoc 图那样加显式消费 `reviewer.output` 的修订节点。与 P11(request_changes)同属"循环语义"设计议题,实施前需 RFC 定语义(产物命名/迭代索引) |
-| LLM `web_search` | llm 节点获得联网搜索能力（provider tool-calling + 可插拔后端），来源与成本落产物 | 需处理网页内容注入与预算 |
-| Release 内置已构建前端 | 使用者免 Node.js 即可启动 | Git 仍不跟踪 `web/dist`；前端哈希进 provenance |
-| OS 级沙箱调研 | 与 `local_cli` 并列的真实隔离后端（Windows Sandbox / WSL） | 目前目录副本明确不是沙箱 |
-| 浏览器矩阵 GUI 测试 | 主题、键盘调栏、200% 缩放的可重复渲染验证 | 不用源码字符串代替截图 |
-| 节点通讯文件 | 多命名产物（`outputs`）、agent 文件收集（`collect_files`）、运行附件（`attachments`） | 见 [`rfcs/node-io-files.md`](rfcs/node-io-files.md)，三阶段独立验收 |
+> 用户裁决：五项全做；顺序 **K(D4 收官) → E-1 → E-2A → E-2B → E-3 → E-4冒烟 → E-4完整 → E-5**。原"各自 RFC 后立项"的条件由该 PLAN 文档的逐项设计替代。
+
+| 序 | 项目 | 一句话效果 | 关键约束（详见 PLAN） |
+|---|---|---|---|
+| E-1 | LLM `web_search`（新 `search` 节点类型） | 联网检索成为可审计、可计费、write-once 产物的图动作 | 后端封闭枚举（Tavily/SearXNG/Null）；结果入 projection 必须围栏防注入；不参与 P7/P13 复用 |
+| E-2A | 运行附件 attachments | 任务发起即可携带外部材料入库为 consumed 产物 | 单件 16MiB/合计 32MiB 上限;防穿越五铁律 |
+| E-2B | agent collect 多命名收集 | CLI 改多文件时可产出细粒度命名产物 | glob 相对路径白名单;≤20 文件/64MiB,超限 fail-loud |
+| E-3 | Release 内置已构建前端 | 干净机器解压即用界面,免 Node 构建 | dist 哈希进 manifest/provenance;sdist 保持纯净 |
+| E-4 | 浏览器矩阵 GUI 测试 | 渲染层(主题/缩放/键盘)首次有自动化验证 | 先冒烟(审批键盘流+基线截图);动画 reduce-motion |
+| E-5 | OS 级沙箱调研 | 威胁模型四象限文档 + WSL2/WSB spike 结论 | 调研立项非功能承诺;禁止未验证隔离措辞 |
+
+补充：`循环携带反馈`的高级语义（自动把上一轮意见注入下一轮输入）仍属后续议题——P11 的 `<node>.changes` 显式消费方案已交付了反馈可见的最小闭环。
 
 ## 明确移除项（不排期）
 
