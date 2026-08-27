@@ -16,6 +16,7 @@ from pathlib import Path
 from mcp.server.mcpserver.server import MCPServer
 
 from atlas.adapters import build_real_registry
+from atlas.artifacts import sha256_bytes
 from atlas.config import PROJECT_ROOT, ConfigError, load_provider_configs
 from atlas.costs import rates_known
 from atlas.effective import build_effective_spec, provider_ids_for_spec
@@ -534,11 +535,12 @@ def _dry_run_warnings(spec, *, provider_cfgs=None, capabilities=None,
 def dry_run_impl(workflow_id: str, task: str, node_overrides=None, *,
                  providers_path: Path | None = None, env_store=None,
                  registry_factory=None, agent_runner_factory=None,
-                 yaml: str = "") -> dict:
+                 yaml: str = "", runs_root: Path | None = None) -> dict:
     """用与真跑相同的有效规格渲染，不执行、不花钱、不创建 run。
 
     workflow_id 与 yaml 二选一:前者渲染已保存的图,后者渲染
-    harness 即时编写的自定义图(不落盘)。
+    harness 即时编写的自定义图(不落盘)。runs_root 只影响 P13 fork
+    预览读哪个 runs 树(测试注入用);缺省是仓库 runs/。
     """
     if not yaml and not workflow_id:
         return {"error": "要么传 yaml 全文(自定义图),要么传 workflow_id",
@@ -600,6 +602,7 @@ def dry_run_impl(workflow_id: str, task: str, node_overrides=None, *,
         renders.append(entry)
     unconfigured = list(effective.unconfigured_nodes)
     execution_sha256 = None
+    prepared = None
     if not unconfigured:
         try:
             factory = registry_factory or _registry_factory_default
@@ -615,6 +618,21 @@ def dry_run_impl(workflow_id: str, task: str, node_overrides=None, *,
         except Exception as e:
             return {"error": f"运行前预检不通过:{e}",
                     "next": "检查 providers.json、config/.env、agents.json 与 Claude CLI"}
+    # P13:fork 图的 dry-run 必须明示闭包与复用清单("将重跑什么、将从
+    # 哪个 run 复制什么")——只读源账本,不建目录不花钱;源不可用当场
+    # 说明,不留给真跑才炸。
+    fork_section = None
+    if spec.fork is not None and prepared is not None:
+        try:
+            from atlas.fork import compute_fork_plan
+            fork_section = compute_fork_plan(
+                spec=spec, source_run=spec.fork.run,
+                runs_root=runs_root or RUNS_DIR,
+                task_sha256=sha256_bytes(task.encode("utf-8")),
+                backend_sha256=prepared.backend_sha256)
+        except Exception as e:
+            fork_section = {"error": str(e),
+                            "next": "fork 源不可用:修好源或去掉 fork 声明再跑"}
     next_step = ("渲染没问题就 atlas_run_workflow(dry_run=False) 真跑;"
                  "真跑才花钱,LLM 节点中位数几美分")
     if unconfigured:
@@ -635,6 +653,7 @@ def dry_run_impl(workflow_id: str, task: str, node_overrides=None, *,
                      "note": "run 结束前将执行 1 次总结调用"
                              "(计入成本与 max_cost_usd 守卫)"}
                     if spec.summary is not None else None),
+        "fork": fork_section,
         "warnings": _dry_run_warnings(spec),
         "base_spec_sha256": effective.base_fingerprint,
         "effective_spec_sha256": effective.effective_fingerprint,

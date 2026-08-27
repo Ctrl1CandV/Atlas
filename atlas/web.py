@@ -220,6 +220,9 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
             "description": spec.description,
             "entry": spec.entry,
             "entries": list(spec.entries) if spec.entries else [],
+            # P13:fork 声明进公开视图(只观测;闭包/复用清单在运行时
+            # 账本的 fork_planned 事件里,走事件接口看)
+            "fork": ({"run": spec.fork.run} if spec.fork is not None else None),
             "meta": spec.meta.as_dict() or None,
             "structure_tags": _structure_tags(spec),
             "nodes": [{

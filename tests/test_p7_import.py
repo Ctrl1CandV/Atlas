@@ -189,6 +189,143 @@ def test_schema_change_defeats_reuse(tmp_path):
     assert events.find(type="node_done", node="a") is not None
 
 
+def test_multi_node_source_imports_producer_own_bytes(tmp_path):
+    """2026-08-27 P13 多节点源 fork 实测逼出的回归锁:_latest_artifact_entry
+    的兜底分支曾只查"事件是 node_done 且逻辑名 .output 结尾",没核对事件
+    节点就是生产者——多节点源里倒序扫到别的节点的 node_done,会把别人
+    的产物哈希/字节当成目标返回(单节点源测试从未踩中)。"""
+    two_node_yaml = """
+name: two_node
+nodes:
+  - id: a
+    type: llm
+    model: Fake:primary
+    prompt: 第一步。
+    consumes: [task]
+    output_schema:
+      required: [summary]
+  - id: z
+    type: llm
+    model: Fake:other
+    prompt: 第二步。
+    consumes: [task, a.output]
+    output_schema:
+      required: [summary]
+edges:
+  - from: a
+    to: z
+  - from: z
+    to: END
+"""
+    from conftest import make_registry as _mk
+    fake = FakeProvider()
+    fake.configure("primary", text=json.dumps(
+        {"summary": "第一步产出"}, ensure_ascii=False))
+    fake.configure("other", text=json.dumps(
+        {"summary": "第二步产出,内容不同"}, ensure_ascii=False))
+    src = execute_graph(spec_from_yaml(two_node_yaml), task=TASK_TEXT,
+                        runs_root=tmp_path, registry=_mk(fake))
+    result = execute_graph(spec_from_yaml(_importer_yaml(src.run_id)),
+                           task=TASK_TEXT, runs_root=tmp_path,
+                           registry=_mk(fake))
+    events = EventReader(result.dir / "events.jsonl")
+    lineage = events.find(type="artifact_imported")
+    src_done = EventReader(src.dir / "events.jsonl").find(
+        type="node_done", node="a")
+    src_z = EventReader(src.dir / "events.jsonl").find(
+        type="node_done", node="z")
+    assert lineage["sha256"] == src_done["output_sha256"]
+    assert lineage["sha256"] != src_z["output_sha256"]
+    assert Path(lineage["path"]).read_bytes() == Path(src_done["output_path"]).read_bytes()
+
+
+def test_consumes_order_enters_invocation(tmp_path):
+    """2026-08-27 审查建议采纳(v3):build_projection 按 consumes 列表顺序
+    内联上游产物字节——[task, a.output] 与 [a.output, task] 的投影布局
+    不同,是两次不同执行,invocation 必须不等(此前按 name 排序会误判
+    相等并跳过布局不同的执行)。"""
+    two_node = """
+name: ordered_src
+nodes:
+  - id: a
+    type: llm
+    model: Fake:primary
+    prompt: 第一步。
+    consumes: [task]
+    output_schema:
+      required: [summary]
+  - id: b
+    type: llm
+    model: Fake:other
+    prompt: 第二步。
+    consumes: [task, a.output]
+    output_schema:
+      required: [summary]
+edges:
+  - from: a
+    to: b
+  - from: b
+    to: END
+"""
+    fake = FakeProvider()
+    fake.configure("primary", text=json.dumps(
+        {"summary": "第一步产出"}, ensure_ascii=False))
+    fake.configure("other", text=json.dumps(
+        {"summary": "第二步产出"}, ensure_ascii=False))
+    reg = make_registry(fake)
+    src = execute_graph(spec_from_yaml(two_node), task=TASK_TEXT,
+                        runs_root=tmp_path, registry=reg)
+
+    def importer(consumes_line: str) -> str:
+        return f"""
+name: ordered_importer
+nodes:
+  - id: a
+    type: llm
+    model: Fake:primary
+    prompt: 第一步。
+    consumes: [task]
+    output_schema:
+      required: [summary]
+    imports:
+      - run: {src.run_id}
+        name: a.output
+  - id: b
+    type: llm
+    model: Fake:other
+    prompt: 第二步。
+    {consumes_line}
+    output_schema:
+      required: [summary]
+    imports:
+      - run: {src.run_id}
+        name: b.output
+edges:
+  - from: a
+    to: b
+  - from: b
+    to: END
+"""
+
+    # 同布局([task, a.output]):与源 b 身份完全相等 → 合法复用(a 同理)
+    same = execute_graph(
+        spec_from_yaml(importer("consumes: [task, a.output]")),
+        task=TASK_TEXT, runs_root=tmp_path, registry=reg)
+    events_same = EventReader(same.dir / "events.jsonl")
+    assert events_same.find(type="node_imported_reused", node="a") is not None
+    assert events_same.find(type="node_imported_reused", node="b") is not None
+
+    # 反序布局([a.output, task]):投影布局不同 → 不同执行 → b 真实重跑
+    # (a 的身份不受影响,仍合法复用)
+    flipped = execute_graph(
+        spec_from_yaml(importer("consumes: [a.output, task]")),
+        task=TASK_TEXT, runs_root=tmp_path, registry=reg)
+    events = EventReader(flipped.dir / "events.jsonl")
+    assert events.find(type="node_imported_reused", node="a") is not None
+    assert events.find(type="node_imported_reused", node="b") is None
+    assert events.find(type="node_done", node="b") is not None
+
+
 def test_rejects_missing_and_running_source(tmp_path):
     """缺失源/运行中源 fail-closed;失败不留下 run 目录。"""
     with pytest.raises(Exception):

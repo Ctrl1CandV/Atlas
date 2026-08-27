@@ -483,7 +483,10 @@ class NodeHeartbeat:
 # v2 = v1 + required_fields(2026-08-27 审查阻塞项:output_schema 的
 # 结构化验收是执行等价性的决定因子——schema 改严后,同一模型输出
 # 可能从"合格"变 DegradedOutput,invocation 必须能区分这两种执行)
-INVOCATION_ALGO_VERSION = "p7-invocation-v2"
+# v3 = v2 + inputs 按 consumes 原序(2026-08-27 审查建议采纳:
+# build_projection 按同一顺序内联上游产物字节,[task,a.output] 与
+# [a.output,task] 投影布局不同,是两次不同执行)
+INVOCATION_ALGO_VERSION = "p7-invocation-v3"
 
 
 def compute_node_invocation_sha256(*, node, prompt_sha256: str,
@@ -492,7 +495,8 @@ def compute_node_invocation_sha256(*, node, prompt_sha256: str,
     """节点的 invocation_sha256:模型执行字段 + 有效 prompt + 有序输入哈希
     + 后端执行身份(prepared.backend_sha256:provider/runner registry
     + agent runner 的打包指纹),
-    规范 JSON 后 SHA-256。inputs 是 [{name, sha256}](consumes 的实际供给)。"""
+    规范 JSON 后 SHA-256。inputs 是 [{name, sha256}](consumes 的实际供给),
+    按 consumes 列表原序——顺序是投影布局的一部分,不排序。"""
     payload = {
         "algo": INVOCATION_ALGO_VERSION,
         "node": node.id,
@@ -506,7 +510,7 @@ def compute_node_invocation_sha256(*, node, prompt_sha256: str,
         "timeout_s": node.timeout_s,
         "required_fields": list(node.required_fields or []),
         "prompt_sha256": prompt_sha256,
-        "inputs": sorted(inputs, key=lambda item: item["name"]),
+        "inputs": inputs,
         "backend_sha256": backend_sha256,
     }
     return sha256_bytes(json.dumps(
@@ -566,7 +570,10 @@ def _compute_reuse_plans(spec, import_plans, *, task_sha256,
             continue
         plans[node.id] = {"invocation": local_hash,
                           "source_run": plan["source_run"],
-                          "source_name": plan["source_name"]}
+                          "source_name": plan["source_name"],
+                          # P13:静态判定依据的输入哈希留在计划里——
+                          # 跳过时刻按运行时 state 复核,预测过期就重跑
+                          "inputs": inputs}
     return MappingProxyType(plans)
 
 
@@ -776,11 +783,22 @@ def _project_node_cost(node, projection_chars: int) -> float | None:
     return compute_cost_usd(node.model, est_in, est_out)
 
 
-def _make_reused_node_fn(node, ctx: _NodeCtx):
-    """P7 复用节点:零调用、零成本,只把"这段执行被导入结果顶替"如实入账。"""
+def _make_reused_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
+    """P7 复用节点:零调用、零成本,只把"这段执行被导入结果顶替"如实入账。
+
+    P13 加固:静态 skip 计划的输入哈希是"导入克隆"口径的预测;若运行时
+    同名产物被真实执行覆盖(上游实际重跑、字节已变),预测即过期——
+    跳过前按当次 state 复核输入哈希,不相等就委托真实执行,绝不把
+    过期身份当等价跳过(合同:"不能先 pin 全部再意外跳过目标节点")。
+    """
     plan = ctx.reuse_plans[node.id]
+    real_fn = _NODE_FACTORIES[node.type](node, spec, ctx)
 
     def run(state: AtlasState) -> dict:
+        runtime_inputs = _input_hashes_for(list(node.consumes),
+                                           state.get("artifacts", {}))
+        if runtime_inputs != plan.get("inputs"):
+            return real_fn(state)
         iteration = state.get("iterations", {}).get(node.id, 0) + 1
         if ctx.cancel_requested():
             raise RunCancelled(f"节点 {node.id}(复用)执行前收到取消请求")
@@ -1164,7 +1182,8 @@ def _build_compiled_graph(spec: WorkflowSpec, ctx: _NodeCtx, checkpointer):
     for n in spec.nodes:
         if n.id in ctx.reuse_plans:
             # P7:invocation 完全相等的节点跳过执行,直接复用导入产物
-            builder.add_node(n.id, _make_reused_node_fn(n, ctx))
+            # (P13:运行时输入复核不过就委托真实执行)
+            builder.add_node(n.id, _make_reused_node_fn(n, spec, ctx))
         else:
             builder.add_node(n.id, _NODE_FACTORIES[n.type](n, spec, ctx))
     for e in spec.all_entries():      # 多入口:全部从 START 并行开跑
@@ -1313,6 +1332,25 @@ def execute_graph(
             imports_spec=[imp for node in spec.nodes for imp in node.imports],
             runs_root=runs_root)
 
+        # ── P13 fork 计划(同样在任何目录创建之前)──────────────────
+        # 闭包/合成导入在这里静态定案;合成导入与显式 imports 走完全
+        # 相同的 precheck/锁内复制/复核链。任务哈希直接算——store_artifact
+        # 还没有 run 目录可用,而 task_ref.sha256 就是这段字节的 SHA-256。
+        fork_plan = None
+        synthesized_imports = []
+        if spec.fork is not None:
+            from atlas.fork import compute_fork_plan   # fork 依赖 engine 的身份函数
+            fork_plan = compute_fork_plan(
+                spec=spec, source_run=spec.fork.run, runs_root=Path(runs_root),
+                task_sha256=sha256_bytes(task.encode("utf-8")),
+                backend_sha256=prepared.backend_sha256)
+            from atlas.spec import ArtifactImport
+            synthesized_imports = [
+                ArtifactImport(run=item["run"], name=item["name"])
+                for item in fork_plan["imports"]]
+            precheck_imports(imports_spec=synthesized_imports,
+                             runs_root=runs_root)
+
         log = EventLog(run_dir)
 
         task_ref = store_artifact(
@@ -1323,7 +1361,12 @@ def execute_graph(
         # ── P7 artifact imports ──────────────────────────────────────
         # 启动准入在源 run stable lock 内完成(resolve_imports 持锁校验并
         # 复制);到这里失败会向上抛,run 不启动——不存在部分导入的运行。
+        # P13:fork 合成导入与显式声明合并(同 run+name 去重,显式声明
+        # 在先),同一源 run 只持一把锁。
         declared_imports = [imp for node in spec.nodes for imp in node.imports]
+        _seen_imports = {(imp.run, imp.name) for imp in declared_imports}
+        declared_imports += [imp for imp in synthesized_imports
+                             if (imp.run, imp.name) not in _seen_imports]
         from atlas.runs import resolve_imports   # 函数内导入:runs 反向依赖 engine
         import_plans = resolve_imports(
             run_dir=run_dir, imports_spec=declared_imports, runs_root=runs_root)
@@ -1351,6 +1394,12 @@ def execute_graph(
         (run_dir / "spec.snapshot.json").write_text(
             json.dumps(spec_to_snapshot(spec), ensure_ascii=False, indent=1),
             encoding="utf-8")
+        run_started_fields = {}
+        if fork_plan is not None:
+            # P13:fork 计划摘要进 run 身份事件——从第一个事件起就能对上
+            # "这次执行打算复用什么"(完整清单在紧随的 fork_planned)
+            run_started_fields["fork_source_run"] = fork_plan["source_run"]
+            run_started_fields["fork_plan_sha256"] = fork_plan["fork_plan_sha256"]
         log.emit("run_started", graph=spec.name, run_id=run_id,
                  task_sha256=task_ref.sha256, task_path=str(task_ref.path),
                  spec_sha256=prepared.spec_sha256,
@@ -1360,7 +1409,23 @@ def execute_graph(
                  backend_sha256=prepared.backend_sha256,
                  execution_sha256=prepared.execution_sha256,
                  bindings=list(binding_summary),
-                 overrides=list(override_summary))
+                 overrides=list(override_summary),
+                 **run_started_fields)
+
+        # P13 lineage:changed/closure/import map 全量入账,顺序确定;
+        # fork 计划是"为什么跳过某些节点"的唯一权威解释。
+        if fork_plan is not None:
+            log.emit(
+                "fork_planned", run_id=run_id,
+                source_run=fork_plan["source_run"],
+                source_status=fork_plan["source_status"],
+                backend_equal=fork_plan["backend_equal"],
+                task_equal=fork_plan["task_equal"],
+                changed=fork_plan["changed"],
+                closure=fork_plan["closure"],
+                import_map=fork_plan["imports"],
+                algo_version=fork_plan["algo_version"],
+                fork_plan_sha256=fork_plan["fork_plan_sha256"])
 
         # P7 lineage:紧跟 run 身份落账,顺序确定;产物实体已在初始 state。
         for plan in pending_lineage:

@@ -281,6 +281,7 @@ P7 invocation hash/import。
 ### 落地锚点（2026-08-23 深化）
 
 - **模块**：`atlas/m0_graph.py` 增失效闭包计算——比较源 snapshot 与新图的 invocation identities 得 changed set，静态图上取 changed nodes + 全部后代；循环按强连通分量整体失效（不做循环内部分保留）。
+  - **实施偏差（2026-08-27 已交付）**：闭包计算落在新建的 `atlas/fork.py`（纯计划层，只读源账本），而非 `m0_graph.py`——后者实为 M0 自检示例图，锚点写作时名不副实；决策记录于此。测试覆盖五类图 + failed/paused 源；顺带交付 P7 skip 的运行时输入复核与多节点源产物错配修复（详见 CHANGELOG）。
 - **规则**：闭包内禁止 import/skip；闭包外仅 identity 完全相等且依赖完整才复制；join 依赖 changed 分支时必须重跑（防止"先 pin 全部再意外跳过目标节点"）。
 - **事件/dry-run**：changed set、closure、import map、算法版本全部进 dry-run 输出、事件与 execution identity。
 - **测试**：线性、并行、join、条件边、循环五类图分别验证；failed/paused 源 run 只能导入事件证明完整的产物。

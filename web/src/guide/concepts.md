@@ -12,6 +12,7 @@
 | `edges` | `from`、`to`，条件边另有 `when` |
 | `guards` | `max_iterations`、`max_cost_usd`、`timeout_s` |
 | `summary` | 可选总结配置 `{model, prompt_hint?}`：run 结束前用指定模型做一次回顾调用，产物与成本进账本（S1）；默认不总结 |
+| `fork` | 可选 `{run: <源 run id>}`（P13）：从静稳终态 run 再跑这张（通常改过的）图。Atlas 静态比较两侧调用身份得出 changed 集，changed + 全部后代构成失效闭包（循环按强连通分量整体失效，join 命中 changed 分支必重跑）；闭包外且源事件证明产物完整的节点自动合成导入、走与显式 imports 相同的准入与身份复核链。闭包内不允许声明 imports。计划以 `fork_planned` 事件全量入账（changed/closure/import map），dry-run 预演可见 |
 
 ## 节点字段
 

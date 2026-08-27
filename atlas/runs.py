@@ -244,12 +244,20 @@ _IMPORTABLE_STATUSES = ("done", "failed", "cancelled", "paused")
 
 def _latest_artifact_entry(events: list[dict], logical: str) -> dict | None:
     """倒序找最近一条携带该逻辑名产物的事件(node_done 的 output/diff、
-    node_failed_soft 的 error 各归其位);返回统一条目。"""
+    node_failed_soft 的 error 各归其位);返回统一条目。
+
+    兜底分支必须核对事件的 node 就是该逻辑名的生产者——否则多节点源
+    里倒序扫到别的节点的 node_done 会把别人的产物当成目标返回
+    (2026-08-27 P13 多节点源 fork 实测逼出;单节点源测试从未踩中)。
+    """
+    producer = logical.rsplit(".", 1)[0]
     for e in reversed(events):
         for item in e.get("artifacts") or []:
             if isinstance(item, dict) and item.get("name") == logical:
                 return item
-        if e.get("type") == "node_done" and logical.endswith(".output")                 and e.get("output_sha256"):
+        if (e.get("type") == "node_done" and e.get("node") == producer
+                and logical.endswith(".output")
+                and e.get("output_sha256")):
             return {"name": logical, "path": e["output_path"],
                     "sha256": e["output_sha256"]}
     return None

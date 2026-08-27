@@ -150,6 +150,8 @@ export interface WorkflowSpec {
   description: string;
   entry: string;
   entries?: string[];
+  /** P13:图级 fork 声明(闭包外复用源 run 结果;未声明为 null) */
+  fork?: { run: string } | null;
   nodes: WFNode[];
   edges: WFEdge[];
   guards: {

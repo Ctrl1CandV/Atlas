@@ -71,6 +71,10 @@ def spec_fingerprint(spec: "WorkflowSpec") -> str:
     # summary 同理只在配置时进指纹:未总结的图与旧版指纹完全一致
     if spec.summary is not None:
         payload["summary"] = asdict(spec.summary)
+    # fork 只在设置时进指纹:fork.run 是执行身份的一部分(从哪个源
+    # 复用),但未 fork 的旧图指纹零变化(与 summary 同一口径)
+    if spec.fork is not None:
+        payload["fork"] = asdict(spec.fork)
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -87,6 +91,7 @@ def spec_to_snapshot(spec: "WorkflowSpec") -> dict:
         "entries": list(spec.entries),
         "guards": asdict(spec.guards),
         "summary": asdict(spec.summary) if spec.summary is not None else None,
+        "fork": asdict(spec.fork) if spec.fork is not None else None,
         "meta": spec.meta.as_dict(),   # 展示用;旧快照没有此键也能恢复
     }
 
@@ -111,6 +116,7 @@ def spec_from_snapshot(data: dict, *, source: str = "snapshot") -> "WorkflowSpec
         guards=Guards(**data.get("guards", {})),
         entries=tuple(data.get("entries", ()) or ()),
         summary=_parse_summary(data.get("summary"), source=source),
+        fork=_parse_fork(data.get("fork"), source=source),
         meta=meta,
     )
     validate_spec(spec, source=source)
@@ -496,6 +502,19 @@ class SummarySpec:
 
 
 _SUMMARY_FIELDS = frozenset({"model", "prompt_hint"})
+_FORK_FIELDS = frozenset({"run"})
+
+
+@dataclass(frozen=True)
+class ForkSpec:
+    """图级 fork 声明(P13):从某个静稳终态 run 再跑这张图。
+
+    校验期只做形状与 run id 格式;源的存在性/终态/失效闭包在启动准入
+    (execute_graph 建目录之前)计算与核验——spec 校验必须零成本、不碰
+    文件系统。设置时才进指纹:fork 的 run 是执行身份的一部分,但未
+    fork 的旧图指纹零变化。
+    """
+    run: str                     # 源 run id
 
 
 @dataclass(frozen=True)
@@ -565,6 +584,21 @@ def _parse_summary(d: object, *, source: str) -> SummarySpec | None:
     if not isinstance(hint, str):
         raise SpecError("summary.prompt_hint 必须是字符串")
     return SummarySpec(model=model.strip(), prompt_hint=hint)
+
+
+def _parse_fork(d: object, *, source: str) -> "ForkSpec | None":
+    if d is None:
+        return None
+    if not isinstance(d, dict):
+        raise SpecError(
+            f"{source} 的 fork 必须是映射(run),实际是 {type(d).__name__}")
+    unknown = {k for k in d if isinstance(k, str)} - _FORK_FIELDS
+    if unknown:
+        raise SpecError(f"fork 里有未知字段:{sorted(unknown)}。可用:run")
+    run = d.get("run")
+    if not isinstance(run, str) or not _NODE_ID_RE.match(run):
+        raise SpecError("fork.run 必须是合法 run id")
+    return ForkSpec(run=run)
 
 
 # P3 失败策略与保留路由键(锚点:on_error 闭合枚举;branch 只走 __failed__)
@@ -743,6 +777,7 @@ class WorkflowSpec:
     guards: Guards = field(default_factory=Guards)
     entries: tuple[str, ...] = ()               # 全部入口(M4 多入口;空=单入口)
     summary: SummarySpec | None = None          # S1 opt-in 总结(run_done 前一次调用)
+    fork: "ForkSpec | None" = None               # P13:从源 run fork(闭包外复用)
     meta: WorkflowMeta = field(default_factory=WorkflowMeta)   # 展示用,不进指纹
 
     def node(self, node_id: str) -> NodeSpec:
@@ -762,7 +797,7 @@ class WorkflowSpec:
 
 
 _TOP_FIELDS = frozenset({"name", "description", "entry", "nodes", "edges",
-                         "guards", "summary", "meta"})
+                         "guards", "summary", "fork", "meta"})
 _NODE_FIELDS = frozenset({
     "id", "type", "model", "prompt", "consumes", "output_schema", "fallback",
     "route_field", "workdir", "max_turns", "max_output_tokens", "thinking",
@@ -857,6 +892,12 @@ def spec_from_yaml(text: str, *, source: str = "YAML") -> WorkflowSpec:
         raise _relocate_error(e, ("summary",), marks,
                               fallback_paths=(("summary",),)) from e
 
+    try:
+        fork = _parse_fork(raw.get("fork"), source=source)
+    except SpecError as e:
+        raise _relocate_error(e, ("fork",), marks,
+                              fallback_paths=(("fork",),)) from e
+
     spec = WorkflowSpec(
         name=name.strip(),
         description=str(raw.get("description", "") or ""),
@@ -866,6 +907,7 @@ def spec_from_yaml(text: str, *, source: str = "YAML") -> WorkflowSpec:
         guards=guards,
         entries=entries,
         summary=summary,
+        fork=fork,
     )
     resolved = validate_spec(spec, source=source, _marks=marks)
     # meta 在结构校验之后解析:requires 的一致性检查需要先有 spec
@@ -878,7 +920,7 @@ def spec_from_yaml(text: str, *, source: str = "YAML") -> WorkflowSpec:
     spec = WorkflowSpec(
         name=spec.name, description=spec.description, nodes=spec.nodes,
         edges=spec.edges, entry=spec.entry, guards=spec.guards,
-        entries=spec.entries, summary=summary, meta=meta,
+        entries=spec.entries, summary=summary, fork=fork, meta=meta,
     )
     # 把解析出的入口写回。**只有完全没写 entry 时**才推断:
     # 写了单值 entry 就只跑那一条腿(多根图里其余根会因不可达被拒收,
@@ -890,7 +932,7 @@ def spec_from_yaml(text: str, *, source: str = "YAML") -> WorkflowSpec:
         spec = WorkflowSpec(
             name=spec.name, description=spec.description, nodes=spec.nodes,
             edges=spec.edges, entry=resolved, guards=spec.guards,
-            entries=all_entries, summary=summary, meta=meta,
+            entries=all_entries, summary=summary, fork=fork, meta=meta,
         )
     return spec
 

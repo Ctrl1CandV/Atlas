@@ -19,7 +19,8 @@
 | 共享 launcher（P4） | Web 启动/恢复/审批续跑与 MCP 走同一进程内 controller registry（每 run 唯一 controller）；运行摘要由账本派生，Web/MCP 共用同一构建函数 |
 | 协作式取消（P2+D） | `atlas_cancel_run` 与 Web 运行页取消按钮(运行中/等待批准可见,确认框明示不可撤回)走同一请求文件；running 由 controller 在节点入口/候选切换/重试等待消费并唯一写 `run_cancelled`；paused/interrupted 由取消入口持锁直写终态；`local_cli` 在途执行收到取消即终止整棵进程树(Windows taskkill /T /F、POSIX killpg,真实子进程测试证明无孤儿),树杀失败大声失败不吞；SDK 模型调用仍跑完当次；`cancelled` 可删除、拒绝 resume/approve，请求不可撤回 |
 | Controller 心跳（P9） | 每次 attempt 的派发窗口内定时写 `node_progress`（node/iteration/attempt/model/elapsed_ms/phase=waiting|retry）；只证明 controller 在等待，不声称模型内部进度或百分比；间隔默认与下限 30s，`ATLAS_NODE_HEARTBEAT_INTERVAL_S` run 级可配（低于下限大声拒绝）；窗口在 attempt 结束/失败/取消/终态后闭合，迟到 tick 被拒绝；fold 显式忽略该类型；容量代价如实计入：30s 一条 ≈ 每节点每天 2880 条（16 MiB 账本治理随 P10） |
-| 产物导入与调用身份（P7） | 节点级 `imports: [{run, name}]` 从静稳终态 run 复制上游产物：源 stable lock 内校验 provenance 后字节克隆（temp+fsync+原子改名，写后复验），`artifact_imported` lineage 入账；每次 LLM 派发在 `node_started` 记 `invocation_sha256`（执行字段/有效 prompt/有序输入/后端身份，算法版本化）；invocation 完全相等且节点为无条件边 stop 策略 LLM 时零成本跳过（`node_imported_reused`），任一因子改变都不复用；删除源 run 不影响已导入 run（克隆在本 run 内，绝不跨 run 路径引用）；缺源/运行中源在创建 run 目录前拒绝，源锁竞争确定性失败 |
+| 产物导入与调用身份（P7） | 节点级 `imports: [{run, name}]` 从静稳终态 run 复制上游产物：源 stable lock 内校验 provenance 后字节克隆（temp+fsync+原子改名，写后复验），`artifact_imported` lineage 入账；每次 LLM 派发在 `node_started` 记 `invocation_sha256`（执行字段/有效 prompt/有序输入/后端身份，算法版本化）；invocation 完全相等且节点为无条件边 stop 策略 LLM 时零成本跳过（`node_imported_reused`），任一因子改变都不复用；跳过时刻按运行时 state 复核输入哈希，预测过期（同名产物被真实重跑覆盖）就委托真实执行；产物查找核对事件节点即生产者（多节点源不错配）；删除源 run 不影响已导入 run（克隆在本 run 内，绝不跨 run 路径引用）；缺源/运行中源在创建 run 目录前拒绝，源锁竞争确定性失败 |
+| fork 与失效闭包（P13） | 图级 `fork: {run}` 从静稳终态源 run 再跑改过的图：静态重放两侧 invocation 身份（task 与未变上游产物哈希可从源账本静态取定）得 changed 集，闭包 = changed + 静态图全部后代（条件边计入；循环按 SCC 整体失效；join 命中 changed 分支必重跑）；闭包内禁止显式 imports（启动前拒绝）；闭包外且源事件证明产物完整的节点合成导入，走与显式 imports 完全相同的 P7 准入链与跳过门槛；`fork_planned` 全量入账（changed/closure/import map/算法版本 p13-fork-v1，run_started 带 fork_plan_sha256）；fork.run 进规格指纹（未 fork 旧图零变化）；dry-run 明示"重跑什么/从哪个 run 复制什么"；五类图（线性/并行/join/条件/循环）+ failed/paused 源均已测试 |
 | 失败策略（P3） | 治理类异常永不可吞（费用/守卫/取消/deadline/规格/接线/路由/完整性/账本/审批/锁，未登记类型 fail-closed 按治理处理）；内容类失败（候选全部失败，含假成功与超时耗尽）可节点级 `on_error: stop/continue/branch`（默认 stop，旧图零变化，默认值不进指纹）；branch 走保留键 `__failed__`（校验期强制，每源至多一条，可与成功路径边型共存）；continue 拒绝条件出边；下游可消费 `<branch节点>.error`；软失败写 write-once 错误产物 + `node_failed_soft`，fold 显式忽略；__failed__ 路由按「节点最近一次结局」的 route_facts 事实判定（checkpoint 持久化，重入成功后不被残留错误产物误判）；AgentCliError 单独分类、白名单为空；Web/MCP 同源展示错误类与产物入口，dry-run 列出非默认 on_error 节点 |
 | 终局可视化与总结（S1） | 终态 run 顶部零成本终局卡片：每节点一句话回顾（模型/耗时/token/成本/输出首段）+ 时间线，纯账本派生，Web 与 `atlas_get_run` 同源（`build_finale`）；图级 opt-in `summary: {model, prompt_hint?}` 在 run_done 前一次总结调用（进规格指纹与快照），成本走 CostLedger 受 `max_cost_usd` 约束，write-once 产物 + `run_summary_written`；失败记 `run_summary_failed` 不改终态；总结文本标注「LLM 叙述，事实以账本为准」；不做离线报告导出 |
 | 工作流文件管理 | Web 页面可删除工作流；保存走 MCP 的 `expected_sha256` 读-改-写闭环（乐观锁防覆盖） |
@@ -58,7 +59,7 @@
 
 2026-08-23 公开 CI 基线（`main` @ `7eac07b`，GitHub Actions）：
 
-- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-27 起为 550 passed，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
+- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-27 起为 565 passed，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
 - Ubuntu 兼容性信号 job（`continue-on-error`，明确不支持）同样通过：跨平台 agent CLI 桩修复后它反映真实兼容性。
 - `real-api.yml` 仅手动触发（`environment: real-api` 保护），不计入常规 CI。
 
@@ -80,11 +81,11 @@
 
 ## 已知限制与运营教训
 
-- 取消是协作式的：在途模型调用与 agent CLI 执行会跑完当次尝试才在下一节点边界终止；取消请求一经写入不可撤回（控制器死亡后 resume 会在首个节点边界消费它）。Web 界面的取消按钮尚未交付（API 与 MCP 工具已可用）。
+- 取消是协作式的：在途模型调用与 agent CLI 执行会跑完当次尝试才在下一节点边界终止（`local_cli` 进程树除外——收到取消即整树终止）；取消请求一经写入不可撤回（控制器死亡后 resume 会在首个节点边界消费它）。
 - 回边循环的 `consumes` 是静态的：重跑轮输入与首轮相同，不携带触发重跑的审查意见——是"有界重试"而非"按批注修订"。反馈可见需要显式消费 `reviewer.output` 的修订节点；语义改进见 BACKLOG"循环携带反馈"。
-- agent 自动 retry 的预算约束尚未落地（RFC 草案 `docs/rfcs/agent-retry-budget.md` 待评审）；`--max-budget-usd` 到 Claude CLI 的映射也未实现。
+- agent 自动 retry 的预算约束尚未落地（RFC 草案 `docs/rfcs/agent-retry-budget.md` 待评审）。
 - human gate 只有 approve/reject；节点失败默认终止整图。
-- 没有 run retention/index、跨 run artifact import、invocation hash 或 fork invalidation。
+- 没有 run retention/index（P10 待做）；fork 只复用源事件证明完整的产物，源 run 中从未执行/未完成的节点诚实重跑。
 - release sdist 不包含 built `web/dist`，使用者仍需 Node.js 构建前端。
 - Claude CLI 当前没有硬 `max_turns` 参数；`seed`/`temperature` 只进请求体，供应商是否尊重未验证。
 - 阶段 D 曾出现一次 Kiro agent 首次 attempt 自报约 `$10.508`，随后自动 retry 被人工终止。直接原因是图没有 `max_cost_usd`、本地 pricing 全为 `null`，CLI 预算没有生效。所有真实 agent 示例都应配置预算；自动 retry 的默认策略需先经 RFC 决策，不能在没有评审时静默改行为。
