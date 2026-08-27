@@ -33,6 +33,7 @@ const NODE_H = 76;
 type AtlasNodeData = {
   id: string;
   model: string;
+  nodeType?: string;
   thinking?: string | null;
   isEnd: boolean;
   run?: RunNode;
@@ -54,14 +55,16 @@ function StatusIcon({ status }: { status: string }) {
 }
 
 function AtlasNode({ data }: NodeProps<AtlasFlowNode>) {
-  const { run, model, thinking, isEnd, id, runInterrupted } = data;
+  const { run, model, nodeType, thinking, isEnd, id, runInterrupted } = data;
   const status = isEnd
     ? 'end'
     : (runInterrupted && run?.status === 'running' ? 'interrupted' : (run?.status ?? 'pending'));
   const degraded = run?.degraded;
   const truncated = run?.output_truncated;
   const attempts = run?.attempts?.length ?? 0;
-  const unconfigured = !isEnd && !run && !model;
+  // search 节点没有模型字段,不能因为 model 为空就被当成"待配置"
+  const isSearch = nodeType === 'search';
+  const unconfigured = !isEnd && !run && !model && !isSearch;
   const cls = [
     'atlas-node',
     `status-${status}`,
@@ -121,7 +124,9 @@ function AtlasNode({ data }: NodeProps<AtlasFlowNode>) {
       </div>
       {!isEnd && (
         <div className="atlas-node-model" title={model || '模型未配置'}>
-          {run?.model_used ?? (model || '模型未配置')}
+          {isSearch
+            ? (run?.model_used ?? '🔎 检索')
+            : (run?.model_used ?? (model || '模型未配置'))}
         </div>
       )}
       {!isEnd && (
@@ -263,6 +268,7 @@ export function GraphView({
         position: { x: pos.x - NODE_W / 2, y: pos.y - height / 2 },
         data: {
           id, model: isEnd ? '' : (nodes.find((n) => n.id === id)?.model ?? ''),
+          nodeType: isEnd ? '' : (nodes.find((n) => n.id === id)?.type ?? ''),
           thinking: nodes.find((n) => n.id === id)?.thinking,
           isEnd, run: runNodes[id], runInterrupted: runStatus === 'interrupted',
         },

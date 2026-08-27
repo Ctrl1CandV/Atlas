@@ -47,8 +47,11 @@ def _governance_classes() -> tuple[type[BaseException], ...]:
 
 @lru_cache(maxsize=1)
 def _content_classes() -> tuple[type[BaseException], ...]:
+    from atlas import engine
     from atlas.adapters import AllCandidatesFailed
-    return (AllCandidatesFailed,)
+    # engine.SearchQueriesFailed(E-1):search 节点检索失败重试耗尽,
+    # 与候选全部失败同属"没有交出合格内容"的内容类。
+    return (AllCandidatesFailed, engine.SearchQueriesFailed)
 
 
 @lru_cache(maxsize=1)

@@ -19,7 +19,14 @@ import yaml
 # human  :不调模型,暂停等人批准
 # research / coding_agent:仅可经显式启用的受控本机 runner 执行；未启用时
 #         fail-closed。该 runner 是同用户进程，不是 OS 沙箱。
-NODE_TYPES = frozenset({"llm", "human", "research", "coding_agent"})
+# search :E-1,不调模型;Atlas 自持可插拔检索后端(封闭枚举 tavily|searxng),
+#         每次检索入账为 search_performed 事件 + write-once 产物 + 下游
+#         投影 untrusted 围栏(见 atlas/search.py 与 integrity.py)
+NODE_TYPES = frozenset({"llm", "human", "research", "coding_agent", "search"})
+# E-1 search 节点的封闭枚举与硬上限(常量归本模块;atlas/search.py 反向引用,
+# 避免 spec→search 的模块级循环导入)
+SEARCH_BACKENDS = ("tavily", "searxng")
+SEARCH_MAX_QUERIES = 5
 _AGENT_TYPES = frozenset({"research", "coding_agent"})
 
 _NODE_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
@@ -58,6 +65,16 @@ def spec_fingerprint(spec: "WorkflowSpec") -> str:
         # P11:binary 是既有行为,缺省不进指纹;routed 才是身份的一部分
         if d.get("approval_mode") in (None, "binary"):
             d.pop("approval_mode", None)
+        # E-1 search 专属字段按同一口径:默认值不进指纹,旧图(llm/human/
+        # agent 的这些字段恒为 None/[])指纹零变化
+        if d.get("backend") in (None, "tavily"):
+            d.pop("backend", None)
+        if d.get("max_results") in (None, 5):
+            d.pop("max_results", None)
+        if not d.get("queries"):
+            d.pop("queries", None)
+        if not d.get("allowed_domains"):
+            d.pop("allowed_domains", None)
         return d
 
     payload = {
@@ -651,6 +668,11 @@ class NodeSpec:
     # 二分支,旧图零变化;routed 追加 request_changes 三分支(需显式接线
     # when: __changes__ 的回边)。默认值不进指纹。
     approval_mode: str = "binary"
+    # ── E-1 search 节点专属(其余类型必须省略;默认值不进指纹)──
+    backend: str | None = None      # 封闭枚举 tavily|searxng;None=默认 tavily
+    max_results: int | None = None  # 每 query 结果上限 1..10;None=默认 5
+    queries: list[str] | None = None    # 显式查询词 ≤5;None=运行时从上游/prompt 解析
+    allowed_domains: list[str] = field(default_factory=list)  # 可选;空=不过滤
 
     @property
     def output_name(self) -> str:
@@ -820,6 +842,7 @@ _NODE_FIELDS = frozenset({
     "route_field", "workdir", "max_turns", "max_output_tokens", "thinking",
     "temperature", "seed", "writable", "allow_web", "allowed_paths",
     "timeout_s", "retry", "on_error", "imports", "approval_mode",
+    "backend", "max_results", "queries", "allowed_domains",
 })
 _EDGE_FIELDS = frozenset({"from", "to", "when"})
 _GUARD_FIELDS = frozenset({"max_iterations", "max_cost_usd", "timeout_s"})
@@ -974,14 +997,16 @@ def _parse_node(rn, *, where: str) -> NodeSpec:
                          "workdir", "max_turns", "max_output_tokens",
                          "thinking", "temperature", "seed", "writable",
                          "allow_web", "allowed_paths", "timeout_s", "retry",
-                         "on_error", "imports", "approval_mode"}
+                         "on_error", "imports", "approval_mode",
+                         "backend", "max_results", "queries", "allowed_domains"}
     if unknown:
         raise SpecError(f"{where} 有未知字段:{sorted(unknown)}。"
                         f"可用:id/type/model/prompt/consumes/output_schema/"
                         f"fallback/route_field/workdir/max_turns/"
                         f"max_output_tokens/thinking/temperature/seed/"
                         f"writable/allow_web/allowed_paths/timeout_s/retry/"
-                        f"on_error/imports/approval_mode")
+                        f"on_error/imports/approval_mode/backend/max_results/"
+                        f"queries/allowed_domains")
 
     nid = rn.get("id")
     if not isinstance(nid, str) or not _NODE_ID_RE.match(nid):
@@ -1124,14 +1149,14 @@ def _parse_node(rn, *, where: str) -> NodeSpec:
 
     timeout_s = rn.get("timeout_s")
     if timeout_s is not None:
-        _only({"llm", "research", "coding_agent"}, "timeout_s")
+        _only({"llm", "research", "coding_agent", "search"}, "timeout_s")
         if not isinstance(timeout_s, (int, float)) or isinstance(timeout_s, bool) \
                 or timeout_s <= 0:
             raise SpecError(f"{where}(节点 {nid})的 timeout_s 必须是正数")
 
     retry = rn.get("retry", 0)
     if "retry" in rn:
-        _only({"llm", "research", "coding_agent"}, "retry")
+        _only({"llm", "research", "coding_agent", "search"}, "retry")
     if not isinstance(retry, int) or isinstance(retry, bool) or not 0 <= retry <= 10:
         raise SpecError(f"{where}(节点 {nid})的 retry 必须是 0–10 的整数")
 
@@ -1179,9 +1204,10 @@ def _parse_node(rn, *, where: str) -> NodeSpec:
         raise SpecError(f"{where}(节点 {nid})的 on_error 必须是 "
                         f"{list(ON_ERROR_VALUES)} 之一,得到 {on_error!r}")
     if "on_error" in rn and on_error != "stop":
-        # 内容类失败只发生在 llm 节点;其他类型的 on_error 是无效承诺,
-        # 校验期拒绝而不是运行期静默忽略
-        _only({"llm"}, "on_error")
+        # 内容类失败只发生在 llm 与 search(E-1:检索后端网络/HTTP 异常
+        # 归内容类)节点;其他类型的 on_error 是无效承诺,校验期拒绝而不是
+        # 运行期静默忽略
+        _only({"llm", "search"}, "on_error")
 
     try:
         imports = _parse_imports(rn.get("imports"),
@@ -1197,6 +1223,56 @@ def _parse_node(rn, *, where: str) -> NodeSpec:
         raise SpecError(f"{where}(节点 {nid})的 approval_mode 必须是 "
                         f"{list(APPROVAL_MODES)} 之一,得到 {approval_mode!r}")
 
+    # ── E-1 search 节点专属字段:其余类型出现即拒绝(无效承诺不当静默)──
+    _SEARCH_FIELDS = ("backend", "max_results", "queries", "allowed_domains")
+    if ntype != "search":
+        present = [f for f in _SEARCH_FIELDS if f in rn]
+        if present:
+            raise SpecError(f"{where}(节点 {nid})只有 search 节点能用 "
+                            f"{present}")
+    backend = None
+    max_results = None
+    queries = None
+    search_domains: list[str] = []
+    if ntype == "search":
+        backend = rn.get("backend")
+        if backend is not None:
+            if not isinstance(backend, str) or backend not in SEARCH_BACKENDS:
+                raise SpecError(f"{where}(节点 {nid})的 backend 必须是 "
+                                f"{list(SEARCH_BACKENDS)} 之一,得到 {backend!r}")
+        max_results = rn.get("max_results")
+        if max_results is not None:
+            if not isinstance(max_results, int) or isinstance(max_results, bool) \
+                    or not 1 <= max_results <= 10:
+                raise SpecError(
+                    f"{where}(节点 {nid})的 max_results 必须是 1..10 的整数,"
+                    f"得到 {max_results!r}")
+        queries = rn.get("queries")
+        if queries is not None:
+            if not isinstance(queries, list) or not queries \
+                    or not all(isinstance(q, str) and q.strip() for q in queries):
+                raise SpecError(
+                    f"{where}(节点 {nid})的 queries 必须是非空字符串数组")
+            if len(queries) > SEARCH_MAX_QUERIES:
+                raise SpecError(
+                    f"{where}(节点 {nid})的 queries 有 {len(queries)} 条,"
+                    f"硬上限 {SEARCH_MAX_QUERIES} 条;超出请精简检索目标")
+        raw_domains = rn.get("allowed_domains", [])
+        if not isinstance(raw_domains, list) or not all(
+                isinstance(d, str) and d.strip() for d in raw_domains):
+            raise SpecError(
+                f"{where}(节点 {nid})的 allowed_domains 必须是非空字符串数组")
+        for d in raw_domains:
+            if any(mark in d for mark in ("://", "/", "@", " ", "\t")):
+                raise SpecError(
+                    f"{where}(节点 {nid})的 allowed_domains 条目 {d!r} "
+                    "不是裸域名(不带 scheme/路径/userinfo/空白)")
+        seen_domains: set[str] = set()
+        for d in raw_domains:
+            if d.lower() not in seen_domains:
+                seen_domains.add(d.lower())
+                search_domains.append(d)
+
     return NodeSpec(id=nid, type=ntype, model=model, prompt=prompt,
                     consumes=list(consumes), required_fields=required,
                     fallback=list(fallback), route_field=route_field,
@@ -1205,7 +1281,10 @@ def _parse_node(rn, *, where: str) -> NodeSpec:
                     temperature=temperature, seed=seed, writable=writable,
                     allow_web=allow_web, allowed_paths=list(allowed_paths),
                     timeout_s=timeout_s, retry=retry, on_error=on_error,
-                    imports=imports, approval_mode=approval_mode)
+                    imports=imports, approval_mode=approval_mode,
+                    backend=backend, max_results=max_results,
+                    queries=list(queries) if queries else None,
+                    allowed_domains=search_domains)
 
 
 def validate_node_spec(node: NodeSpec, *, where: str = "node") -> NodeSpec:
@@ -1245,10 +1324,19 @@ def validate_node_spec(node: NodeSpec, *, where: str = "node") -> NodeSpec:
             raw["temperature"] = node.temperature
         if node.seed is not None:
             raw["seed"] = node.seed
-    if node.type in {"llm", "research", "coding_agent"}:
+    if node.type in {"llm", "research", "coding_agent", "search"}:
         if node.timeout_s is not None:
             raw["timeout_s"] = node.timeout_s
         raw["retry"] = node.retry
+    if node.type == "search":
+        if node.backend is not None:
+            raw["backend"] = node.backend
+        if node.max_results is not None:
+            raw["max_results"] = node.max_results
+        if node.queries:
+            raw["queries"] = list(node.queries)
+        if node.allowed_domains:
+            raw["allowed_domains"] = list(node.allowed_domains)
     if node.on_error != "stop":
         raw["on_error"] = node.on_error
     if node.imports:
@@ -1308,11 +1396,11 @@ def validate_spec(spec: WorkflowSpec, *, source: str = "spec",
             # 精确匹配 <节点id>.output / <节点id>.diff(coding_agent 的第二产物):
             # 前缀匹配会放过 node_a.output.output 这类笔误,把接线错误留到运行期才炸
             ok = False
-            for suffix, producer_type, need_on_error in (
+            for suffix, producer_types, need_on_error in (
                     (".output", None, None),
-                    (".diff", "coding_agent", None),
-                    (".error", "llm", "branch"),
-                    (".changes", "human", None)):
+                    (".diff", ("coding_agent",), None),
+                    (".error", ("llm", "search"), "branch"),
+                    (".changes", ("human",), None)):
                 if c.endswith(suffix):
                     producer = c[: -len(suffix)]
                     if producer in by_id:
@@ -1320,7 +1408,7 @@ def validate_spec(spec: WorkflowSpec, *, source: str = "spec",
                         # P11:.changes 只可能由 routed human 产出(binary
                         # 的批复路径永远不写它),接线错误在校验期拦下
                         produces = (
-                            (producer_type is None or pnode.type == producer_type)
+                            (producer_types is None or pnode.type in producer_types)
                             and (need_on_error is None
                                  or pnode.on_error == need_on_error)
                             and (suffix != ".changes"

@@ -594,6 +594,8 @@ def dry_run_impl(workflow_id: str, task: str, node_overrides=None, *,
             model_label = n.model
         elif n.type == "llm":
             model_label = "未配置(待选择)"
+        elif n.type == "search":
+            model_label = f"search:{n.backend or 'tavily'}"
         else:
             model_label = "human/agent"
         entry = {
@@ -615,6 +617,17 @@ def dry_run_impl(workflow_id: str, task: str, node_overrides=None, *,
                 "不含上游产物体积(运行时才知道);完整产物会内联,见 A1")
         if n.type == "llm":
             entry["chain"] = [n.model, *n.fallback] if n.model else []
+        if n.type == "search":
+            # E-1:检索目标与后端是计费决策的一部分,预演必须可见。
+            # 查询词未显式声明时在运行时从上游 JSON/prompt 解析,如实标注。
+            entry["backend"] = n.backend or "tavily"
+            entry["queries_explicit"] = list(n.queries) if n.queries else None
+            if not n.queries:
+                entry["queries_note"] = (
+                    "未显式声明 queries:运行时依次尝试 ①上游产物 JSON 顶层"
+                    " queries 数组(截断至 5 条) ②整段 prompt 作为单查询")
+            if n.allowed_domains:
+                entry["allowed_domains"] = list(n.allowed_domains)
         if n.on_error != "stop":
             entry["on_error"] = n.on_error   # P3:非默认失败策略必须在预演可见
         if n.imports:

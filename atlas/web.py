@@ -218,6 +218,12 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                 "allow_web": n.allow_web,
                 "workdir": n.workdir,
                 "max_turns": n.max_turns,
+                **({
+                    "backend": n.backend or "tavily",
+                    "max_results": n.max_results or 5,
+                    "queries": list(n.queries) if n.queries else [],
+                    "allowed_domains": list(n.allowed_domains),
+                } if n.type == "search" else {}),
             } for n in spec.nodes],
             "edges": [{"from": e.source, "to": e.target, "when": e.when}
                       for e in spec.edges],

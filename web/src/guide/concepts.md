@@ -22,6 +22,7 @@
 - `research`：agent 模型与 `max_turns`、`allow_web`、`allowed_paths`、`timeout_s`、`retry`。
 - `coding_agent`：agent 字段以及必填 `workdir`、`writable`；`allowed_paths` 仅在 `writable: false` 时合法。可写节点比较冻结 baseline 与 agent 结果的普通文件字节清单，生成完整文本 unified diff。
 - `human`：暂停并等待本机界面的批准或驳回；可选 `approval_mode: routed`（P11）解锁第三决策「要求修改」：必填非空意见，经校验期强制的 `when: __changes__` 回边进入修订节点（消耗 max_iterations），修改要求以 write-once `<节点id>.changes` 产物供修订节点消费；默认 binary 只认批准/驳回。
+- `search`（E-1）：调用 Atlas 自持检索后端，不调模型（写了 `model` 会被校验期拒绝）。后端封闭枚举 `backend: tavily`（需 `TAVILY_API_KEY`）| `searxng`（需 `ATLAS_SEARXNG_BASE_URL`），缺失在预检位响亮拒绝（dry-run 同样拦截）。查询词三级来源：显式 `queries`（≤5，超出校验期拒绝）→ 上游产物 JSON 顶层 `queries` 数组（截断至 5 并记 `truncated_queries`）→ 整段 prompt 单查询。每次执行落 `search_performed` 事件 + write-once JSON 产物；`cost_usd` 只取后端实报或 null，绝不冒充 $0；设了 `max_cost_usd` 时派发前保守预留剩余预算。结果是**不可信外部素材**：下游投影强制 `<untrusted-source>` 围栏 + 系统说明 + 闭合标签转义（`<\/untrusted-source>`），prompt 注入样本有固定测试。域名过滤只看检索 API 返回的初始 URL host（`https://arxiv.org@evil.com/` 的 host 是 evil.com，按 host 解析过滤）；不追重定向，短链可能掩盖最终落地页——如实限制。后端网络/HTTP 失败是内容类失败，可用 `on_error: stop|continue|branch` 与 `<node>.error`；取消在每个 query 边界消费；`timeout_s` 覆盖整批查询。检索产物不进 P7 skip/P13 合成导入（旧搜索结果冒充新执行=造假）；显式 imports 合法但 untrusted 围栏随导入转发。
 
 条件路由按 `route_field` 查找边的 `when`；该字段必须列入 `output_schema.required`，prompt 必须明确合法值。环必须有条件出口和 `max_iterations`。`llm` 节点可声明 `on_error: stop|continue|branch`（默认 stop）：内容类失败（候选全部失败）可让图继续（continue，不能带条件出边），或走 `when: __failed__` 的失败分支（branch，校验期必须接线，下游可消费 `<node>.error`）；费用、守卫、取消、完整性等治理异常任何策略都不可吞。
 

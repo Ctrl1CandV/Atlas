@@ -12,6 +12,7 @@ M1 范围:条件边(查表路由,不调模型)、循环(max_iterations 守卫)�
 """
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -28,7 +29,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-from atlas.adapters import (AdapterRegistry, AllCandidatesFailed,
+from atlas.adapters import (AdapterRegistry, AllCandidatesFailed, CallAttempt,
                             RunCancelled, call_with_fallback,
                             recover_json_object)
 from atlas.exc import can_soft_fail, error_class_name
@@ -50,6 +51,8 @@ from atlas.integrity import (
     read_artifact,
     sha256_bytes,
 )
+from atlas.search import (DEFAULT_BACKEND, SearchBackendError,
+                          resolve_search_queries, sanitize_results)
 from atlas.spec import (APPROVAL_DECISIONS, CHANGES_EDGE_KEY, FAILED_EDGE_KEY,
                         EdgeSpec, SpecError, WorkflowSpec,
                         spec_fingerprint, spec_from_snapshot, spec_to_snapshot,
@@ -78,6 +81,23 @@ class HumanRejected(Exception):
 
 class CostExceeded(Exception):
     """累计成本超过 guards.max_cost_usd。大声停止,不烧完预算才说。"""
+
+
+class SearchQueriesFailed(Exception):
+    """E-1:search 节点有查询在重试耗尽后仍失败。
+
+    内容类失败(atlas.exc 分类):图作者可用 on_error stop/continue/branch
+    策略化;attempts 是每次失败尝试的 CallAttempt 记录。治理类(取消/
+    deadline/费用)不在这里产生——它们在循环里直接上抛,永不被吞。
+    """
+
+    def __init__(self, backend: str, attempts) -> None:
+        self.backend = backend
+        self.attempts = tuple(attempts)
+        detail = "; ".join(
+            f"{a.model} → {a.error_type}: {a.reason}" for a in self.attempts)
+        super().__init__(
+            f"检索后端 {backend} 有查询失败(含重试耗尽)。{detail}")
 
 
 class RunConflictError(SpecError, RunNotFoundError):
@@ -602,6 +622,9 @@ class _NodeCtx:
     reuse_plans: Mapping = field(default_factory=lambda: MappingProxyType({}),
                                  repr=False)
     cost_ledger: CostLedger | None = field(default=None, repr=False)
+    # E-1:search 节点的后端工厂(backend_id → 实例);生产默认从环境构造,
+    # 测试注入替身(仿 agent_runner 模式)。
+    search_backend_factory: object = field(default=None, repr=False)
     _wall_start: datetime | None = field(default=None, repr=False)
     _agent_runner_raw: object = field(default=None, repr=False)
     _events_cache: tuple[int, list] | None = field(default=None, repr=False)
@@ -634,6 +657,9 @@ class _NodeCtx:
         self.agent_runner = guarded_agent_runner
         if self.cost_ledger is None:
             self.cost_ledger = CostLedger(self.cost_cap, spent=self.spent_usd())
+        if self.search_backend_factory is None:
+            from atlas.search import default_backend_factory
+            self.search_backend_factory = default_backend_factory
 
     def wall_start(self) -> datetime | None:
         """run_started 的时间戳(续跑后仍指向最初开始时刻)。"""
@@ -1203,6 +1229,240 @@ def _make_human_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
     return run
 
 
+def _make_search_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
+    """E-1 search 节点:检索后端调用 → search_performed + write-once 产物。
+
+    心跳窗口粒度=query,重试等待切 retry 相位;取消在每个 query 边界消费;
+    节点 timeout_s 覆盖整批 queries。后端网络/HTTP 失败是内容类失败
+    (重试耗尽后抛 SearchQueriesFailed,走 P3 on_error 通道);取消/
+    deadline/费用等治理类在循环内直接上抛,永不被吞。产物与事件里的
+    cost_usd 只取后端实报,拿不到就记 null,绝不冒充 $0。
+    """
+    def run(state: AtlasState) -> dict:
+        started = time.monotonic()
+        iteration = state.get("iterations", {}).get(node.id, 0) + 1
+        max_iter = spec.guards.effective_max_iterations
+        if iteration > max_iter:
+            raise GuardViolation(
+                f"节点 {node.id} 将第 {iteration} 次执行,"
+                f"超过 guards.max_iterations={max_iter}。循环未收敛,停止"
+            )
+        # P2 消费点:节点入口——任何花销(投影/预留/调用)之前。
+        if ctx.cancel_requested():
+            raise RunCancelled(f"节点 {node.id} 执行前收到取消请求")
+        ctx.check_timeout(spec.guards.timeout_s, node.id)
+
+        projection, proj_ref, consumed = build_projection(
+            ctx.run_dir,
+            node_id=node.id,
+            iteration=iteration,
+            prompt=node.prompt,
+            consumes=node.consumes,
+            artifacts=state["artifacts"],
+        )
+        ctx.log.emit(
+            "node_input",
+            node=node.id,
+            iteration=iteration,
+            projection_path=str(proj_ref.path),
+            projection_sha256=proj_ref.sha256,
+            consumed=[r.as_dict() for r in consumed],
+        )
+
+        backend_id = node.backend or DEFAULT_BACKEND
+        max_results = node.max_results or 5
+        model_label = f"search:{backend_id}"
+
+        # 检索按调用计费,费率表是 token 口径盖不住:有帽时派发前按剩余
+        # 预算全额保守预留(与 agent 同一条降级语义),结算只认后端实报。
+        reservation = None
+        if spec.guards.max_cost_usd is not None:
+            try:
+                reservation = ctx.cost_ledger.reserve_remaining(
+                    description=f"节点 {node.id} 检索派发前检查")
+            except CostLimitError as e:
+                raise CostExceeded(str(e)) from e
+            ctx.log.emit(
+                "cost_reserved", node=node.id, iteration=iteration,
+                attempt=1, model=model_label,
+                reservation_id=reservation.reservation_id,
+                reserved_usd=reservation.amount,
+            )
+        ctx.log.emit("node_started", node=node.id, iteration=iteration,
+                     model_requested=model_label, runner="search")
+
+        queries, truncated = resolve_search_queries(node, consumed)
+        backend = ctx.search_backend_factory(backend_id)
+        heartbeat = NodeHeartbeat(
+            ctx.log, node=node.id, iteration=iteration,
+            interval_s=ctx.heartbeat_interval_s, started_mono=started)
+        batch_deadline = (started + node.timeout_s
+                          if node.timeout_s is not None else None)
+        attempts: list[CallAttempt] = []
+        collected: list[dict] = []
+        reported_costs: list[float] = []
+
+        def _query_timeout() -> float | None:
+            """单次检索超时 = min(节点 timeout_s 的批量剩余, 整图剩余)。"""
+            remaining_run = ctx.remaining_timeout(node_id=node.id)
+            if batch_deadline is None:
+                return None if remaining_run == float("inf") else remaining_run
+            batch_left = batch_deadline - time.monotonic()
+            if remaining_run == float("inf"):
+                return batch_left
+            return min(batch_left, remaining_run)
+
+        try:
+            query_failed = False
+            for index, query in enumerate(queries, 1):
+                # P2 消费点:每个 query 边界。
+                if ctx.cancel_requested():
+                    raise RunCancelled(
+                        f"节点 {node.id} 在第 {index}/{len(queries)} 个"
+                        "查询边界收到取消请求")
+                if batch_deadline is not None \
+                        and time.monotonic() >= batch_deadline:
+                    attempts.append(CallAttempt(
+                        f"query{index}", "SearchTimeout",
+                        f"节点 timeout_s={node.timeout_s}s 已耗尽,"
+                        "本查询及剩余查询未执行"))
+                    query_failed = True
+                    break
+                query_results = None
+                for try_no in range(1 + node.retry):
+                    heartbeat.set_context(
+                        attempt=index, model=model_label,
+                        phase="waiting" if try_no == 0 else "retry")
+                    heartbeat.begin()
+                    try:
+                        query_results = backend.search(
+                            query, max_results=max_results,
+                            allowed_domains=list(node.allowed_domains),
+                            timeout_s=_query_timeout())
+                        break
+                    except SearchBackendError as e:
+                        attempts.append(CallAttempt(
+                            f"query{index}", "SearchBackendError", str(e)))
+                    finally:
+                        heartbeat.end()
+                if query_results is None:
+                    # 该查询重试耗尽:诚实失败,绝不带着缺一口的结果冒充完整
+                    query_failed = True
+                    break
+                reported = getattr(backend, "last_batch_cost_usd", None)
+                if (isinstance(reported, (int, float))
+                        and not isinstance(reported, bool)
+                        and math.isfinite(reported) and reported >= 0):
+                    reported_costs.append(float(reported))
+                for item in sanitize_results(query_results,
+                                             list(node.allowed_domains)):
+                    collected.append({
+                        "query": query, "url": item.url, "title": item.title,
+                        "snippet": item.snippet, "published": item.published,
+                    })
+
+            # 失败/部分失败按保守口径结算(未知→全额预留计入,不释放重用);
+            # 成功且后端实报才记真实金额。
+            actual = (round(sum(reported_costs), 6)
+                      if reported_costs and not query_failed else None)
+            unknown = actual is None
+            exceeded = None
+            try:
+                accounted = ctx.cost_ledger.settle(
+                    reservation, actual,
+                    description=f"节点 {node.id} 检索结算",
+                    unknown_as_reserved=unknown)
+            except CostLimitError as e:
+                accounted = actual
+                exceeded = e
+            reservation_id = (reservation.reservation_id
+                              if reservation is not None else None)
+            if unknown and reservation_id is not None:
+                ctx.log.emit(
+                    "cost_unknown", run_id=ctx.run_dir.name,
+                    models=[model_label], attempt=len(queries),
+                    reservation_id=reservation_id,
+                    reason="检索后端不实报费用;有成本帽时按本次预留全额"
+                           "计入 guarded/accounted 成本，不再释放重用。")
+            ctx.log.emit(
+                "cost_settled", node=node.id, iteration=iteration,
+                attempt=len(queries), model=model_label,
+                reservation_id=reservation_id,
+                actual_cost_usd=actual,
+                accounted_cost_usd=accounted,
+                cost_unknown=unknown,
+                cost_usd=actual,
+                input_tokens=None,
+                output_tokens=None,
+            )
+            if exceeded is not None:
+                raise CostExceeded(str(exceeded)) from exceeded
+            if query_failed:
+                raise SearchQueriesFailed(backend_id, attempts)
+
+            payload = json.dumps({
+                "backend": backend_id,
+                "queries": queries,
+                "truncated_queries": truncated,
+                "results": collected,
+            }, ensure_ascii=False, indent=1).encode("utf-8")
+            ref = store_artifact(
+                ctx.run_dir,
+                name=f"{node.id}.output",
+                filename=f"{node.id}.output.{iteration}.json",
+                content=payload,
+            )
+            out_entry = artifact_entry(
+                name=ref.name, role="output", path=ref.path,
+                sha256=ref.sha256, size_bytes=len(payload),
+                media_type="application/json")
+            # untrusted 标记随产物走:下游投影围栏与 imports 转发都认它
+            out_entry["untrusted"] = True
+            ctx.log.emit(
+                "search_performed",
+                node=node.id,
+                iteration=iteration,
+                backend=backend_id,
+                queries=queries,
+                results_count=len(collected),
+                truncated_queries=truncated,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                cost_usd=actual,
+                results=[{"url": c["url"], "title": c["title"][:120]}
+                         for c in collected],
+            )
+            ctx.log.emit(
+                "node_done",
+                node=node.id,
+                iteration=iteration,
+                model_requested=model_label,
+                model_used=model_label,
+                runner="search",
+                degraded=False,
+                output_truncated=False,
+                output_path=str(ref.path),
+                output_sha256=ref.sha256,
+                artifacts=[out_entry],
+                input_tokens=None,   # 检索没有 token 概念,不冒充
+                output_tokens=None,
+                cost_usd=actual,
+                duration_s=round(time.monotonic() - started, 3),
+            )
+            return {"artifacts": {ref.name: out_entry},
+                    "iterations": {node.id: 1},
+                    "route_facts": {node.id: "ok"}}
+        except Exception as e:
+            # P3:检索后端失败是内容类(重试耗尽 → SearchQueriesFailed),
+            # 配置了 continue/branch 时走软失败落账;治理类(取消/deadline/
+            # 费用/守卫)照旧上抛,永不吞。取消路径不结算:未决预留保持
+            # 保守计入(fold_cost_accounting 的 outstanding 语义)。
+            if node.on_error == "stop" or not can_soft_fail(e):
+                raise
+            return _soft_fail_node(node, ctx, e, iteration)
+
+    return run
+
+
 # 节点类型的唯一分发入口;未知类型在此 KeyError 即 fail-closed
 # (validate_spec 的封闭类型清单是第一道门,这里是第二道)。
 _NODE_FACTORIES = {
@@ -1210,6 +1470,7 @@ _NODE_FACTORIES = {
     "human": _make_human_node_fn,
     "research": make_agent_node_fn,
     "coding_agent": make_agent_node_fn,
+    "search": _make_search_node_fn,
 }
 
 
@@ -1295,6 +1556,10 @@ def validate_executable_spec(
                 f"agent 节点 {node.id} 未配置模型:本机受控执行必须显式选择模型")
     entry = validate_spec(spec, source=f"workflow {spec.name!r}")
     _resolve_models(spec, registry)
+    # E-1 预检位(同 _resolve_models 的"花钱之前"语义):search 后端的
+    # key/base-url 缺失在这里响亮拒绝,dry-run 与真跑一视同仁。
+    from atlas.search import preflight_search_backends
+    preflight_search_backends(spec)
     return entry
 
 
@@ -1356,6 +1621,7 @@ def execute_graph(
     agent_runner=None,
     prepared: PreparedExecution | None = None,
     heartbeat_interval_s: float | None = None,
+    search_backend_factory=None,
     base_spec_sha256: str | None = None,
     binding_summary=(),
     override_summary=(),
@@ -1443,7 +1709,8 @@ def execute_graph(
                        cost_ledger=CostLedger(spec.guards.max_cost_usd),
                        heartbeat_interval_s=heartbeat_interval_s,
                        backend_identity=prepared.backend_sha256,
-                       reuse_plans=reuse_plans)
+                       reuse_plans=reuse_plans,
+                       search_backend_factory=search_backend_factory)
 
         (run_dir / "spec.snapshot.json").write_text(
             json.dumps(spec_to_snapshot(spec), ensure_ascii=False, indent=1),
@@ -1488,6 +1755,7 @@ def execute_graph(
                      source_name=plan["source_name"],
                      source_sha256=plan["source_sha256"],
                      path=plan["ref"]["path"], sha256=plan["ref"]["sha256"],
+                     untrusted=bool(plan["ref"].get("untrusted")),
                      algo_version=plan["algo_version"])
 
         initial_artifacts = {"task": task_ref.as_dict()}

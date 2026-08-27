@@ -139,6 +139,12 @@ class SearchResult:
 
 验收门：ROADMAP §11 四要素（schema/fallback/来源完整性/预算/injection）全绿 + CI 双绿。工程量 **5–8 人日**。
 
+**实施记录（2026-08-27 已交付）**：
+1. HTTP 用标准库 urllib——httpx 目前只是 dev 依赖，不为两个简单 JSON 调用扩大运行时依赖与 uv.lock 变更面。
+2. `on_error`/`retry`/`timeout_s` 的类型白名单扩展到 search 节点（`<search节点>.error` 可被下游消费）；K-2 的 retry 放大警告**不**覆盖 search——检索单次成本近似 llm 量级（甚至免费自建），沿用"低成本不稀释注意力"的理由，与批次 K 的触发边界一致。
+3. 导入链防围栏绕过：`resolve_imports` 将源产物的 untrusted 标记随 ref 转发（`artifact_imported` 事件带 `untrusted` 字段）；同时锁死一个设计性质——消费"图中不存在生产者节点的产物名"在校验期即被拒绝，外部素材无法绕过围栏裸内联。
+4. 指纹兼容：search 专属四字段（backend/max_results/queries/allowed_domains）默认值不进指纹，旧图指纹零变化（测试锁定）。
+
 ---
 
 ## E-2A · 运行附件（attachments）

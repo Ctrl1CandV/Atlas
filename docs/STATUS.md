@@ -27,6 +27,7 @@
 | 终局可视化与总结（S1） | 终态 run 顶部零成本终局卡片：每节点一句话回顾（模型/耗时/token/成本/输出首段）+ 时间线，纯账本派生，Web 与 `atlas_get_run` 同源（`build_finale`）；图级 opt-in `summary: {model, prompt_hint?}` 在 run_done 前一次总结调用（进规格指纹与快照），成本走 CostLedger 受 `max_cost_usd` 约束，write-once 产物 + `run_summary_written`；失败记 `run_summary_failed` 不改终态；总结文本标注「LLM 叙述，事实以账本为准」；不做离线报告导出 |
 | 工作流文件管理 | Web 页面可删除工作流；保存走 MCP 的 `expected_sha256` 读-改-写闭环（乐观锁防覆盖） |
 | 零成本预检 | validate 与 dry-run 不调用供应商；`expected_execution_sha256` 可绑定预演与真跑身份；dry-run 对显式 `retry>0` 的 research/coding_agent 节点必现放大风险警告（K，RFC 已实施关闭），Web preview 与 MCP 同源透出 |
+| search 检索节点（E-1） | 封闭类型 `search`：Atlas 自持后端（封闭枚举 tavily/searxng，key/base-url 缺失在预检位拒绝，dry-run 同样拦截）；写了 `model` 校验期拒绝。查询词三级来源（显式 ≤5 / 上游 JSON queries 截断至 5 并入账 / prompt 兜底单查询）；每次执行落 `search_performed` 事件 + write-once JSON 产物，`cost_usd`=后端实报或 null（不冒充 $0），有帽时派发前保守预留剩余预算。下游投影强制 `<untrusted-source>` 围栏 + 系统说明 + 闭合标签逃逸转义（围栏字节有正反例测试）；域名过滤只看初始 URL host（userinfo 伪装按 host 解析拒绝），不追重定向为如实限制。后端网络/HTTP 失败归内容类（`on_error` 可策略化，治理类照旧不可吞）；取消在每个 query 边界消费，`timeout_s` 覆盖整批；不进 P7 skip/P13 合成导入（复用=造假），显式 imports 保留 untrusted 标记 |
 | 可审计运行 | append-only JSONL 事件、write-once 产物、读取时 SHA-256 断言、有效规格快照 |
 | 成本保护（P0min） | 有 `max_cost_usd` 时派发前持久化 reservation；未知费率保守占用剩余预算；无 cap 不虚构金额 |
 | 崩溃恢复（P1） | 动态派生 `interrupted`；只有 interrupted 可 resume；paused 只能 approve/reject |
@@ -61,7 +62,7 @@
 
 2026-08-23 公开 CI 基线（`main` @ `7eac07b`，GitHub Actions）：
 
-- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-27 批次 K 起为 610 passed，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
+- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-27 批次 E-1 起为 634 passed，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
 - Ubuntu 兼容性信号 job（`continue-on-error`，明确不支持）同样通过：跨平台 agent CLI 桩修复后它反映真实兼容性。
 - `real-api.yml` 仅手动触发（`environment: real-api` 保护），不计入常规 CI。
 

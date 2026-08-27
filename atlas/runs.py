@@ -423,6 +423,9 @@ def resolve_imports(*, run_dir: Path, imports_spec, runs_root: Path) -> list[dic
                 "algo_version": IMPORT_ALGO_VERSION,
                 "source_invocation": (
                     started.get("invocation_sha256") if started else None),
+                # E-1:search 产物是外部网页素材,导入后仍须在下游投影里
+                # 围栏——untrusted 标记随导入转发,绝不裸内联。
+                "untrusted": bool(entry.get("untrusted")),
             })
 
         results: list[dict] = []
@@ -431,7 +434,10 @@ def resolve_imports(*, run_dir: Path, imports_spec, runs_root: Path) -> list[dic
                 source_path=Path(plan.pop("path_str")),
                 source_sha256=plan["source_sha256"],
                 run_dir=run_dir, name=plan["source_name"])
-            results.append({**plan, "ref": ref.as_dict()})
+            ref_dict = ref.as_dict()
+            if plan.pop("untrusted"):
+                ref_dict["untrusted"] = True
+            results.append({**plan, "ref": ref_dict})
         return results
     finally:
         for src_id in reversed(held_locks):
