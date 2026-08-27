@@ -114,6 +114,17 @@ export async function approveRun(
   }
 }
 
+export interface AgentsStatus {
+  present: boolean;
+  runner: string | null;
+  command: string | null;
+  cli_version: string | null;
+  status: 'disabled' | 'ready' | 'error';
+  detail: string;
+}
+
+export const getAgentsStatus = () => get<AgentsStatus>('/api/agents-status');
+
 export async function cancelRun(rid: string, reason = ''): Promise<void> {
   const resp = await fetch(`/api/runs/${rid}/cancel`, {
     method: 'POST',

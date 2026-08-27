@@ -52,6 +52,9 @@ class ModelResponse:
     # thinking_block = 只有存在性(Anthropic 响应不给 thinking 的 token 用量),
     # 此时 reasoning_tokens 是哨兵 1,不是数量。空串 = 协议无证据。
     reasoning_kind: str = ""
+    # 体验债 2b「参数回显核对」:供应商响应体中原样回传的请求参数子集
+    # (仅认 temperature/seed 的数值形态)。None = 响应未回显(不可核对)。
+    param_echo: dict | None = None
 
 
 def _llm_credential_revision(provider_id: str, api_key: str) -> str:
@@ -62,6 +65,21 @@ def _llm_credential_revision(provider_id: str, api_key: str) -> str:
         + api_key.encode("utf-8")
     )
     return hashlib.sha256(material).hexdigest()
+
+
+def _echo_from_extra(resp: object, extra_body: dict | None) -> dict | None:
+    """从 SDK 响应对象收集网关回传的请求参数(仅 temperature/seed 数值形态)。
+
+    OpenAI/Anthropic SDK 把响应体里未建模的顶层字段放进 model_extra;
+    网关不回显时得到 None(不可核对,与回显了但值不同区分开)。
+    """
+    extra = getattr(resp, "model_extra", None)
+    if not isinstance(extra, dict):
+        return None
+    echo = {key: extra[key] for key in ("temperature", "seed")
+            if isinstance(extra.get(key), (int, float))
+            and not isinstance(extra.get(key), bool)}
+    return echo or None
 
 
 class OpenAICompatAdapter:
@@ -128,7 +146,8 @@ class OpenAICompatAdapter:
         )
         return ModelResponse(text=text, usage=usage, output_truncated=truncated,
                              reasoning_tokens=reasoning,
-                             reasoning_kind=reasoning_kind)
+                             reasoning_kind=reasoning_kind,
+                             param_echo=_echo_from_extra(resp, extra_body))
 
 
 class AnthropicCompatAdapter:
@@ -194,7 +213,8 @@ class AnthropicCompatAdapter:
         )
         return ModelResponse(text=text, usage=usage, output_truncated=truncated,
                              reasoning_tokens=1 if has_thinking else 0,
-                             reasoning_kind="thinking_block" if has_thinking else "")
+                             reasoning_kind="thinking_block" if has_thinking else "",
+                             param_echo=_echo_from_extra(msg, extra_body))
 
 
 class AdapterRegistry:
@@ -478,6 +498,30 @@ class CallOutcome:
     reasoning_tokens: int = 0
     reasoning_kind: str = ""
     attempts: tuple[CallAttempt, ...] = field(default_factory=tuple)
+    # 只对发送过 temperature/seed 的调用有内容:{name: "echo_ok"|"not_echoed"|
+    # "mismatch(sent=..,got=..)"}。写入 node_done;空 dict = 本次没发可核参数。
+    param_audit: dict = field(default_factory=dict)
+
+
+def _param_audit_for(extra_body: dict | None,
+                     resp: ModelResponse) -> dict:
+    """发送值 vs 响应回显:能核的核出结论,不回显就如实标注不可核。"""
+    sent = {k: v for k, v in (extra_body or {}).items()
+            if k in ("temperature", "seed")}
+    if not sent:
+        return {}
+    echo = resp.param_echo or {}
+    audit: dict = {}
+    for name, sent_value in sent.items():
+        got = echo.get(name)
+        if got is None:
+            audit[name] = "not_echoed"
+        elif isinstance(got, (int, float)) and not isinstance(got, bool) \
+                and abs(float(got) - float(sent_value)) <= 1e-9:
+            audit[name] = "echo_ok"
+        else:
+            audit[name] = f"mismatch(sent={sent_value!r},got={got!r})"
+    return audit
 
 
 class RunCancelled(Exception):
@@ -745,6 +789,7 @@ def call_with_fallback(
             reasoning_tokens=resp.reasoning_tokens,
             reasoning_kind=resp.reasoning_kind,
             attempts=tuple(attempts),
+            param_audit=_param_audit_for(extra_body, resp),
         )
     raise AllCandidatesFailed(model_ref, attempts)
 
@@ -767,10 +812,13 @@ class FakeProvider:
 
     protocol = "openai"   # 与真实适配器同构;测试可改为 anthropic 协议
 
-    def __init__(self, max_output_tokens: int = 8192) -> None:
+    def __init__(self, max_output_tokens: int = 8192,
+                 echo_request_params: bool = True) -> None:
         self.models: dict[str, _FakeModelSpec] = {}
         self.calls: list[dict] = []       # 每次调用的 {model, prompt_len, extra_body}
         self.max_output_tokens = max_output_tokens
+        # False 模拟不回显请求参数的供应商(参数核对链 not_echoed 路径)
+        self.echo_request_params = echo_request_params
 
     def configure(self, model_id: str, *, text: str = "",
                   sequence: list[str] | None = None,
@@ -806,7 +854,16 @@ class FakeProvider:
         effective_max = (extra_body or {}).get("max_tokens", self.max_output_tokens)
         truncated = usage is not None and usage.output_tokens is not None \
             and usage.output_tokens >= effective_max
+        # 模拟诚实网关:发送过的 temperature/seed 原样回显,供参数核对链
+        # 的正向路径测试;关闭开关则模拟不回显的供应商(not_echoed 路径)。
+        param_echo = None
+        if self.echo_request_params:
+            sent = {k: extra_body[k] for k in ("temperature", "seed")
+                    if isinstance((extra_body or {}).get(k), (int, float))
+                    and not isinstance((extra_body or {}).get(k), bool)}
+            param_echo = sent or None
         return ModelResponse(text=text, usage=usage, output_truncated=truncated,
                              reasoning_tokens=spec.reasoning_tokens,
                              reasoning_kind=("usage_reasoning_tokens"
-                                             if spec.reasoning_tokens > 0 else ""))
+                                             if spec.reasoning_tokens > 0 else ""),
+                             param_echo=param_echo)

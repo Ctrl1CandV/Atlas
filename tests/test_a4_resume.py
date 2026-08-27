@@ -40,7 +40,7 @@ def test_a4_resume_does_not_reexecute(tmp_path):
     # 模拟重启进程后修复故障:node_c 的模型恢复正常
     fake.configure("third", text="第三步完成:终审通过。")
 
-    resumed = _resume_graph_replay(run_id, spec=load_graph("three_node"),
+    resumed = _resume_graph_replay(run_id, _test_only=True, spec=load_graph("three_node"),
                            runs_root=tmp_path, registry=make_registry(fake))
 
     # node_a 只能出现一次 node_done
@@ -76,5 +76,5 @@ def test_a4_resume_requires_checkpoint(tmp_path):
 
     run_dir = _only_run_dir(tmp_path)
     with pytest.raises(RunNotFoundError):
-        _resume_graph_replay(run_dir.name, spec=load_graph("three_node"),
+        _resume_graph_replay(run_dir.name, _test_only=True, spec=load_graph("three_node"),
                      runs_root=tmp_path, registry=make_registry(fake))

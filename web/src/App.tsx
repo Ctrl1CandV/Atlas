@@ -201,6 +201,13 @@ export default function App() {
   const refreshRuns = useCallback(() =>
     listRuns().then(setRuns).catch((e: Error) => setError(e.message)), []);
 
+  // 体验债 2b:run 列表定时轮询——别的入口(MCP/另一标签页)发起的运行
+  // 不经过本页 SSE,只能靠刷新出现。失败静默(下一轮再来),不打扰。
+  useEffect(() => {
+    const timer = setInterval(refreshRuns, 20_000);
+    return () => clearInterval(timer);
+  }, [refreshRuns]);
+
   const refreshModelOptions = useCallback(() => {
     return listProviders()
       .then((providers) => {
@@ -614,6 +621,12 @@ export default function App() {
                   </span><span className="k">
                     {summary.totals.actual_cost_unknown_count > 0 ? '守卫计入成本' : '实际成本'}
                   </span></span>
+                  {summary.totals.outstanding_reserved_usd > 0 && (
+                    <span className="m" title="派发前为本次调用预留的预算;结算后转入实际成本。未决部分不可再被其他节点消费">
+                      <span className="v">${summary.totals.outstanding_reserved_usd.toFixed(3)}*</span>
+                      <span className="k">已预留</span>
+                    </span>
+                  )}
                 </>
               )}
             </div>
@@ -887,6 +900,16 @@ export default function App() {
               )}
             </motion.div>
           ))}
+          {runId && (
+            <div style={{ textAlign: 'center', padding: '8px 0 2px' }}>
+              <button
+                className="ledger-link"
+                onClick={() =>
+                  window.open(`/api/runs/${encodeURIComponent(runId)}/events.jsonl`, '_blank')}
+                title="界面只保留最近事件;完整 append-only 账本逐行 JSON"
+              >查看完整账本 ↓</button>
+            </div>
+          )}
         </div>
       </div>
       </DockWorkspace>

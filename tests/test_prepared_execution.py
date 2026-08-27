@@ -119,7 +119,8 @@ def test_prepared_rejects_mutated_backend_and_partial_modern_identity(tmp_path):
     rows[0] = json.dumps(started, ensure_ascii=False)
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
     with pytest.raises(SpecError, match="身份字段不完整"):
-        _resume_graph_replay(run.run_id, spec=spec, runs_root=tmp_path / "partial",
+        _resume_graph_replay(run.run_id, _test_only=True,
+                         spec=spec, runs_root=tmp_path / "partial",
                      prepared=stable)
 
 
@@ -327,7 +328,7 @@ def test_resume_rejects_backend_drift_without_resume_events(tmp_path):
 
     drifted = prepare_execution(spec, _registry(_successful_fake("anthropic")))
     with pytest.raises(SpecError, match="backend_sha256|execution_sha256"):
-        _resume_graph_replay(run_dir.name, spec=spec, runs_root=tmp_path, prepared=drifted)
+        _resume_graph_replay(run_dir.name, _test_only=True, spec=spec, runs_root=tmp_path, prepared=drifted)
     after = EventReader(run_dir / "events.jsonl").all()
     assert after == before
     assert not any(e["type"] == "run_resumed" for e in after)
@@ -366,7 +367,7 @@ def test_legacy_run_continues_spec_only_and_records_compatibility(tmp_path):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     fake.configure("third", text="恢复")
-    resumed = _resume_graph_replay(run_dir.name, spec=spec, runs_root=tmp_path,
+    resumed = _resume_graph_replay(run_dir.name, _test_only=True, spec=spec, runs_root=tmp_path,
                            prepared=prepared)
     assert resumed.status == "done"
     assert resumed.events.find(type="legacy_execution_identity") is not None

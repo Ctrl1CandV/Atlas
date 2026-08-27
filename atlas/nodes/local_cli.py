@@ -115,7 +115,8 @@ def _read_version(program: str, env: dict[str, str]) -> tuple[int, int, int]:
     return version
 
 
-def _check_cli_contract(program: str, env: dict[str, str]) -> None:
+def _check_cli_contract(program: str, env: dict[str, str],
+                        cli_version: tuple[int, int, int] | None = None) -> None:
     try:
         proc = subprocess.run([program, "--help"], capture_output=True,
                               text=True, encoding="utf-8", errors="replace",
@@ -125,7 +126,7 @@ def _check_cli_contract(program: str, env: dict[str, str]) -> None:
     if proc.returncode != 0:
         raise ConfigError(f"agent CLI --help 失败(退出码 {proc.returncode})")
     help_text = proc.stdout or ""
-    # rf 原始字符串里必须用单反斜杠:[\\s] 是字面反斜杠,会把真实 --help
+    # rf 原始字符串里必须用单反斜杠:[\s] 是字面反斜杠,会把真实 --help
     # 里"参数后跟空格"的排版误判成缺参。
     missing = [
         flag for flag in _REQUIRED_CLAUDE_FLAGS
@@ -133,8 +134,17 @@ def _check_cli_contract(program: str, env: dict[str, str]) -> None:
         is None
     ]
     if missing:
+        # 契约探测靠 --help 排版匹配:CLI 真缺参和排版变化都会走到这里。
+        # 报错必须带版本与缺参清单,让「该升级 CLI」和「--help 排版变了、
+        # 需要更新 Atlas 探测规则」两种处置一眼可分(体验债 2b)。
+        version_label = (".".join(map(str, cli_version))
+                         if cli_version else "未知")
         raise ConfigError(
-            f"当前 Claude CLI 缺少 Atlas 必需参数:{missing};请升级 Claude Code")
+            f"当前 Claude CLI(v{version_label})缺少 Atlas 必需参数:{missing}。"
+            f"两种可能:① CLI 版本过旧确实没有这些参数——请升级 Claude Code"
+            f"(最低 {'.'.join(map(str, _MIN_CLAUDE_VERSION))});"
+            f"② 你的 CLI 实际支持它们但 --help 排版变了——请带着本报错与 "
+            f"`{program} --help` 的输出反馈给 Atlas 维护者更新探测规则")
 
 
 def _require_clean_git_workdir(path: Path, node_id: str) -> SourceBaselineToken:
@@ -475,7 +485,7 @@ def prepare_local_cli_runner(*, agent_config_path: Path | None = None,
     program = _resolve_program(config.cli.command)
     child_env = _base_child_env()
     version = _read_version(program, child_env)
-    _check_cli_contract(program, child_env)
+    _check_cli_contract(program, child_env, version)
     return LocalCliRunner(config, providers, env_store or EnvStore(CONFIG_DIR / ".env"),
                           program, version)
 

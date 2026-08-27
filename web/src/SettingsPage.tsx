@@ -15,6 +15,7 @@ import {
   updateProvider,
   type InitializationNotice,
 } from './api';
+import { getAgentsStatus, type AgentsStatus } from './api';
 import type { CapabilityKind, DiscoveryResponse, Provider } from './types';
 
 /** 思考能力徽章(M6-D):拉取到模型 ≠ 能力已探测。
@@ -317,6 +318,7 @@ export function SettingsPage({ onProvidersChanged, onRunsDeleted }: {
   const [caps, setCaps] = useState<Record<string, { kind: CapabilityKind; evidence?: string }>>({});
   const [error, setError] = useState<string | null>(null);
   const [initialization, setInitialization] = useState<InitializationNotice | null>(null);
+  const [agentsStatus, setAgentsStatus] = useState<AgentsStatus | null>(null);
   const [initializationBusy, setInitializationBusy] = useState(false);
   const [cleanupBusy, setCleanupBusy] = useState(false);
   const [cleanupMessage, setCleanupMessage] = useState<{
@@ -329,6 +331,7 @@ export function SettingsPage({ onProvidersChanged, onRunsDeleted }: {
       onProvidersChanged?.();
     }).catch((e: Error) => setError(e.message));
     listThinkingCapabilities().then(setCaps).catch(() => undefined);
+    getAgentsStatus().then(setAgentsStatus).catch(() => undefined);
   }, [onProvidersChanged]);
   useEffect(refresh, [refresh]);
   useEffect(() => {
@@ -374,8 +377,35 @@ export function SettingsPage({ onProvidersChanged, onRunsDeleted }: {
     }
   }
 
+  const AGENTS_STATUS_LABEL: Record<AgentsStatus['status'], string> = {
+    disabled: '未启用(fail-closed)',
+    ready: '预检通过',
+    error: '预检失败',
+  };
+
   return (
     <div className="settings-page">
+      {agentsStatus && (
+        <>
+          <h3>生产 agent(local_cli)</h3>
+          <div className="agents-card" data-status={agentsStatus.status}>
+            <span className={`finale-status ${agentsStatus.status === 'ready'
+              ? 'finale-status-done'
+              : agentsStatus.status === 'error' ? 'finale-status-failed'
+                : 'finale-status-cancelled'}`}>
+              {AGENTS_STATUS_LABEL[agentsStatus.status]}
+            </span>
+            <span className="prov-meta">
+              {agentsStatus.runner ?? '—'}
+              {agentsStatus.cli_version ? ` · Claude CLI v${agentsStatus.cli_version}` : ''}
+            </span>
+            <p className="dim" style={{ margin: '6px 0 0', fontSize: 12 }}>
+              {agentsStatus.detail}
+              {' '}配置与编辑走 config/agents.json;凭据只存于 config/.env。
+            </p>
+          </div>
+        </>
+      )}
       <h3>模型与供应商</h3>
       <p className="dim">
         界面改的是环境(供应商、模型白名单、密钥),图的定义仍在 YAML 文件里。

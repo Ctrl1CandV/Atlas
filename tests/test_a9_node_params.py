@@ -407,3 +407,41 @@ def test_sdk_clients_disable_hidden_retries(monkeypatch):
 
     assert captured["openai"]["max_retries"] == 0
     assert captured["anthropic"]["max_retries"] == 0
+
+
+def test_param_echo_audit_three_paths(tmp_path):
+    """体验债 2b:发送过的 temperature/seed 在 node_done 上带核对结论——
+    echo_ok(诚实网关回显一致)/ not_echoed(供应商不回显,如实标注不可核);
+    mismatch 路径由 call_with_fallback 的单元断言覆盖。"""
+    fake = FakeProvider()
+    fake.configure("primary", text="ok")
+    result = _run(tmp_path, fake, "    temperature: 0.3\n    seed: 7")
+    audit = result.events.find(type="node_done", node="solo")["param_audit"]
+    assert audit == {"temperature": "echo_ok", "seed": "echo_ok"}
+
+    silent = FakeProvider(echo_request_params=False)
+    silent.configure("primary", text="ok")
+    result = _run(tmp_path, silent, "    temperature: 0.3")
+    audit = result.events.find(type="node_done", node="solo")["param_audit"]
+    assert audit == {"temperature": "not_echoed"}
+
+
+def test_param_audit_mismatch_detected(tmp_path):
+    """mismatch:伪造回显值与发送值不符 → 结论进 CallOutcome。"""
+    from atlas.adapters import ModelResponse
+
+    class LyingGateway(FakeProvider):
+        def call(self, model_id, prompt, extra_body=None, timeout_s=None):
+            resp = super().call(model_id, prompt, extra_body, timeout_s)
+            return ModelResponse(text=resp.text, usage=resp.usage,
+                                 output_truncated=resp.output_truncated,
+                                 reasoning_tokens=resp.reasoning_tokens,
+                                 reasoning_kind=resp.reasoning_kind,
+                                 param_echo={"temperature": 0.99})
+
+    fake = LyingGateway()
+    fake.configure("primary", text="ok")
+    result = _run(tmp_path, fake, "    temperature: 0.3")
+    audit = result.events.find(type="node_done", node="solo")["param_audit"]
+    assert audit["temperature"].startswith("mismatch(")
+    assert "sent=0.3" in audit["temperature"] and "got=0.99" in audit["temperature"]

@@ -94,6 +94,7 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                registry_factory=None,
                providers_path: Path | None = None,
                env_store=None,
+               agent_config_path: Path | None = None,
                agent_runner_factory=None,
                *,
                api_only: bool = False,
@@ -587,6 +588,7 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                     "runner": e.get("runner", slot.get("runner")),
                     "duration_s": e["duration_s"],
                     "iteration": e["iteration"],
+                    "param_audit": e.get("param_audit"),
                 })
         # 启动了但没做完的节点:按运行终态标 failed(而不是永远 running)
         if folded["status"] in ("failed", "done"):
@@ -693,6 +695,16 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                 (runs_dir / rid / sub).resolve()):
             raise HTTPException(404, f"没有这个文件:{sub}/{filename}")
         return FileResponse(path, media_type="text/plain; charset=utf-8")
+
+    @app.get("/api/runs/{rid}/events.jsonl")
+    def get_full_ledger(rid: str):
+        """完整事件账本下载(体验债 2b:界面事件流只保留最近若干条)。"""
+        _check_id(rid, "运行")
+        path = runs_dir / rid / "events.jsonl"
+        if not path.is_file() or not path.resolve().is_relative_to(
+                (runs_dir / rid).resolve()):
+            raise HTTPException(404, f"没有这个运行:{rid}")
+        return FileResponse(path, media_type="application/x-ndjson")
 
     @app.get("/api/runs/{rid}/artifacts/{filename}")
     def get_artifact(rid: str, filename: str):
@@ -849,6 +861,49 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
     # ── 配置面(供应商/密钥/模型白名单;PLAN-v2 M3)──────────────
     from atlas.configapi import register_config_routes
     register_config_routes(app, providers_path, env_store)
+
+    @app.get("/api/agents-status")
+    def agents_status():
+        """agents.json 状态卡片(体验债 2b):只读事实,不含凭据。
+
+        编辑仍走 config/agents.json 文件;这里回答设置页的三个问题:
+        生产 agent 是否启用、CLI 预检能否通过、失败的具体原因。
+        """
+        from atlas.config import CONFIG_DIR, ConfigError, load_agent_config
+        cfg_path = (Path(agent_config_path)
+                    if agent_config_path is not None
+                    else CONFIG_DIR / "agents.json")
+        if not cfg_path.exists():
+            return {"present": False, "runner": None, "command": None,
+                    "cli_version": None, "status": "disabled",
+                    "detail": "config/agents.json 不存在——生产 agent 执行"
+                              "保持 fail-closed(这是刻意的安全默认)"}
+        try:
+            cfg = load_agent_config(cfg_path)
+        except ConfigError as e:
+            return {"present": True, "runner": None, "command": None,
+                    "cli_version": None, "status": "error",
+                    "detail": f"agents.json 无法解析:{e}"}
+        if cfg.runner != "local_cli":
+            return {"present": True, "runner": cfg.runner, "command": None,
+                    "cli_version": None, "status": "disabled",
+                    "detail": "runner 未设为 local_cli——生产 agent 执行关闭"}
+        try:
+            from atlas.nodes.local_cli import prepare_local_cli_runner
+            runner = prepare_local_cli_runner(
+                agent_config_path=cfg_path, providers_path=providers_path,
+                env_store=env_store)
+            version = ".".join(map(str, runner.cli_version))
+            return {"present": True, "runner": cfg.runner,
+                    "command": str(runner.program), "cli_version": version,
+                    "status": "ready",
+                    "detail": f"Claude CLI 预检通过(v{version})"}
+        except Exception as e:
+            return {"present": True, "runner": cfg.runner,
+                    "command": getattr(getattr(cfg, "cli", None),
+                                       "command", None),
+                    "cli_version": None, "status": "error",
+                    "detail": f"Claude CLI 预检未通过:{e}"}
 
     @app.get("/api/thinking-capabilities")
     def thinking_capabilities():

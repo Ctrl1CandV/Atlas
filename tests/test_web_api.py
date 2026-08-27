@@ -909,3 +909,75 @@ def test_cancel_endpoint_http_contract(tmp_path):
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "cancelled" and body["request_id"]
+
+
+def test_agents_status_card_paths(tmp_path):
+    """体验债 2b:设置页 agents.json 状态卡的三种形态——缺文件 fail-closed、
+    显式关闭、local_cli 预检失败透出原因(ready 形态由
+    test_local_cli_runner 的预检测试群覆盖)。响应永不包含凭据值。"""
+    workflows = tmp_path / "workflows"
+    workflows.mkdir()
+    runs = tmp_path / "runs"
+    providers = tmp_path / "providers.json"
+    providers.write_text(json.dumps({"providers": [
+        {"id": "Stub", "openaiBaseUrl": None,
+         "anthropicBaseUrl": "https://stub.invalid/v1",
+         "apiKeyEnv": "STUB_KEY", "models": ["model-a"]},
+    ]}), encoding="utf-8")
+    env = tmp_path / "a.env"
+    env.write_text("STUB_KEY=temporary-test-key\n", encoding="utf-8")
+    from atlas.credentials import EnvStore
+
+    def _make(agent_config_path=None):
+        return TestClient(create_app(
+            workflows_dir=workflows, runs_dir=runs,
+            registry_factory=lambda pids: _reg(FakeProvider()),
+            providers_path=tmp_path / "providers.json",
+            env_store=EnvStore(env),
+            agent_config_path=agent_config_path, api_only=True),
+            base_url="http://127.0.0.1")
+
+    # ① 缺文件:如实展示 disabled 与安全默认语义
+    with _make(tmp_path / "absent-agents.json") as client:
+        body = client.get("/api/agents-status").json()
+        assert body["present"] is False and body["status"] == "disabled"
+        assert "fail-closed" in body["detail"]
+
+    # ② 显式 runner=fail_closed → disabled
+    cfg = tmp_path / "closed-agents.json"
+    cfg.write_text('{"runner": "fail_closed"}', encoding="utf-8")
+    with _make(cfg) as client:
+        body = client.get("/api/agents-status").json()
+        assert body["present"] is True and body["status"] == "disabled"
+        assert body["runner"] == "fail_closed"
+
+    # ③ local_cli 但 CLI 不存在:error + 原因(而非静默假装可用)
+    cfg2 = tmp_path / "broken-agents.json"
+    cfg2.write_text(json.dumps({
+        "runner": "local_cli",
+        "cli": {"kind": "claude", "command": "definitely-not-a-real-cli-xyz"},
+    }), encoding="utf-8")
+    with _make(cfg2) as client:
+        body = client.get("/api/agents-status").json()
+        assert body["present"] is True and body["status"] == "error"
+        assert "找不到 agent CLI" in body["detail"]
+
+
+def test_full_ledger_download(tmp_path):
+    """体验债 2b:GET /api/runs/{rid}/events.jsonl 下载 append-only 全量账本
+    (界面事件流只保留最近若干条);路径穿越与缺失 run 拒绝。"""
+    workflows = tmp_path / "workflows"
+    workflows.mkdir()
+    runs = tmp_path / "runs"
+    _write_run(runs, "ledger-run", "run_done")
+    api = create_app(workflows_dir=workflows, runs_dir=runs,
+                     registry_factory=lambda pids: _reg(FakeProvider()),
+                     api_only=True)
+    with TestClient(api, base_url="http://127.0.0.1") as client:
+        resp = client.get("/api/runs/ledger-run/events.jsonl")
+        assert resp.status_code == 200
+        assert "ndjson" in resp.headers.get("content-type", "")
+        lines = [json.loads(line) for line in resp.text.splitlines() if line]
+        assert [e["type"] for e in lines] == ["run_started", "run_done"]
+        # 缺失/非法 id → 404
+        assert client.get("/api/runs/no-such-run/events.jsonl").status_code == 404

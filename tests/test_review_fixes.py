@@ -47,7 +47,7 @@ def test_torn_tail_line_does_not_reset_seq(tmp_path):
     last_seq = before[-1]["seq"]
 
     fake.configure("other", text="第二稿(修复后)")
-    resumed = _resume_graph_replay(run_dir.name, spec=load_graph("three_node"),
+    resumed = _resume_graph_replay(run_dir.name, _test_only=True, spec=load_graph("three_node"),
                            runs_root=tmp_path, registry=make_registry(fake))
 
     events = resumed.events.all()
@@ -85,7 +85,7 @@ def test_parallel_sibling_failure_resume_keeps_completed_sibling(tmp_path):
     first_bytes = open(first_path, "rb").read()
 
     fake.configure("right", text="右方向结论(修复后)")
-    resumed = _resume_graph_replay(run_dir.name, spec=load_graph("parallel"),
+    resumed = _resume_graph_replay(run_dir.name, _test_only=True, spec=load_graph("parallel"),
                            runs_root=tmp_path, registry=make_registry(fake))
     assert resumed.folded()["status"] == "done"
 
@@ -200,7 +200,7 @@ def test_resume_rejects_modified_spec(tmp_path):
         nodes=[replace(n, prompt=n.prompt + " (改过)") if n.id == "node_c" else n
                for n in spec.nodes])
     with pytest.raises(SpecError, match="spec_sha256"):
-        _resume_graph_replay(run_dir.name, spec=modified,
+        _resume_graph_replay(run_dir.name, _test_only=True, spec=modified,
                      runs_root=tmp_path, registry=make_registry(fake))
 
 
@@ -218,7 +218,7 @@ def test_resume_lock_prevents_concurrent_writers(tmp_path):
     try:
         fake.configure("third", text="ok")
         with pytest.raises(RunConflictError, match="运行锁"):
-            _resume_graph_replay(run_dir.name, spec=load_graph("three_node"),
+            _resume_graph_replay(run_dir.name, _test_only=True, spec=load_graph("three_node"),
                          runs_root=tmp_path, registry=make_registry(fake))
     finally:
         release_run_lock(run_dir.name, runs_root=tmp_path)
@@ -239,7 +239,7 @@ def test_old_lock_mtime_neither_blocks_nor_grants_ownership(tmp_path):
     os.utime(lock, (old, old))
 
     fake.configure("third", text="ok")
-    resumed = _resume_graph_replay(run_dir.name, spec=load_graph("three_node"),
+    resumed = _resume_graph_replay(run_dir.name, _test_only=True, spec=load_graph("three_node"),
                            runs_root=tmp_path, registry=make_registry(fake))
     assert resumed.folded()["status"] == "done"
     assert lock.is_file()
@@ -299,3 +299,18 @@ def test_event_reader_rejects_oversized_ledger(tmp_path, monkeypatch):
         reader.all()
     with pytest.raises(EventLimitError, match="超过上限"):
         reader.read_from(0)
+
+
+def test_resume_replay_rejects_default_call(tmp_path):
+    """P3-E:非产品重放路径默认响亮拒绝,_test_only=True 才可用——
+    把"误用绕过 interrupted 准入"从能跑变成当场报错(体验债收敛)。"""
+    from atlas.engine import RunConflictError, execute_graph
+
+    result = execute_graph(load_graph("two_node"), task=TASK_TEXT,
+                           runs_root=tmp_path,
+                           registry=make_registry(standard_fake()))
+    with pytest.raises(RunConflictError, match="测试专用"):
+        # 故意不带 _test_only:默认必须响亮拒绝
+        _resume_graph_replay(result.run_id, spec=load_graph("two_node"),
+                             runs_root=tmp_path,
+                             registry=make_registry(standard_fake()))

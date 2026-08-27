@@ -30,7 +30,7 @@
 | YAML 位置（P6） | 语法和主要语义错误返回 path/line/column；聚合错误不编造坐标 |
 | Agent 执行 | 显式 `runner: local_cli` 才启用；缺配置或预检失败时在创建 run 前 fail-closed |
 | Agent 改动证据 | 冻结 baseline，在副本执行，以普通文件字节清单生成完整文本 unified diff，审批绑定三摘要 |
-| 本机 Web | 查看运行、输入输出、成本和产物；启动、审批、恢复 interrupted run、删除终态 run、管理本地配置 |
+| 本机 Web | 查看运行、输入输出、成本和产物（成本栏含未决预留额）；启动、审批、恢复 interrupted run、取消运行中/等待中的运行、下载完整事件账本、删除终态 run；运行列表自动轮询（MCP/其他标签页发起的运行无需手动刷新）；设置页有 agents.json 只读状态卡（启用/预检结论/失败原因），编辑仍走文件；管理本地配置 |
 
 ## 不可弱化的安全边界
 
@@ -57,7 +57,7 @@
 
 2026-08-23 公开 CI 基线（`main` @ `7eac07b`，GitHub Actions）：
 
-- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-26 起为 537 passed，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
+- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-26 起为 542 passed，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
 - Ubuntu 兼容性信号 job（`continue-on-error`，明确不支持）同样通过：跨平台 agent CLI 桩修复后它反映真实兼容性。
 - `real-api.yml` 仅手动触发（`environment: real-api` 保护），不计入常规 CI。
 

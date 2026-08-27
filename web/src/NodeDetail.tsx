@@ -78,6 +78,30 @@ function ThinkingRows({ run }: { run?: RunNode }) {
 
 type Tab = 'report' | 'diff' | 'input';
 
+const PARAM_AUDIT_LABEL: Record<string, string> = {
+  echo_ok: '供应商回显一致',
+  not_echoed: '供应商未回显,无法核对',
+};
+
+function ParamAuditRows({ run }: { run?: RunNode }) {
+  const audit = run?.param_audit;
+  if (!audit || Object.keys(audit).length === 0) return null;
+  return (
+    <>
+      {Object.entries(audit).map(([name, verdict]) => (
+        <span key={name} className="k">
+          {name === 'temperature' ? 'temperature 核对' : 'seed 核对'}
+          <span className="num"
+            style={verdict.startsWith('mismatch')
+              ? { color: 'var(--color-degraded)' } : undefined}>
+            {' '}{verdict.startsWith('mismatch') ? verdict : PARAM_AUDIT_LABEL[verdict] ?? verdict}
+          </span>
+        </span>
+      ))}
+    </>
+  );
+}
+
 type NumericOverrideKey = 'max_output_tokens' | 'temperature' | 'seed' | 'timeout_s' | 'retry' | 'max_turns';
 
 function parseOptionalNumber(value: string, integer: boolean): number | undefined {
@@ -430,6 +454,7 @@ export function NodeDetail({
             </>
           )}
           <ThinkingRows run={run} />
+          <ParamAuditRows run={run} />
           {run?.duration_s !== undefined && (
             <>
               <span className="k">耗时</span>

@@ -209,6 +209,8 @@ export interface RunNode {
   runner?: 'local_cli' | 'injected';
   error_class?: string;
   on_error?: string;
+  /** 体验债 2b:发送过的 temperature/seed 与供应商回显的比对结论。 */
+  param_audit?: Record<string, string> | null;
 }
 
 export interface FinaleNodeRecap {

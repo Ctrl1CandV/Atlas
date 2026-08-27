@@ -918,6 +918,7 @@ def _make_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
             thinking_tier=node.thinking,
             cost_usd=cost_usd,  # 费率未知 → null,不填猜的数字
             duration_s=round(time.monotonic() - started, 3),
+            param_audit=(outcome.param_audit or None),
         )
         # state 里的产物与事件里的类型化条目同构(A6:重放 == 运行时状态)
         return {"artifacts": {ref.name: out_entry},
@@ -1017,21 +1018,20 @@ def _make_human_node_fn(node, spec: WorkflowSpec, ctx: _NodeCtx):
     return run
 
 
+# 节点类型的唯一分发入口;未知类型在此 KeyError 即 fail-closed
+# (validate_spec 的封闭类型清单是第一道门,这里是第二道)。
 _NODE_FACTORIES = {
     "llm": _make_node_fn,
     "human": _make_human_node_fn,
-    "research": None,       # 在 import 尾部补(research/coding_agent 共用工厂)
-    "coding_agent": None,
+    "research": make_agent_node_fn,
+    "coding_agent": make_agent_node_fn,
 }
 
 
 def _build_compiled_graph(spec: WorkflowSpec, ctx: _NodeCtx, checkpointer):
     builder = StateGraph(AtlasState)
     for n in spec.nodes:
-        if n.type in ("research", "coding_agent"):
-            builder.add_node(n.id, make_agent_node_fn(n, spec, ctx))
-        else:
-            builder.add_node(n.id, _NODE_FACTORIES[n.type](n, spec, ctx))
+        builder.add_node(n.id, _NODE_FACTORIES[n.type](n, spec, ctx))
     for e in spec.all_entries():      # 多入口:全部从 START 并行开跑
         builder.add_edge(START, e)
 
@@ -1424,8 +1424,19 @@ def _resume_graph_replay(
     checkpoint: bool = True,
     agent_runner=None,
     prepared: PreparedExecution | None = None,
+    _test_only: bool = False,
 ) -> RunResult:
-    """私有低层 checkpoint 重放；保留旧测试所需的非产品恢复语义。"""
+    """私有低层 checkpoint 重放(**测试专用**,非产品恢复路径)。
+
+    它跳过 interrupted 动态判定(interrupted_only=False),任何持有 run
+    目录的人都能重放;生产恢复必须走 :func:`resume_graph`(强制校验
+    checkpoint、执行身份与终态集合)。默认拒绝执行,必须显式传
+    ``_test_only=True`` ——把误用从"能跑"变成"当场响亮报错"。
+    """
+    if not _test_only:
+        raise RunConflictError(
+            "_resume_graph_replay 是测试专用重放(不做 interrupted 准入校验);"
+            "生产恢复请使用 resume_graph")
     prepared = _use_prepared(spec, registry, agent_runner, prepared)
     acquire_run_lock(run_id, runs_root=runs_root)
     try:
