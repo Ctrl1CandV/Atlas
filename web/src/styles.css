@@ -1136,3 +1136,17 @@ input:focus, textarea:focus {
   padding: 8px 12px; border-radius: var(--radius-ctrl);
   border: 1px dashed color-mix(in srgb, var(--color-fail) 40%, transparent);
 }
+
+/* D1:运行页顶栏的取消按钮(不可逆动作,视觉上克制但可辨识) */
+.cancel-run {
+  flex: none; margin-left: 12px; padding: 4px 14px;
+  font-size: 12px; letter-spacing: 0.04em;
+  color: var(--color-fail);
+  background: color-mix(in srgb, var(--color-fail) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-fail) 45%, transparent);
+  border-radius: var(--radius-ctrl); cursor: pointer;
+}
+.cancel-run:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-fail) 16%, transparent);
+}
+.cancel-run:disabled { opacity: 0.5; cursor: default; }

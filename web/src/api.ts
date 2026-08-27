@@ -114,6 +114,21 @@ export async function approveRun(
   }
 }
 
+export async function cancelRun(rid: string, reason = ''): Promise<void> {
+  const resp = await fetch(`/api/runs/${rid}/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Atlas-Request': '1' },
+    body: JSON.stringify({ reason }),
+  });
+  if (!resp.ok) {
+    let detail = resp.statusText;
+    try {
+      detail = (await resp.json()).detail ?? detail;
+    } catch { /* keep statusText */ }
+    throw new Error(detail);
+  }
+}
+
 // ── 配置面(供应商/密钥/模型白名单)──────────────────────────
 
 async function req<T>(url: string, method: string, body?: unknown): Promise<T> {

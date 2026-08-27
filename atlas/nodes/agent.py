@@ -692,10 +692,13 @@ def make_agent_node_fn(node: NodeSpec, spec: WorkflowSpec, ctx):
                     "model_ref": node.model,
                 }
                 if getattr(ctx._agent_runner_raw, "production_runner", False):
+                    # D2:生产 runner(local_cli)同时接取消触发器与预算映射;
+                    # 注入 runner 签名不含这些参数,保持不传。
                     runner_kwargs.update({
                         "node_id": node.id,
                         "max_budget_usd": (
                             reservation.amount if reservation else None),
+                        "cancel_requested": ctx.cancel_requested,
                     })
                 # P9:CLI 派发窗口的心跳。窗口内的异常(含 AgentCliError/
                 # RunCancelled/超时)一律走 finally 停心跳,不许线程外泄。

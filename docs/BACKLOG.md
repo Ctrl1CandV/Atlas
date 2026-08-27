@@ -7,9 +7,10 @@
 ## 已完成（2026-08-23）
 
 - **P4 共享 launcher + MCP 异步 + `atlas_list_runs`** ✅：`atlas/launcher.py` controller registry；`wait=false` 预检后返回 run_id；`atlas_list_runs` 降序稳定分页；Web/MCP 共用 `runs.build_run_summary`。
-- **P2 协作式取消** ✅（部分范围）：`run_cancelled` 终态、`atlas_cancel_run`（第 8 工具）、Web API 端点、llm/human/agent 入口与重试等待的消费点、agent retry 预算 RFC 草案。**未含**：CLI 进程树终止、Web 界面取消按钮、`--max-budget-usd` 映射与 RFC 决策——保留在下表外的能力债里，随下批实施。
+- **P2 协作式取消** ✅（部分范围）：`run_cancelled` 终态、`atlas_cancel_run`（第 8 工具）、Web API 端点、llm/human/agent 入口与重试等待的消费点、agent retry 预算 RFC 草案。~~CLI 进程树终止、Web 界面取消按钮、`--max-budget-usd` 映射~~ 已随 D1–D3 交付（见下）；剩余 **agent retry 默认策略的 RFC 裁决**（D4）待用户拍板后实施。
 - **P9 controller heartbeat** ✅（2026-08-26）：每次 attempt 派发窗口内 `node_progress`（attempt/model/elapsed_ms/phase）；间隔默认与下限 30s、`ATLAS_NODE_HEARTBEAT_INTERVAL_S` run 级可配；窗口在 attempt 结束/失败/取消/终态后闭合，迟到 tick 拒绝；fold 显式忽略；事件容量代价（30s ≈ 2880 条/节点/天）写入 STATUS,分段账本治理随 P10。
 - **P3 异常 taxonomy + 节点 on_error** ✅（2026-08-26）：`atlas/exc.py` 分类层（治理永不可吞，未登记 fail-closed）；节点级 `on_error: stop/continue/branch`（默认零变化、默认值不进指纹）；branch 走保留键 `__failed__`（校验期强制）；软失败写 write-once 错误产物 + `node_failed_soft`，fold 显式忽略（删事件回归锁定）；Web/MCP/dry-run 同源展示。
+- **P2 残余强化 D1–D3** ✅（2026-08-26）：Web 取消按钮（running/paused 可见,确认后走 `/api/runs/{id}/cancel`,HTTP 契约 403/404/409/paused 直写有测试）；`local_cli` 取消终止整棵进程树（watcher 轮询 cancel.request → taskkill /T /F 或 killpg,真实孙进程 kill 测试,树杀失败保持 AgentCliError fail-closed）；`--max-budget-usd ≤0` 派发前拒绝（有效映射/缺参预检/超支报告已有测试）。**D4(agent retry RFC 决策)未含——等用户裁决后再实施。**
 - **S1 终局可视化 + 总结节点** ✅（2026-08-26）：终态 run 顶部零成本终局卡片（纯账本派生,Web/MCP 同源 `build_finale`）;图级 opt-in `summary: {model, prompt_hint?}` 在 run_done 前一次总结调用,write-once 产物 + `run_summary_written`,失败记 `run_summary_failed` 不改终态,成本受 `max_cost_usd` 约束,dry-run 明示;**不做离线导出**（用户定案）。
 
 ## 总览表

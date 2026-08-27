@@ -3,6 +3,7 @@ import { motion, useReducedMotion } from 'motion/react';
 import { ReactFlowProvider } from '@xyflow/react';
 import {
   approveRun,
+  cancelRun,
   deleteRun,
   deleteWorkflow,
   getRun,
@@ -528,6 +529,26 @@ export default function App() {
     }
   };
 
+  const [cancelBusy, setCancelBusy] = useState(false);
+
+  const handleCancel = async () => {
+    if (!runId || cancelBusy) return;
+    const label = STATUS_LABEL[status] ?? status;
+    if (!window.confirm(
+      `确定取消这个${label === '等待批准' ? '等待批准的' : ''}运行吗?` +
+      '取消请求不可撤回:在途调用会被终止(local_cli 的进程树)或等它返回,' +
+      '运行将以「已取消」终态收场。')) return;
+    setCancelBusy(true);
+    setError(null);
+    try {
+      await cancelRun(runId);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setCancelBusy(false);
+    }
+  };
+
   const handleResume = async () => {
     if (!runId || summary?.status !== 'interrupted') return;
     setBusy(true);
@@ -596,6 +617,14 @@ export default function App() {
                 </>
               )}
             </div>
+            {(status === 'running' || status === 'paused') && (
+              <button
+                className="cancel-run"
+                disabled={cancelBusy}
+                onClick={() => void handleCancel()}
+                aria-label="取消运行"
+              >{cancelBusy ? '取消中…' : '取消'}</button>
+            )}
           </>
         )}
       </header>

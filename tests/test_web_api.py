@@ -876,3 +876,36 @@ def test_delete_workflow_example_requires_flag(tmp_path):
                                headers=headers)
         assert forced.status_code == 200
         assert not (workflows / "shipped.yaml").exists()
+
+
+def test_cancel_endpoint_http_contract(tmp_path):
+    """D1 后端契约:HTTP 取消端点的鉴权头、404、终态冲突与 paused 直写终态
+    (协作取消的状态机细节由 tests/test_p2_cancel.py 在引擎层锁定)。"""
+    workflows = tmp_path / "workflows"
+    workflows.mkdir()
+    runs = tmp_path / "runs"
+    api = create_app(workflows_dir=workflows, runs_dir=runs,
+                     registry_factory=lambda pids: _reg(FakeProvider()),
+                     api_only=True)
+    headers = {"X-Atlas-Request": "1"}
+    with TestClient(api, base_url="http://127.0.0.1") as client:
+        # 写操作缺 X-Atlas-Request → 403(防浏览器跨站驱动)
+        resp = client.post("/api/runs/nope/cancel", json={"reason": ""})
+        assert resp.status_code == 403
+        # 不存在的 run → 404
+        resp = client.post("/api/runs/nope/cancel", json={"reason": ""},
+                           headers=headers)
+        assert resp.status_code == 404
+        # 终态 run → 409 冲突
+        _write_run(runs, "done-run", "run_done")
+        resp = client.post("/api/runs/done-run/cancel", json={"reason": ""},
+                           headers=headers)
+        assert resp.status_code == 409
+        # paused run:取消入口在锁内直写终态,HTTP 返回 cancelled
+        _write_run(runs, "paused-run", "paused")
+        resp = client.post("/api/runs/paused-run/cancel",
+                           json={"reason": "审批人不批"},
+                           headers=headers)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "cancelled" and body["request_id"]

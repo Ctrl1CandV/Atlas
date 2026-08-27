@@ -341,3 +341,96 @@ def test_preflight_rejects_dirty_writable_workdir(tmp_path, provider):
         allowed_paths=(), type="coding_agent", workdir=str(project))
     with pytest.raises(ConfigError, match="未提交改动"):
         preflight_agent_nodes([node], runner)
+
+
+def test_cancel_terminates_running_process_tree(tmp_path, provider):
+    """D2:取消请求终止在途 CLI 的整棵进程树,节点以 RunCancelled 收场,
+    孙进程不留孤儿(POSIX killpg / Windows taskkill /T 双路径都真实执行)。"""
+    import json as _json
+    import threading
+    from atlas.adapters import RunCancelled
+
+    import time
+
+    marker = tmp_path / "descendant-survived.txt"
+    pidfile = tmp_path / "descendant-pid.json"
+    child_source = (
+        "import json,pathlib,time,os;"
+        + ("pathlib.Path(%r).write_text(json.dumps({'pid': os.getpid()}));"
+           % (str(pidfile),))
+        + "time.sleep(6);"
+        + ("pathlib.Path(%r).write_text('survived')" % (str(marker),))
+    )
+    parent_source = f'''
+import subprocess, sys, time
+child = subprocess.Popen([sys.executable, "-c", {child_source!r}])
+pathlib = __import__("pathlib")
+pathlib.Path({str(tmp_path / "parent-pid.txt")!r}).write_text(str(child.pid))
+time.sleep(60)
+'''
+    runner = _runner_for_source(tmp_path, provider, parent_source, "cancel-tree")
+    attachment = tmp_path / "cancel.txt"
+    attachment.write_text("x", encoding="utf-8")
+    cwd = tmp_path / "cancel-cwd"
+    cwd.mkdir()
+    del pidfile
+
+    cancel_flag = {"on": False}
+    outcome: dict = {}
+
+    def _call() -> None:
+        try:
+            runner(attachment, node_type="research", max_turns=1, cwd=cwd,
+                   writable=False, timeout_s=None, model_ref="Stub:model-a",
+                   node_id="canceltree",
+                   cancel_requested=lambda: cancel_flag["on"])
+            outcome["error"] = None
+        except BaseException as e:   # noqa: BLE001 - 测试要看见一切
+            outcome["error"] = e
+
+    thread = threading.Thread(target=_call)
+    thread.start()
+
+    def _wait_pids(timeout_s: float = 10.0) -> int:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            if (tmp_path / "parent-pid.txt").exists():
+                return int((tmp_path / "parent-pid.txt").read_text())
+            time.sleep(0.02)
+        raise AssertionError("stub 父进程没有写出 pid")
+
+    parent_pid = _wait_pids()
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not (marker.parent / "descendant-pid.json").exists():
+        time.sleep(0.05)          # 等孙进程真实起来再取消(它先 sleep 写 pid)
+
+    assert not marker.exists(), "取消前孙进程必须还活着(睡眠期)"
+    cancel_flag["on"] = True      # 触发取消 → watcher 杀整棵树
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and "error" not in outcome \
+            and outcome.get("error", "") is None and thread.is_alive():
+        time.sleep(0.05)
+    thread.join(timeout=10)
+    assert isinstance(outcome.get("error"), RunCancelled), outcome
+    assert "进程树已终止" in str(outcome["error"])
+    time.sleep(7)                 # > 孙进程剩余睡眠:若未被杀必留下标记
+    assert not marker.exists(), "取消后孙进程必须已被终止(无孤儿)"
+
+
+@pytest.mark.parametrize("budget", [0, -0.5])
+def test_budget_mapping_rejects_exhausted_budget_before_spawn(tmp_path, provider,
+                                                              budget):
+    """D3:D2 前的拒绝路径——预算耗尽/非法时不启动 CLI,直接失败。
+    有效值映射(argv 断言)、缺失 --max-budget-usd 的预检拒绝
+    (test_cli_contract_rejects_missing_required_flags)与超支报告
+    (test_nonzero_exit_reports_stdout_and_redacts_stderr)已有测试锁定。"""
+    runner = _runner(tmp_path, provider)
+    attachment = tmp_path / "b.txt"
+    attachment.write_text("x", encoding="utf-8")
+    cwd = tmp_path / "b-cwd"
+    cwd.mkdir()
+    with pytest.raises(AgentCliError, match="预算已耗尽"):
+        runner(attachment, node_type="research", max_turns=1, cwd=cwd,
+               writable=False, timeout_s=5, model_ref="Stub:model-a",
+               max_budget_usd=budget)

@@ -14,10 +14,12 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from atlas.adapters import Usage
+from atlas.adapters import RunCancelled, Usage
 from atlas.config import (CONFIG_DIR, AgentRunnerConfig, ConfigError,
                           ProviderConfig, load_agent_config,
                           load_provider_configs)
@@ -343,8 +345,8 @@ class LocalCliRunner:
                  cwd: Path | None = None, writable: bool = True,
                  allow_web: bool = False, allowed_paths: list[str] | None = None,
                  timeout_s: float | None = None, model_ref: str = "",
-                 node_id: str = "agent", max_budget_usd: float | None = None
-                 ) -> AgentRunResult:
+                 node_id: str = "agent", max_budget_usd: float | None = None,
+                 cancel_requested=None) -> AgentRunResult:
         del max_turns  # 当前 Claude CLI 无 turn 上限；Atlas 以 deadline/预算硬限制。
         provider, model_id = _provider_for_model(model_ref, self.providers)
         secret = self._frozen_credentials.get(provider.id)
@@ -400,6 +402,26 @@ class LocalCliRunner:
                         command, cwd=run_cwd, env=child_env, stdin=subprocess.PIPE,
                         stdout=stdout_file, stderr=stderr_file, shell=False,
                         creationflags=creationflags, start_new_session=start_new_session)
+                    # P2/D2:取消请求终止在途 CLI 的整棵进程树。watcher 轮询
+                    # 取消触发器(clear=True 结束),杀树后 communicate 因管道
+                    # 关闭返回;「是否因取消而终止」在 communicate 之后统一判定,
+                    # 树杀失败保持 AgentCliError 大声失败(fail-closed),不被
+                    # 取消语境吞掉。
+                    stop_watcher = threading.Event()
+                    kill_for_cancel = threading.Event()
+
+                    def _watch_cli_tree() -> None:
+                        while not stop_watcher.wait(0.2):
+                            if cancel_requested is not None and cancel_requested():
+                                kill_for_cancel.set()
+                                _terminate_process_tree(proc)
+                                return
+
+                    if cancel_requested is not None:
+                        threading.Thread(
+                            target=_watch_cli_tree,
+                            name=f"atlas-cli-cancel-{node_id}",
+                            daemon=True).start()
                     try:
                         proc.communicate(input=Path(attachment).read_bytes(),
                                          timeout=timeout_s)
@@ -407,6 +429,12 @@ class LocalCliRunner:
                         _terminate_process_tree(proc)
                         raise AgentCliError(
                             f"节点 {node_id} 的 Claude CLI 超过 {timeout_s}s,进程树已终止") from e
+                    finally:
+                        stop_watcher.set()
+                    if kill_for_cancel.is_set():
+                        raise RunCancelled(
+                            f"节点 {node_id} 收到取消请求,Claude CLI 进程树已终止"
+                            f"(退出码 {proc.returncode})")
                 except OSError as e:
                     raise AgentCliError(f"无法启动 Claude CLI:{type(e).__name__}") from e
                 stdout_size = stdout_file.tell()
