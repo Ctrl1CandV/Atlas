@@ -321,6 +321,14 @@ Playwright（chromium 起步）+ atlas-web fixture + **FakeProvider 预种 runs_
 
 工程量：冒烟 **2 人日**；完整矩阵 **3 人日**。
 
+**实施记录（2026-08-28 已交付，冒烟子集）**：
+1. `e2e/` 独立 npm 包（`@playwright/test`，chromium 单项目，`retries: 0` 落 flake 制度）；`helpers/server.py` 种子+装配一体：registry_factory 唯一实现构造 FakeProvider（审查重点 2 的 grep 锚点），两个种子 run 都是 engine 真实执行——gate run 跑到 human(routed) 门暂停（批准后同一 FakeProvider 注册表续跑，走真实 approve→checkpoint 恢复路径），done run 跑完后归一 `ts`/`duration_s` 两个字段。基线截图入仓 `e2e/__screenshots__/finale-card.png`（≈十几 KB，普通 git 无 LFS）；locale zh-CN + 时区 Asia/Shanghai + reduce-motion 锁定，两连跑逐字节一致，`toHaveScreenshot` 容差保持默认未调。
+2. 键盘流：Tab 环游断言 批复说明→批准→要求修改→驳回 按 DOM 序可达；焦点可见按控件设计分别断言（输入框 box-shadow 环、按钮 outline ≥2px——样式表对 input 是设计性 `outline:none`，断言指标而非颜色）；Shift+Tab 回位→`keyboard.type` 批复→Tab→Enter 等价点击→终局卡片可见；全程无 `mouse.*`、选择器只用 role/text/aria（审查重点 1/5）。焦点环颜色换代不断言具体色值。
+3. CI：`e2e-smoke.yml`（workflow_dispatch + released 触发，windows-latest，失败上传 traces 与截图 diff），名字与主门 CI 明显区分，不并双绿门（审查重点 3）。
+4. 反向验证三连：禁用按钮 focus-visible outline → 焦点断言红；改 `aria-label="批复说明"` → 环游红（证明锚定可访问树而非 css）；改终局卡片 padding → 截图红（证明对比非恒真）；全部原样恢复，`git diff` 干净。
+5. 顺手修复（五批次整体审查建议 B1）：`atlas/events.py` fold 补 `search_performed` 显式 `pass` 分支，恢复与「新增事件必须显式忽略」纪律的一致性；行为不变，`test_e1_search` 删事件回归锁保持绿。
+6. **偏差**：①合同原文「prepared snapshot 方式，与现有 web api 测试同手法」落地为「真实执行 + 归一化 ts/duration」——approve 续跑必须有真 checkpoint，手写账本给不了；真实执行让 sha/token/产物结构都是 engine 实况，确定性靠归一化达成且不弱于手写。②种子服务器 `mount_mcp=False`：/mcp 路由归 E-3 的 web-dist-smoke job 管，e2e 只测界面与 /api。③「停在 human 门的路由运行」落地为 `approval_mode: routed`（要求修改按钮一并进 Tab 环断言）。
+
 ---
 
 ## E-5 · OS 级沙箱调研（末位）

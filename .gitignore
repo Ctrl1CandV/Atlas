@@ -48,6 +48,12 @@ node_modules/
 dist/
 .vite/
 
+# E-4 浏览器矩阵冒烟的本地产物(种子 runs/Playwright 输出);
+# 基线截图 e2e/__screenshots__/ 必须入仓,不在此列
+e2e/.seed/
+e2e/test-results/
+e2e/playwright-report/
+
 # Local agent/session state and GUI evidence
 .zcode/
 gui-test-screenshots/

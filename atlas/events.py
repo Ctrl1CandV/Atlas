@@ -208,6 +208,12 @@ def fold_events(records: list[dict]) -> dict:
             # 该事件后 fold 结果必须与保留时一致(回归锁定,见
             # test_p13_fork)。
             pass
+        elif t == "search_performed":
+            # E-1 search 执行事实:每查询一条的活性/审计记录,真正的结果
+            # 由 node_done 产物体现——不携带终态语义。fold 显式忽略;删掉
+            # 这些事件后 fold 结果必须与保留时一致(回归锁定,见
+            # test_e1_search 的 fold 用例)。
+            pass
         elif t == "run_paused":
             state["status"] = "paused"
         elif t == "node_done":

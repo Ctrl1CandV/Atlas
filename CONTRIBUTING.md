@@ -39,6 +39,17 @@ npm --prefix web run build
 uv build --sdist
 ```
 
+Optional browser e2e smoke (Playwright chromium; the fixture seeds runs through a FakeProvider registry, so no real provider is ever called):
+
+```powershell
+npm --prefix web run build
+cd e2e
+npm ci
+npx playwright install chromium
+npx playwright test
+cd ..
+```
+
 Real-provider tests can cost money. Run only the deliberately selected test with disposable credentials or use the protected manual workflow; do not upload resulting private configuration or run data.
 
 ## Submit
