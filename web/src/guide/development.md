@@ -24,7 +24,7 @@ Windows 是必需支持信号。Ubuntu job 只提供兼容性信息。CI 会校�
 
 ## 发布产物
 
-Tag 形如 `v<包版本>`（当前 `v0.1.0`，包版本 `0.1.0`）。发布上传源码 sdist、
+Tag 形如 `v<包版本>`（当前 `v0.2.0`，包版本 `0.2.0`）。发布上传源码 sdist、
 SBOM、bundle 包与 SHA256SUMS；不构建 wheel、不发布 PyPI。GitHub provenance
 attestation 失败会阻断发布，不能把未生成的证明描述为成功。
 
