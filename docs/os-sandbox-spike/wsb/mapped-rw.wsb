@@ -1,0 +1,9 @@
+<!-- Windows Sandbox 样例:读写映射工作目录。写面收敛到映射目录,关闭沙盒即整体丢弃。 -->
+<Configuration>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\atlas-worktree</HostFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+</Configuration>
