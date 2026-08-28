@@ -279,8 +279,12 @@ def test_response_never_echoes_source_path(tmp_path, monkeypatch):
         "att", "任务", registry_factory=lambda _: _fake_registry(),
         agent_runner_factory=lambda spec: None,
         attachments=[{"name": "materials", "path": str(path)}], wait=True)
-    assert str(tmp_path) not in json.dumps(result, ensure_ascii=False)
-    assert str(path) not in json.dumps(result, ensure_ascii=False)
+    dumped = json.dumps(result, ensure_ascii=False)
+    # 契约:不回传附件源路径与文件名(run_dir 等既有公开字段不受此约束;
+    # POSIX 上 tmp 前缀会出现在 run_dir 里,故按"源路径/文件名"断言)
+    assert str(path) not in dumped
+    assert "materials.txt" not in dumped
+    assert str(tmp_path / "materials.txt") not in dumped
 
 
 def test_wait_false_admits_before_first_node_event(tmp_path, monkeypatch):
