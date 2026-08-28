@@ -239,6 +239,13 @@ class SearchResult:
 
 工程量：**4–5 人日**。
 
+**实施记录（2026-08-27 已交付）**：
+1. 扫描根判定：runner 结果对象实报执行目录（`AgentRunResult.cwd`，local_cli 对 research 临时目录实报）；coding_agent 回退 worktree；两者皆无时跳过收集并写 `node_progress(phase=collect_skipped)` 响亮记账——不假装收集。
+2. 逻辑名清洗口径：相对路径的 `/` 与 `.` 折叠为连字符，保留 unicode 字母/数字/连字符/下划线（CJK 原生支持），小写归一；含非 ASCII 的名字可查看/审批，但裸名 consumes 校验只收 ASCII（如实限制写进文档）。
+3. 校验错误定位沿用 load_agent_config 既有机制：错误消息点名 `collect[i].字段`（JSON 无行号，字段路径即现有定位口径，无裸堆栈）。
+4. ext 字段语义定为"命中文件的扩展名过滤"（可选）；media_type 按文件后缀经共享映射表（artifacts.MEDIA_TYPES_BY_SUFFIX）推断，缺省 octet-stream。
+5. 测试环境中 symlink 创建可能因权限失败：链接拒绝测试按项目既有先例在无权限账户下 skip（基线记 2 skipped）。
+
 ---
 
 ## E-3 · Release 内置已构建前端

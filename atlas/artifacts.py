@@ -57,6 +57,19 @@ def artifact_entry(*, name: str, role: str, path: Path | str, sha256: str,
     return entry
 
 
+# E-2A/E-2B 共享:按扩展名的 media_type 小映射表(不猜格式,缺省
+# application/octet-stream)
+MEDIA_TYPES_BY_SUFFIX = {".txt": "text/plain", ".md": "text/markdown",
+                         ".json": "application/json", ".csv": "text/csv",
+                         ".patch": "text/x-diff", ".log": "text/plain",
+                         ".html": "text/html", ".xml": "application/xml"}
+
+
+def media_type_for_suffix(suffix: str) -> str:
+    return MEDIA_TYPES_BY_SUFFIX.get(suffix.lower(),
+                                     "application/octet-stream")
+
+
 def artifacts_from_event(event: dict) -> list[dict]:
     """从 node_done 事件提取类型化产物列表。
 

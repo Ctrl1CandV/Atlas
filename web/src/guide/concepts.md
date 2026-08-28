@@ -30,6 +30,10 @@
 
 发起运行时可携带 `attachments: [{name, path}]`（MCP `atlas_run_workflow` 参数或界面运行请求）。`path` 是本机绝对路径，启动准入时一次性整读：名字全小写 ASCII（大写变体与同形 unicode 字符刻意拒绝）、不得以 `.output/.diff/.error/.changes` 结尾、不得叫 `task` 或撞节点 id；单件 ≤16 MiB、合计 ≤32 MiB；任一失败在分配 run_id 之前整体拒绝——不存在"带一半附件"的运行。通过后字节克隆进 run 的 write-once 产物库（原子写 + 写后哈希复验），账本只记 name/sha256/大小/基名，绝不记源路径，响应也不回传。下游节点用 `consumes: [附件名]` 显式消费；投影里只有一行摘要（名字 · 大小 · sha256 前 12 位），原字节经产物工作台查看——大材料不占 prompt 预算，审批材料面板天然可见。运行期附件缺失是投影期显式失败，不是加载期（附件是运行参数，不是图结构）。
 
+## agent collect（E-2B）
+
+`config/agents.json` 的 runner 配置可声明只读收集清单 `collect: [{pattern, name_prefix, role, ext?}]`：CLI 成功结束后按相对 glob 扫描执行目录（coding_agent 扫 worktree，research 扫 runner 实报的临时目录），命中文件逐个 write-once 入库并追加到 `node_done.artifacts` 尾部（相对路径字典序，确定性）。`role` 封闭于 `output|raw|report`（diff 由系统采集器专管，error/changes/input 不开放）；pattern 禁 `..`、绝对路径与反斜杠，symlink/junction 一律拒绝不追；系统排除目录（.git/node_modules/.venv/dist/build/__pycache__/.trash）可用 `collect_exclude_dirs` 追加、不可删减。硬上限 ≤20 个文件、单件 ≤16 MiB（产物上限）、合计 ≤64 MiB，超限节点治理失败并带计数与字节事实——清单绝不静默截断；不同相对路径清洗成同形逻辑名时同样治理失败（不静默覆盖）。逻辑名为 `{name_prefix}.{清洗后的相对路径}`（分隔符与点号折叠连字，保留 unicode 字母；含非 ASCII 的名字可查看可审批，但下游裸名 consumes 只收 ASCII）。collect 仅 local_cli 支持；不消耗模型调用；下游可按裸逻辑名消费收集产物。
+
 ## Agent 字段事实
 
 生产执行要求 `config/agents.json` 显式 `runner: local_cli`，且所选模型的供应商配置 `anthropicBaseUrl` 与当前凭据；默认 fail-closed。`allow_web` 默认 `false`，开启时只增加 `WebSearch`/`WebFetch`，不是网络隔离；coding `Bash` 仍可能联网。当前 Claude CLI 不支持硬轮次参数，因此 `max_turns` 是保留的规格元数据，硬限制由 deadline 和已配置预算承担。

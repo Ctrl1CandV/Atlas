@@ -46,14 +46,38 @@ class AgentCliConfig:
 
 
 @dataclass(frozen=True)
+class AgentCollectSpec:
+    """E-2B:agent 执行后的只读收集清单条目(封闭字段)。
+
+    pattern 是相对执行目录的 glob(禁 .. / 绝对路径 / 反斜杠);role 封闭
+    于 {output, raw, report}——diff 由系统采集器专管,error/changes/input
+    不开放,防语义滥用;ext 可选,命中文件的扩展名过滤;逻辑名合成
+    {name_prefix}.{清洗后的相对路径}。
+    """
+    pattern: str = ""
+    name_prefix: str = ""
+    role: str = "output"
+    ext: str | None = None
+
+
+@dataclass(frozen=True)
 class AgentRunnerConfig:
     runner: str = "fail_closed"
     cli: AgentCliConfig = field(default_factory=AgentCliConfig)
+    collect: tuple[AgentCollectSpec, ...] = ()
+    # 与系统硬编码排除目录(.git/node_modules/.venv/dist/build/__pycache__/
+    # .trash)取并集;可追加不可删减
+    collect_exclude_dirs: tuple[str, ...] = ()
 
 
-_AGENT_CONFIG_KEYS = frozenset({"runner", "cli"})
+_AGENT_CONFIG_KEYS = frozenset({"runner", "cli", "collect",
+                                "collect_exclude_dirs"})
 _AGENT_CLI_KEYS = frozenset({"kind", "command", "extra_args"})
 _AGENT_SAFE_EXTRA_ARGS = frozenset({"--verbose"})
+_COLLECT_ENTRY_KEYS = frozenset({"pattern", "name_prefix", "role", "ext"})
+_COLLECT_ROLES = frozenset({"output", "raw", "report"})
+_COLLECT_PREFIX_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+_COLLECT_EXT_RE = re.compile(r"^\.[A-Za-z0-9_-]{1,16}$")
 
 
 def load_agent_config(path: Path | None = None) -> AgentRunnerConfig:
@@ -94,11 +118,83 @@ def load_agent_config(path: Path | None = None) -> AgentRunnerConfig:
         raise ConfigError(
             "cli.extra_args 只能使用 Atlas 审核过的参数 ['--verbose'];"
             "模型、工具、权限、设置、会话与输出参数由 Atlas 固定")
+
+    collect = _parse_collect(raw.get("collect"))
+    exclude_raw = raw.get("collect_exclude_dirs", [])
+    if not isinstance(exclude_raw, list) or not all(
+            isinstance(d, str) and d and d == d.lower()
+            and "/" not in d and "\\" not in d and "." not in d
+            for d in exclude_raw):
+        raise ConfigError(
+            "agents.json 的 collect_exclude_dirs 必须是不带路径分隔符与点号"
+            "的小写目录名数组(与系统硬编码排除目录取并集,不可删减)")
     return AgentRunnerConfig(
         runner=runner,
         cli=AgentCliConfig(kind=kind, command=command.strip(),
                            extra_args=tuple(extra_args)),
+        collect=collect,
+        collect_exclude_dirs=tuple(exclude_raw),
     )
+
+
+def _parse_collect(raw) -> tuple[AgentCollectSpec, ...]:
+    """E-2B collect 清单解析:封闭字段、封闭角色、glob 安全校验。"""
+    if raw is None or raw == []:
+        return ()
+    if not isinstance(raw, list):
+        raise ConfigError("agents.json 的 collect 必须是数组")
+    if len(raw) > 8:
+        raise ConfigError("agents.json 的 collect 最多 8 条")
+    specs: list[AgentCollectSpec] = []
+    prefixes_seen: set[str] = set()
+    for index, entry in enumerate(raw):
+        where = f"agents.json 的 collect[{index}]"
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{where} 必须是对象")
+        unknown = set(entry) - _COLLECT_ENTRY_KEYS
+        if unknown:
+            raise ConfigError(f"{where} 有未知字段:{sorted(unknown)}。"
+                              f"可用:{sorted(_COLLECT_ENTRY_KEYS)}")
+        pattern = entry.get("pattern")
+        if not isinstance(pattern, str) or not pattern.strip():
+            raise ConfigError(f"{where}.pattern 必须是非空字符串")
+        if "\\" in pattern:
+            raise ConfigError(
+                f"{where}.pattern 禁用反斜杠(分隔符一律用 /)")
+        if pattern.startswith(("/", "~")) or (len(pattern) >= 2
+                                              and pattern[1] == ":"):
+            raise ConfigError(
+                f"{where}.pattern 必须是相对执行目录的 glob,得到绝对路径")
+        segments = pattern.split("/")
+        for segment in segments:
+            if not segment or segment == ".":
+                raise ConfigError(
+                    f"{where}.pattern 含空段或 '.':{pattern!r}")
+            if segment == "..":
+                raise ConfigError(
+                    f"{where}.pattern 禁止 '..'(逃出执行目录)")
+        prefix = entry.get("name_prefix")
+        if not isinstance(prefix, str) or _COLLECT_PREFIX_RE.match(prefix) is None:
+            raise ConfigError(
+                f"{where}.name_prefix {prefix!r} 不合法:全小写字母开头,"
+                "只含小写字母/数字/连字符/下划线,≤32 字符")
+        if prefix in prefixes_seen:
+            raise ConfigError(f"{where}.name_prefix {prefix!r} 重复")
+        prefixes_seen.add(prefix)
+        role = entry.get("role", "output")
+        if role not in _COLLECT_ROLES:
+            raise ConfigError(
+                f"{where}.role 必须是 {sorted(_COLLECT_ROLES)} 之一,"
+                f"得到 {role!r}(diff 由系统采集器专管,error/changes/"
+                "input 不开放)")
+        ext = entry.get("ext")
+        if ext is not None and (not isinstance(ext, str)
+                                or _COLLECT_EXT_RE.match(ext) is None):
+            raise ConfigError(
+                f"{where}.ext 必须形如 '.patch'(可选;命中文件按此过滤)")
+        specs.append(AgentCollectSpec(pattern=pattern, name_prefix=prefix,
+                                      role=role, ext=ext))
+    return tuple(specs)
 
 
 def load_provider_configs(path: Path | None = None) -> dict[str, ProviderConfig]: 

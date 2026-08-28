@@ -46,6 +46,9 @@ class AgentRunResult:
     usage: Usage | None = None
     cost_usd: float | None = None
     runner: str = "local_cli"
+    # E-2B:实际执行目录(research 是本 run 内的临时目录)。collect 扫描
+    # 由此获知执行位置;注入 runner 同理可报告自己的 cwd。
+    cwd: Path | None = None
 
 
 def _resolve_program(command: str) -> str:
@@ -468,7 +471,9 @@ class LocalCliRunner:
                 raise AgentCliError(
                     f"Claude CLI 失败(退出码 {proc.returncode}):"
                     f"{summary or '(无 stdout/stderr)'}")
-            return _parse_result(output)
+            result = _parse_result(output)
+            from dataclasses import replace as _replace
+            return _replace(result, cwd=run_cwd)
         finally:
             shutil.rmtree(config_dir, ignore_errors=True)
 

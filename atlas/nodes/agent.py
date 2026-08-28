@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from atlas.artifacts import artifact_entry
+from atlas.config import AgentCollectSpec
 from atlas.integrity import build_projection, store_artifact
 from atlas.spec import NodeSpec, WorkflowSpec
 
@@ -34,6 +35,14 @@ WORKTREE_MAX_BYTES = 2 * 1024 * 1024 * 1024   # 2 GiB
 DIFF_MAX_BYTES = 4 * 1024 * 1024              # 4 MiB
 # difflib 需要把单个变更文件的两版行表放入内存；超限明确失败而非 OOM。
 DIFF_FILE_MAX_BYTES = 64 * 1024 * 1024         # 64 MiB per version
+
+# E-2B collect 硬上限:命中文件 ≤20、合计 ≤64 MiB;超限治理失败,
+# 绝不静默截断清单(partial collect = 假完整,比失败更糟)。
+COLLECT_MAX_FILES = 20
+COLLECT_MAX_TOTAL_BYTES = 64 * 1024 * 1024
+# 系统硬编码排除目录(agents.json 的 collect_exclude_dirs 只能追加)
+COLLECT_EXCLUDED_DIRS = frozenset({".git", "node_modules", ".venv", "dist",
+                                   "build", "__pycache__", ".trash"})
 
 
 class AgentCliError(Exception):
@@ -585,6 +594,119 @@ def _collect_diff(baseline: Path, result: Path,
     return patch, metadata
 
 
+def _sanitize_collect_name(text: str) -> str:
+    """逻辑名清洗:路径分隔符与点号折叠为连字符;保留 unicode 字母/数字/
+    连字符/下划线(CJK 文件名原生支持),其余字符(控制字符/符号)删除;
+    连字折叠后小写归一。含非 ASCII 的逻辑名可存储、可展示、可审批,但
+    下游 consumes 的裸名校验只收 ASCII——如实限制,写进文档。"""
+    cleaned = []
+    for ch in text:
+        if ch in ("/", "\\", ".", " "):
+            cleaned.append("-")
+        elif ch.isalnum() or ch in "-_":
+            cleaned.append(ch.lower())
+    name = "".join(cleaned)
+    while "--" in name:
+        name = name.replace("--", "-")
+    return name.strip("-_") or "file"
+
+
+def collect_agent_artifacts(*, run_dir: Path, node_id: str, iteration: int,
+                            scan_root: Path, collect_specs, exclude_extra):
+    """E-2B:CLI 成功后按 collect 清单扫描执行目录,命中文件 write-once
+    入库。排序 = 相对路径字典序(确定性可测);超限治理失败(ResourceLimitError,
+    消息带计数与字节事实),绝不静默截断清单;symlink/junction 一律拒绝
+    (与 diff 采集同纪律),不追链接。"""
+    import fnmatch
+
+    from atlas.artifacts import artifact_entry, media_type_for_suffix
+    from atlas.integrity import ResourceLimitError, store_artifact
+
+    excluded = COLLECT_EXCLUDED_DIRS | {d for d in exclude_extra}
+    specs = list(collect_specs)
+    matched: list[tuple[str, Path, AgentCollectSpec]] = []
+    for root, dirs, files in os.walk(scan_root, followlinks=False):
+        root_path = Path(root)
+        dirs[:] = sorted(d for d in dirs
+                         if d not in excluded
+                         and not (root_path / d).is_symlink())
+        for name in sorted(files):
+            path = root_path / name
+            if path.is_symlink():
+                raise AgentCliError(
+                    f"collect 扫描遇到符号链接(指向不可审计):{path};"
+                    "拒绝收集")
+            rel_posix = path.relative_to(scan_root).as_posix()
+            for spec in specs:
+                if fnmatch.fnmatchcase(rel_posix, spec.pattern):
+                    if spec.ext and not rel_posix.endswith(spec.ext):
+                        continue
+                    matched.append((rel_posix, path, spec))
+    if len(matched) > COLLECT_MAX_FILES:
+        raise ResourceLimitError(
+            f"节点 {node_id} 的 collect 命中 {len(matched)} 个文件,"
+            f"超过上限 {COLLECT_MAX_FILES};拒绝静默截断清单")
+    total = 0
+    sized: list[tuple[str, Path, AgentCollectSpec, int]] = []
+    for rel_posix, path, spec in matched:
+        size = path.stat().st_size
+        total += size
+        if total > COLLECT_MAX_TOTAL_BYTES:
+            raise ResourceLimitError(
+                f"节点 {node_id} 的 collect 合计 {total} 字节,超过上限 "
+                f"{COLLECT_MAX_TOTAL_BYTES} 字节(已见 {len(matched)} 个文件);"
+                "拒绝静默截断清单")
+        sized.append((rel_posix, path, spec, size))
+
+    entries: list[dict] = []
+    seen_logical: dict[str, str] = {}
+    for rel_posix, path, spec, size in sorted(sized, key=lambda m: m[0]):
+        inner = _sanitize_collect_name(
+            rel_posix[:-len(spec.ext)] if spec.ext
+            and rel_posix.endswith(spec.ext) else rel_posix)
+        logical = f"{spec.name_prefix}.{inner}"
+        # 清洗可能把不同相对路径折叠成同一逻辑名(notes/a.b 与 notes/a-b):
+        # state 与 fold 都是后者胜,静默缩减收集结果=变相假完整,
+        # 治理失败并把两条相对路径都写进消息。
+        if logical in seen_logical:
+            raise ResourceLimitError(
+                f"节点 {node_id} 的 collect 逻辑名冲突:{logical!r} 同时来自 "
+                f"{seen_logical[logical]!r} 与 {rel_posix!r}(清洗后同形);"
+                "拒绝静默覆盖,请调整文件名或 name_prefix")
+        seen_logical[logical] = rel_posix
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags)
+        except OSError as e:
+            raise AgentCliError(f"collect 无法读取 {path}:{e}") from e
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or _is_reparse(info) \
+                    or getattr(info, "st_nlink", 1) != 1 \
+                    or info.st_size != size:
+                raise AgentCliError(
+                    f"collect 目标在采集期间发生变化:{path}")
+            content = b""
+            while True:
+                block = os.read(fd, 1024 * 1024)
+                if not block:
+                    break
+                content += block
+        finally:
+            os.close(fd)
+        ref = store_artifact(
+            run_dir, name=logical,
+            filename=f"{node_id}.{logical}.collect{iteration}"
+                     f"{Path(rel_posix).suffix.lower() or '.bin'}",
+            content=content)
+        entries.append(artifact_entry(
+            name=ref.name, role=spec.role, path=ref.path, sha256=ref.sha256,
+            size_bytes=len(content),
+            media_type=media_type_for_suffix(Path(rel_posix).suffix.lower()),
+            metadata={"collected_from": rel_posix}))
+    return entries
+
+
 def make_agent_node_fn(node: NodeSpec, spec: WorkflowSpec, ctx):
     """engine 的节点工厂:research / coding_agent 共用。"""
 
@@ -815,6 +937,32 @@ def make_agent_node_fn(node: NodeSpec, spec: WorkflowSpec, ctx):
                 filename=f"{node.id}.diff.{iteration}.patch", content=diff)
             extra_outputs = [diff_ref]
 
+        # E-2B:collect 只读收集(仅 local_cli/生产 runner 支持)。扫描根
+        # 取 runner 实报执行目录(research 的临时目录),否则 coding_agent
+        # 的 worktree;runner 无目录可报时跳过并响亮记账,防"测试绿了
+        # 生产没收集"的错位。超限/链接拒绝是治理失败,节点照常失败。
+        collect_entries: list[dict] = []
+        runner_config = getattr(ctx._agent_runner_raw, "config", None)
+        collect_specs = list(getattr(runner_config, "collect", ()) or [])
+        if collect_specs:
+            exclude_extra = list(getattr(runner_config,
+                                         "collect_exclude_dirs", ()) or ())
+            scan_root = getattr(result, "cwd", None) if result is not None else None
+            if scan_root is None and worktree is not None:
+                scan_root = worktree
+            if scan_root is None:
+                ctx.log.emit(
+                    "node_progress", node=node.id, iteration=iteration,
+                    phase="collect_skipped", runner=runner_name,
+                    note="runner 未报告执行目录;collect 配置被忽略"
+                         "(不假装收集)")
+            else:
+                collect_entries = collect_agent_artifacts(
+                    run_dir=ctx.run_dir, node_id=node.id,
+                    iteration=iteration, scan_root=Path(scan_root),
+                    collect_specs=collect_specs,
+                    exclude_extra=exclude_extra)
+
         ref = store_artifact(
             ctx.run_dir, name=f"{node.id}.output",
             filename=f"{node.id}.output.{iteration}.txt",
@@ -831,6 +979,7 @@ def make_agent_node_fn(node: NodeSpec, spec: WorkflowSpec, ctx):
                             if extra_outputs[0].path.exists() else -1),
                 media_type="text/x-diff", complete=diff_complete,
                 metadata=diff_meta))
+        artifacts.extend(collect_entries)
         usage = getattr(result, "usage", None)
         actual_cost = getattr(result, "cost_usd", None)
         events = {

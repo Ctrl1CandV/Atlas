@@ -367,7 +367,7 @@ human 只有 approve/reject。
 | Release 包含 built frontend | 让使用者免 Node；Git 仍不跟踪 `web/dist` | clean machine 解压即可启动，frontend hash 进入 manifest/provenance |
 | OS-level sandbox | 调研 Windows Sandbox 或 WSL backend；与 `local_cli` 并列而非把副本改名为沙箱 | 宿主路径/网络/凭据/输出回收威胁模型和逃逸测试 |
 | Browser matrix | 主题、键盘调栏、200% 缩放、系统 Edge/Chromium | 可重复 GUI 测试与真实截图，不用源码字符串代替渲染验证 |
-| 节点通讯文件 | 多命名产物、agent collect、attachments；详见 [`rfcs/node-io-files.md`](rfcs/node-io-files.md) | 每阶段保持 write-once、hash、no traversal、size caps 和 projection 完整性 |
+| 节点通讯文件 | 多命名产物、agent collect、attachments；详见 [`rfcs/node-io-files.md`](rfcs/node-io-files.md) | **附件（E-2A）与 agent collect（E-2B）已实施（2026-08-27）**，设计以 [`PLAN-stage-e-2026-08-27.md`](PLAN-stage-e-2026-08-27.md) E-2A/B 章为准（collect 采用 agents.json runner 配置而非 RFC 的 YAML `collect_files`；附件采用本机路径而非 base64）；每阶段保持 write-once、hash、no traversal、size caps 和 projection 完整性；多命名产物（`outputs` 围栏块）未实施 |
 
 ## 12. 运营与宣传后续
 

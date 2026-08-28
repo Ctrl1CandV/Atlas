@@ -86,6 +86,8 @@ def sandbox_runner(attachment: Path, *, node_type: str, max_turns: int,
 
     当前 RC 只有在受控 broker/canary 已部署时才会进入执行阶段。由于本机和
     CI 尚未具备该环境,这里故意 fail-closed;不能以宿主 CLI 冒充沙箱。
+    E-2B:collect 只读收集仅 local_cli 支持;本 runner 永不收集(且当前
+    构造下根本不会进入执行阶段)。
     """
     capability = require_windows_sandbox(allow_web=allow_web)
     raise SandboxUnavailableError(
