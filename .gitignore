@@ -50,9 +50,30 @@ dist/
 
 # E-4 浏览器矩阵冒烟的本地产物(种子 runs/Playwright 输出);
 # 基线截图 e2e/__screenshots__/ 必须入仓,不在此列
+e2e/
 e2e/.seed/
 e2e/test-results/
 e2e/playwright-report/
+
+# 内部开发设施:测试套件/规划与凭证文档/开发脚本不随公开仓库分发,
+# 全部保留在维护者本地开发树(git 历史仍可追溯)
+tests/
+web/src/*.test.mjs
+docs/BACKLOG.md
+docs/HANDOFF-*.md
+docs/PLAN-*.md
+docs/RESEARCH-*.md
+docs/ROADMAP.md
+docs/STATUS.md
+docs/archive/
+docs/os-sandbox-spike/
+docs/rfcs/
+scripts/interrupt_smoke.py
+scripts/langgraph_smoke.py
+scripts/m0_real_two_node.py
+scripts/probe_thinking.py
+scripts/repro_preflight.py
+scripts/stage_d_mcp.py
 
 # Local agent/session state and GUI evidence
 .zcode/

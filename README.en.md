@@ -57,7 +57,7 @@ All come from real provider API runs before release — including failures, beca
 
 **10-node custom graph, run straight from MCP** (2026-08-22, four models across DeepSeek and SuperAI). Describe the goal to an AI assistant with the Atlas skill loaded and it writes the graph on the spot: three parallel scouts → synthesis → structured review (conditional routing) → a revision branch that consumes the review → re-review → final edit → **human approval** → a post-gate closer. The whole graph ran via the `yaml` argument of `atlas_run_workflow` over the MCP HTTP endpoint, never touching disk. All 8 executed nodes passed on the first attempt (review returned pass immediately); total wall time 361s of which 294s were human wait, about $0.01, and every artifact hash re-verified independently afterwards.
 
-**Honestly recorded failures**. The same test matrix also produced: reasoning models burning their entire output budget on thinking, leaving visible text empty (caught by the empty-output check); a prompt only 1% delivered (caught by the truncation sentinel); and an agent attempt self-reporting ~$10.50 whose automatic retry was manually killed — that incident directly motivated today's cost reservation mechanism and the rule that every real agent run must carry a budget. The full matrix is documented in [`docs/STATUS.md`](docs/STATUS.md).
+**Honestly recorded failures**. The same test matrix also produced: reasoning models burning their entire output budget on thinking, leaving visible text empty (caught by the empty-output check); a prompt only 1% delivered (caught by the truncation sentinel); and an agent attempt self-reporting ~$10.50 whose automatic retry was manually killed — that incident directly motivated today's cost reservation mechanism and the rule that every real agent run must carry a budget. The full matrix is documented in [`docs/VERIFICATION-2026-08-28.md`](docs/VERIFICATION-2026-08-28.md).
 
 ## Quick start
 
@@ -99,7 +99,7 @@ First start generates local configuration from templates (never overwriting exis
 
 2026-08-28 baseline: Python tests **666 passed / 2 skipped** (plus 5 real-provider tests excluded by default — opt-in and possibly billable); Web tests 22 passed, lint clean, production build OK; public CI passes all three jobs on main (a separately triggered optional browser e2e smoke suite, 5 cases - the keyboard approval flow on Chromium/Edge/Firefox plus dark/light x 100%/200% finale-card baseline screenshots, is not part of the main gate). A 10-node custom graph ran end-to-end over the MCP HTTP endpoint including human approval (see the real runs above).
 
-2026-08-19 release baseline: Python tests **427 passed** (plus 5 real-provider tests excluded by default — opt-in and possibly billable); Web tests 22 passed, lint clean, production build OK; strict offline validate/dry-run of all six example workflows with 0 provider calls; release sdist scanned at 100 entries with 0 findings. These numbers describe that source state; see [`docs/STATUS.md`](docs/STATUS.md).
+2026-08-19 release baseline: Python tests **427 passed** (plus 5 real-provider tests excluded by default — opt-in and possibly billable); Web tests 22 passed, lint clean, production build OK; strict offline validate/dry-run of all six example workflows with 0 provider calls; release sdist scanned at 100 entries with 0 findings. These numbers describe that source state; current baselines and real end-to-end evidence are in [`docs/VERIFICATION-2026-08-28.md`](docs/VERIFICATION-2026-08-28.md).
 
 Development checks:
 
@@ -112,8 +112,8 @@ npm --prefix web test && npm --prefix web run lint && npm --prefix web run build
 
 ## Documentation
 
-- [`docs/STATUS.md`](docs/STATUS.md) — entry point for current product and release facts
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — unimplemented features and sequencing
+- [`docs/VERIFICATION-2026-08-28.md`](docs/VERIFICATION-2026-08-28.md) — verification report: baselines, real end-to-end evidence, known findings
+- [`docs/mcp.md`](docs/mcp.md) — MCP tool surface and calling conventions
 - [`docs/mcp.md`](docs/mcp.md) — harness setup configs
 - [`skill/SKILL.md`](skill/SKILL.md) — operating manual for AI assistants
 - [`SECURITY.md`](SECURITY.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`CHANGELOG.md`](CHANGELOG.md)

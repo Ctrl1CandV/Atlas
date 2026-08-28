@@ -29,31 +29,26 @@ Copy generic config examples only when local runtime configuration is needed. Us
 
 ## Validate
 
+This published repository is the **product delivery surface**: the internal
+development facilities (Python test suite with its graph fixtures, the browser
+e2e suite, and the planning/review dossiers) are intentionally not distributed
+here — they live in the maintainer's development tree, and the public quality
+evidence is the [verification report](docs/VERIFICATION-2026-08-28.md) plus the
+CI gates. Anyone can reproduce the published-surface checks:
+
 ```powershell
 uv lock --check
 uv run python -m compileall -q atlas
-uv run pytest
 npm --prefix web run lint
-npm --prefix web run test:diff
 npm --prefix web run build
+uv run python scripts/docs_contract_gate.py
 uv build --sdist
 ```
 
-The `test:diff` entry is the quick diff-parse subset; `npm --prefix web test` runs the full web unit suite.
-
-Optional browser e2e smoke (Playwright chromium; the fixture seeds runs through a FakeProvider registry, so no real provider is ever called):
-
-```powershell
-npm --prefix web run build
-cd e2e
-npm ci
-npx playwright install chromium
-npx playwright test
-cd ..
-```
-
-Real-provider tests can cost money. Run only the deliberately selected test with disposable credentials or use the protected manual workflow; do not upload resulting private configuration or run data.
+Real-provider checks can cost money. They stay opt-in, protected, time-limited,
+and absent from ordinary CI; never upload resulting private configuration or
+run data.
 
 ## Submit
 
-Describe user-facing effects, security implications, tests run, and Windows-specific behavior. Do not attach private configuration, credentials, run directories, prompts, model outputs, or proprietary source. Contributions are accepted under Apache License 2.0.
+Describe user-facing effects, security implications, verification performed, and Windows-specific behavior. Do not attach private configuration, credentials, run directories, prompts, model outputs, or proprietary source. Contributions are accepted under Apache License 2.0.

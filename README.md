@@ -56,7 +56,7 @@ guards:
 
 **10 节点自定义图，MCP 直跑**（2026-08-22，DeepSeek + SuperAI 四个模型）。对装了 Atlas skill 的 AI 助手描述目标，它当场写了一张 10 节点图：三路并行调研 → 汇总 → 结构化审查（条件路由）→ 修订分支（消费审查意见）→ 复审 → 终稿 → **人工审批** → 门后收尾。整图作为 `atlas_run_workflow` 的 `yaml` 参数经 MCP HTTP 端点直接运行，不落盘。8 个执行节点全部一次通过（审查首轮 pass，未进修订轮），人工批准后收尾完成：全程 361 秒（其中 294 秒在等人工），约 $0.01，每个产物的哈希事后独立复验一致。
 
-**诚实记录的失败**。同一测试矩阵里也出现过：推理型模型把输出预算烧在思考上导致可见文本为空（被空输出检查拦下）、prompt 只送达 1%（被截断哨兵抓到）、agent 首次尝试自报约 $10.5 后自动 retry 被人工终止——这次事故直接催生了现在的成本预留机制和"所有真实 agent 运行必须配预算"的纪律。完整矩阵见 [`docs/STATUS.md`](docs/STATUS.md)。
+**诚实记录的失败**。同一测试矩阵里也出现过：推理型模型把输出预算烧在思考上导致可见文本为空（被空输出检查拦下）、prompt 只送达 1%（被截断哨兵抓到）、agent 首次尝试自报约 $10.5 后自动 retry 被人工终止——这次事故直接催生了现在的成本预留机制和"所有真实 agent 运行必须配预算"的纪律。完整矩阵见 [`docs/VERIFICATION-2026-08-28.md`](docs/VERIFICATION-2026-08-28.md)。
 
 ## 快速开始
 
@@ -99,7 +99,7 @@ uv run atlas-web
 
 2026-08-28 基线：Python 测试 **666 passed / 2 skipped**（另有 5 个真实供应商测试默认排除、需主动运行且可能收费）；Web 测试 22 passed、lint 0 告警、生产构建通过；公开 CI 在 main 分支三 job 通过（另有 workflow_dispatch/release 触发的可选浏览器 e2e 冒烟 5 用例——键盘审批流跑 Chromium/Edge/Firefox 三浏览器 + 终局卡片 dark/light × 100%/200% 四组合基线截图，不计入主门）。10 节点自定义图经 MCP HTTP 端点真实运行全链路通过（含人工审批，见上文真实案例）。
 
-2026-08-19 发布基线：Python 测试 **427 passed**；Web 测试 22 passed、lint 0 告警、生产构建通过；六个示例工作流严格离线 validate/dry-run，0 次供应商调用；发布 sdist 100 个条目、0 扫描发现。数字对应当时的源状态，详见 [`docs/STATUS.md`](docs/STATUS.md)。
+2026-08-19 发布基线：Python 测试 **427 passed**；Web 测试 22 passed、lint 0 告警、生产构建通过；六个示例工作流严格离线 validate/dry-run，0 次供应商调用；发布 sdist 100 个条目、0 扫描发现。数字对应当时的源状态；当前基线与真实端到端证据见 [`docs/VERIFICATION-2026-08-28.md`](docs/VERIFICATION-2026-08-28.md)。
 
 开发验证：
 
@@ -112,8 +112,8 @@ npm --prefix web test && npm --prefix web run lint && npm --prefix web run build
 
 ## 文档
 
-- [`docs/STATUS.md`](docs/STATUS.md) — 当前产品与发布事实的入口
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — 未实施功能与排序
+- [`docs/VERIFICATION-2026-08-28.md`](docs/VERIFICATION-2026-08-28.md) — 验证报告：基线、真实端到端证据、已知发现
+- [`docs/mcp.md`](docs/mcp.md) — MCP 工具面与调用口径
 - [`docs/mcp.md`](docs/mcp.md) — harness 接入配置
 - [`skill/SKILL.md`](skill/SKILL.md) — 给 AI 助手看的操作手册
 - [`SECURITY.md`](SECURITY.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`CHANGELOG.md`](CHANGELOG.md)
