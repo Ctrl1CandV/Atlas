@@ -39,6 +39,8 @@ npm --prefix web run build
 uv build --sdist
 ```
 
+The `test:diff` entry is the quick diff-parse subset; `npm --prefix web test` runs the full web unit suite.
+
 Optional browser e2e smoke (Playwright chromium; the fixture seeds runs through a FakeProvider registry, so no real provider is ever called):
 
 ```powershell

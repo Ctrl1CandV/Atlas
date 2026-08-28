@@ -123,4 +123,4 @@ uv --directory "${ATLAS_HOME}" run python -m atlas.web
 uv --directory "${ATLAS_HOME}" run atlas-mcp
 ```
 
-Keep the Web server on `127.0.0.1`. Never suggest remote exposure for this RC.
+Keep the Web server on `127.0.0.1`. Never suggest remote exposure for this release.

@@ -1,6 +1,6 @@
 # Atlas 当前状态
 
-> 最后核对：2026-08-23。本文是当前产品与发布事实的入口；历史计划和归档记录不能替代本文。
+> 最后核对：2026-08-28。本文是当前产品与发布事实的入口；历史计划和归档记录不能替代本文。
 
 ## 版本与支持范围
 
@@ -64,10 +64,12 @@
 
 ## 验证状态
 
-2026-08-23 公开 CI 基线（`main` @ `7eac07b`，GitHub Actions）：
+2026-08-28 公开 CI 基线（`main` @ `48c74f2`，GitHub Actions，三 job 全绿）：
 
 - Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-27 批次 E-2B 起为 664 passed / 2 skipped，其中新增 skip 为无 symlink 权限账户下的 collect 链接拒绝测试，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
+- Web dist bundle smoke job（E-3 起）：写 manifest 断言 digest 相等，启动 atlas-web 探测 `/`、`/api/workflows`、`/mcp` 路由在静态挂载后存活。
 - Ubuntu 兼容性信号 job（`continue-on-error`，明确不支持）同样通过：跨平台 agent CLI 桩修复后它反映真实兼容性。
+- e2e-smoke（E-4 起，optional：workflow_dispatch/release 触发，不并入主门）：chromium 浏览器冒烟（纯键盘审批流 + 终局卡片基线截图）；2026-08-28 首跑全绿，基线截图与本机渲染逐字节一致。
 - `real-api.yml` 仅手动触发（`environment: real-api` 保护），不计入常规 CI。
 
 2026-08-22 审查后基线（本地 `docs/post-v0.1.0-release-hardening` 工作树）：

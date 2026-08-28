@@ -2,7 +2,7 @@
 
 ## Supported version
 
-Atlas is a source-only release candidate for Windows 10/11 x64. Security fixes are provided only for the latest RC.
+Atlas is a source-only, stable-tagged alpha release (`v0.1.0`) for Windows 10/11 x64. Security fixes are provided only for the latest release.
 
 | Version | Product/tag | Supported |
 |---|---|---|
@@ -15,7 +15,7 @@ Do not open a public issue containing vulnerability details, credentials, prompt
 
 Include the affected version, Windows build, impact, and reproduction using synthetic data. Remove secrets and private paths. Maintainers aim to acknowledge a report within seven days; disclosure timing follows triage.
 
-## RC security boundaries
+## Security boundaries
 
 - The Web service is single-user and loopback-only (`127.0.0.1`). It has no supported network-exposed or multi-user authentication model.
 - Production `research` and `coding_agent` execution is opt-in. Atlas uses the Claude CLI runner only when `config/agents.json` explicitly sets `runner` to `local_cli`; missing configuration or failed preflight remains fail-closed before run creation.
