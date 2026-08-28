@@ -378,6 +378,13 @@ Playwright（chromium 起步）+ atlas-web fixture + **FakeProvider 预种 runs_
 
 工程量：**4–6 人日**（含 spike）。
 
+**实施记录（2026-08-28 已交付）**：
+1. **时序证据**：两个本地提交（放行后才推送）——`5dd1df8` 骨架+GO/NO-GO 判据+spike 脚本先行，`dd72094` 实测结果+结论在后；"判据不因结果回改"由 git 历史可验证。
+2. **实测环境**：WSL 2.7.11.0 / 内核 6.18.33.2-2 / Ubuntu 24.04.2 LTS / Windows 10 专业版 10.0.19045；spike 脚本 `os-sandbox-spike/wsl2-spike.sh` 一键复现，原始记录 `results-wsl2.md`（含勘误记）。
+3. **结论 NO-GO**（天真 `wsl -e` spawn 模型）：G1 绿（冷启动 7.24s≤10s、热往返 0.07s）、G2 绿（drvfs 写 368 MB/s vs ext4 1.9 GB/s，劣化 5.2×≤10×）、G3 红一项——**taskkill 硬杀 wsl.exe 客户端不级联到 Linux 侧**（setsid 孤儿子树存活并继续服务，独立客户端实证；`wsl --terminate` 才全清）。按预定义规则一红即 NO-GO，维持现状，缓解路径（专用发行版 terminate / 发行版内取消看门）留待独立立项。
+4. **docs contract**：`tests/test_docs_agent_contract.py` 新增反宣传 grep 断言（README×2+skill 含 sandbox/isolat/沙箱/隔离 的行必须带否定语境）+ 正反样例自证测试；文件头注明启发式局限。
+5. **偏差**：①测量方法迭代三次才定稿（`head` 提前关管道 SIGPIPE 杀采集、`pgrep -f` 自匹配把全死误报成存活 1、客户端干净退出的会话清理让测量空洞化）——定稿方法与勘误记写入 results 文件，作废数据不计入判据；②合同问句"SIGTERM→SIGKILL 是否到达孙进程"在 `wsl -e` 一次性会话模型下问题本身不成立——实测到的是更强的语义（干净退出=会话清理杀子进程；硬杀=孤儿存活），按事实记录；③wsl.exe 管道输出为 UTF-16LE、powershell 中文为 GBK，脚本内 iconv 转换（脚本注释说明）；④Windows Sandbox 满足许可前提但功能启用需管理员，容器化本机无 Docker——两者均如实标注"未实测"，`.wsb` 样例与候选分析表就绪；⑤本批零生产代码变更（diff 仅 docs/tests）。
+
 ---
 
 ## 附一：范围外的搁置项（2026-08-27 用户裁定，重启须先回本文追加设计）

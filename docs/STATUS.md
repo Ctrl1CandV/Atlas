@@ -64,9 +64,9 @@
 
 ## 验证状态
 
-2026-08-28 公开 CI 基线（`main` @ `48c74f2`，GitHub Actions，三 job 全绿）：
+2026-08-28 公开 CI 基线（`main` @ `7f649ad`，GitHub Actions，三 job 全绿）：
 
-- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-27 批次 E-2B 起为 664 passed / 2 skipped，其中新增 skip 为无 symlink 权限账户下的 collect 链接拒绝测试，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
+- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-28 批次 E-5 起为 666 passed / 2 skipped，新增 2 项为 docs contract 的反宣传 grep 断言；2 个 skip 为无 symlink 权限账户下的 collect 链接拒绝测试，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
 - Web dist bundle smoke job（E-3 起）：写 manifest 断言 digest 相等，启动 atlas-web 探测 `/`、`/api/workflows`、`/mcp` 路由在静态挂载后存活。
 - Ubuntu 兼容性信号 job（`continue-on-error`，明确不支持）同样通过：跨平台 agent CLI 桩修复后它反映真实兼容性。
 - e2e-smoke（E-4 起，optional：workflow_dispatch/release 触发，不并入主门）：浏览器矩阵 5 用例（三浏览器键盘审批流 + chromium 四组合终局卡片基线）；2026-08-28 首跑全绿，基线截图与本机渲染逐字节一致。

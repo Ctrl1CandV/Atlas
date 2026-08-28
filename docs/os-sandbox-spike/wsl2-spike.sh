@@ -13,14 +13,16 @@ echo "> 运行时间：$(date '+%Y-%m-%d %H:%M:%S%z')；脚本：os-sandbox-spik
 
 section "版本锁定（发行版/内核/WSL，复现前提）"
 echo '```text'
-wsl.exe --version 2>&1 | tr -d '\0'
-wsl.exe -l -v 2>&1 | tr -d '\0'
+# wsl.exe 管理命令在管道里输出 UTF-16LE,剥 NUL 会把中文毁掉,须按 UTF-16 转;
+# powershell 中文输出是 GBK。两者都经 iconv -c 容错。
+wsl.exe --version 2>&1 | iconv -f UTF-16LE -t UTF-8 -c
+wsl.exe -l -v 2>&1 | iconv -f UTF-16LE -t UTF-8 -c
 wsl.exe -d "$DISTRO" -e sh -c 'uname -a; head -2 /etc/os-release'
-powershell -NoProfile -Command "\$os=Get-CimInstance Win32_OperatingSystem; '{0} {1}' -f \$os.Caption, \$os.Version"
+powershell -NoProfile -Command "\$os=Get-CimInstance Win32_OperatingSystem; '{0} {1}' -f \$os.Caption, \$os.Version" | iconv -f GBK -t UTF-8 -c
 echo '```'
 
 section "冷启动延迟（wsl --shutdown 后第一条命令；G1 上界 10s）"
-wsl.exe --shutdown
+wsl.exe --shutdown >/dev/null 2>&1
 sleep 2
 echo '```text'
 { time wsl.exe -d "$DISTRO" -e sh -c 'true' ; } 2>&1
@@ -60,19 +62,26 @@ echo '```'
 
 section "跨 OS 取消信号级联（G3：杀 Windows 侧 wsl.exe，Linux 侧进程树是否存活）"
 echo '```text'
-wsl.exe -d "$DISTRO" -e sh -c 'pkill -f "sleep 86401" 2>/dev/null; setsid sh -c "sleep 86401 & sleep 86401" >/dev/null 2>&1 < /dev/null & sleep 1; pgrep -fc "sleep 86401"'
-echo "-- 杀掉 Windows 侧 wsl.exe 客户端进程树 --"
+# 方法论(三次迭代后定稿,详见 results-wsl2.md 的勘误记):
+#  - 检测必须用"独立 wsl 客户端 + 不自匹配的 pgrep 模式"(8640[1]);
+#  - 必须区分"客户端干净退出"(会话清理会杀子进程,测量会空洞化)与
+#    "taskkill 硬杀"(孤儿存活——这才是 Atlas 取消路径真正会发生的事)。
+( wsl.exe -d "$DISTRO" -e sh -c 'setsid sh -c "sleep 86401 & sleep 86401" >/dev/null 2>&1 & sleep 40' & )
+sleep 4
+printf 't+4 客户端存活,独立客户端查进程数(期望 4:外层 sh 的 -c 串自含模式串 + setsid sh + 两 sleep): '
+wsl.exe -d "$DISTRO" -e sh -c 'pgrep -fc "sleep 8640[1]"'
+echo "-- taskkill 硬杀 wsl.exe 客户端(Atlas 取消路径等价物) --"
 for pid in $(powershell -NoProfile -Command "Get-Process wsl -ErrorAction SilentlyContinue | ForEach-Object {\$_.Id}"); do
   taskkill //PID "$pid" //T //F >/dev/null 2>&1 || true
 done
 sleep 3
-printf '杀客户端 3s 后 Linux 侧存活进程数: '
-wsl.exe -d "$DISTRO" -e sh -c 'pgrep -fc "sleep 86401"' || echo 0
-echo "-- 对照组:wsl --terminate 后(VM 级清理) --"
-wsl.exe --terminate "$DISTRO"
+printf 't+7 硬杀后独立客户端查孤儿数(>0 = 取消不级联,G3 红): '
+wsl.exe -d "$DISTRO" -e sh -c 'pgrep -fc "sleep 8640[1]"'
+echo "-- 对照组:wsl --terminate(VM 级清理) --"
+wsl.exe --terminate "$DISTRO" >/dev/null 2>&1
 sleep 2
-printf 'terminate 后存活进程数(期望 0): '
-wsl.exe -d "$DISTRO" -e sh -c 'pgrep -fc "sleep 86401"' || echo 0
+printf 'terminate 后孤儿数(期望 0): '
+wsl.exe -d "$DISTRO" -e sh -c 'pgrep -fc "sleep 8640[1]"'
 echo '```'
 
 section "stdout/stderr 流式回传（G3：逐行到达而非结束后一次性吐出）"
@@ -84,7 +93,7 @@ echo "判读方法:三行时间戳应各差约 1s(真流式);全部同秒=缓冲
 
 section "退出码传播（G3：Linux exit 42 必须原样到达 Windows 侧）"
 wsl.exe -d "$DISTRO" -e sh -c 'exit 42'
-echo "Linux `exit 42` 到达 Windows 侧的退出码: $?（期望 42）"
+echo "Linux exit 42 到达 Windows 侧的退出码: $?（期望 42）"
 wsl.exe -d "$DISTRO" -e sh -c 'sh -c "exit 7"'
 echo "嵌套 `exit 7` 退出码: $?（期望 7）"
 
@@ -95,14 +104,27 @@ if [ -f "$USERPROFILE/.wslconfig" ]; then cat "$USERPROFILE/.wslconfig"; else
 fi
 echo '```'
 
-section "localhost 转发（agent 在 WSL 内绑回环时 Windows 侧可达性）"
+section "localhost 转发（agent 在 WSL 内绑回环时 Windows 侧可达性；含取消路径对照）"
 echo '```text'
-wsl.exe -d "$DISTRO" -e sh -c 'cd /tmp && (python3 -m http.server 8931 >/dev/null 2>&1 &) ; sleep 1'
-printf 'Windows 侧 curl 127.0.0.1:8931 HTTP 码: '
-curl -s -o /dev/null -w '%{http_code}\n' --max-time 5 http://127.0.0.1:8931/ || echo unreachable
-wsl.exe -d "$DISTRO" -e sh -c 'pkill -f "http.server 8931" 2>/dev/null' || true
+wsl.exe -d "$DISTRO" -e sh -c 'command -v python3 || echo NO_PYTHON3'
+# 客户端保持存活(Atlas 正常运行形态):Windows 侧应可达。
+( wsl.exe -d "$DISTRO" -e sh -c 'cd /tmp && setsid python3 -m http.server 8931 >/dev/null 2>&1 & sleep 30' & )
+sleep 4
+printf 't+4 客户端存活期 Windows 侧 curl(期望 200): '
+curl -s -o /dev/null -w '%{http_code}\n' --max-time 4 http://127.0.0.1:8931/ || echo unreachable
+echo "-- 硬杀客户端(取消路径):孤儿服务器继续服务(与 §7 级联红一致) --"
+for pid in $(powershell -NoProfile -Command "Get-Process wsl -ErrorAction SilentlyContinue | ForEach-Object {\$_.Id}"); do
+  taskkill //PID "$pid" //T //F >/dev/null 2>&1 || true
+done
+sleep 3
+printf 't+7 硬杀后 curl(实测仍 200 = 孤儿仍在服务): '
+curl -s -o /dev/null -w '%{http_code}\n' --max-time 4 http://127.0.0.1:8931/ || echo unreachable
+wsl.exe --terminate "$DISTRO" >/dev/null 2>&1
+sleep 2
+printf 'terminate 后 curl(期望 000/unreachable): '
+curl -s -o /dev/null -w '%{http_code}\n' --max-time 4 http://127.0.0.1:8931/ || echo unreachable
 echo '```'
 
 section "收尾"
-wsl.exe --terminate "$DISTRO" 2>/dev/null
+wsl.exe --terminate "$DISTRO" >/dev/null 2>&1
 echo "spike 完成。把本文件内容粘进 results-wsl2.md 并在 RESEARCH-os-sandbox.md §2.2/§6 做判读。"
