@@ -40,11 +40,11 @@ jobs:
         run: |
           npm --prefix web ci
           npm --prefix web run build
-      - name: Install e2e dependencies and chromium
+      - name: Install e2e dependencies and browsers (chromium + firefox; Edge uses the runner's system install)
         working-directory: e2e
         run: |
           npm ci
-          npx playwright install chromium
+          npx playwright install chromium firefox
       - name: Run browser smoke tests (keyboard approval + finale baseline)
         working-directory: e2e
         run: npx playwright test

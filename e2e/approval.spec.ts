@@ -12,8 +12,7 @@ if (!existsSync(manifestPath)) {
   throw new Error('缺少 e2e/.seed/manifest.json:种子由 helpers/server.py 在启动时生成');
 }
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as {
-  gate_run_id: string;
-  done_run_id: string;
+  gate_run_ids: Record<string, string>;
 };
 
 interface FocusSnapshot {
@@ -41,7 +40,11 @@ function describeFocus(page: Page): Promise<FocusSnapshot | null> {
 }
 
 test('纯键盘完成一轮批准:Tab 焦点环可达批复控件,Enter 等价点击', async ({ page }) => {
-  await page.goto(`#/runs/${manifest.gate_run_id}`);
+  // 批准会推进 gate run 到终态(账本 append-only),所以每个浏览器项目
+  // 消费自己的暂停种子;缺对应种子时响亮失败而不是误判页面问题。
+  const gateRunId = manifest.gate_run_ids[test.info().project.name];
+  expect(gateRunId, `种子缺少 ${test.info().project.name} 的 gate run`).toBeTruthy();
+  await page.goto(`#/runs/${gateRunId}`);
   await expect(page.getByText('等待人工批准')).toBeVisible();
 
   // 从页面起点连续 Tab 环游整圈,记录批复控件的可达性与相对顺序。
@@ -92,13 +95,4 @@ test('纯键盘完成一轮批准:Tab 焦点环可达批复控件,Enter 等价�
   const finale = page.getByRole('region', { name: '终局总结' });
   await expect(finale, '批准后运行应续跑到终态并渲染终局卡片')
     .toBeVisible({ timeout: 60_000 });
-});
-
-test('终局卡片基线截图', async ({ page }) => {
-  await page.goto(`#/runs/${manifest.done_run_id}`);
-  const finale = page.getByRole('region', { name: '终局总结' });
-  await expect(finale).toBeVisible();
-  // 种子把 ts/duration_s 归一为固定值:卡片上的每个数字跨次稳定,截图
-  // 不一致就只能是真实回归(flake 制度的前提)。
-  await expect(finale).toHaveScreenshot('finale-card.png', { animations: 'disabled' });
 });

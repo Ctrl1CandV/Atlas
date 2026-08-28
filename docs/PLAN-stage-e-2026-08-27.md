@@ -329,6 +329,14 @@ Playwright（chromium 起步）+ atlas-web fixture + **FakeProvider 预种 runs_
 5. 顺手修复（五批次整体审查建议 B1）：`atlas/events.py` fold 补 `search_performed` 显式 `pass` 分支，恢复与「新增事件必须显式忽略」纪律的一致性；行为不变，`test_e1_search` 删事件回归锁保持绿。
 6. **偏差**：①合同原文「prepared snapshot 方式，与现有 web api 测试同手法」落地为「真实执行 + 归一化 ts/duration」——approve 续跑必须有真 checkpoint，手写账本给不了；真实执行让 sha/token/产物结构都是 engine 实况，确定性靠归一化达成且不弱于手写。②种子服务器 `mount_mcp=False`：/mcp 路由归 E-3 的 web-dist-smoke job 管，e2e 只测界面与 /api。③「停在 human 门的路由运行」落地为 `approval_mode: routed`（要求修改按钮一并进 Tab 环断言）。
 
+**实施记录（2026-08-28 已交付，完整矩阵 E-4b）**：
+1. 用户裁定落地：「200% 缩放」= CSS 视口减半（640×400，浏览器缩放的布局效果，overflow/可读性等价）；字体本地锁定降级为条件触发——冒烟 CI 已证本机↔CI 渲染逐字节一致，出现漂移才引入内嵌字体（届时先根因分析）。主题经 Playwright `colorScheme` 锁定（应用走 prefers-color-scheme + localStorage，零产品代码参与）。
+2. 四组合基线：`finale-matrix.spec.ts` 每 describe 用 `test.use` 携带 colorScheme+viewport，基线 `finale-{theme}-{100|200}.png` 入仓（≈18–45KB/张）；快照文件名 slug 不含 `%`（Playwright 会清洗特殊字符）。截图基线只在 chromium 项目维护——msedge/firefox 项目在 config 用 `testIgnore` 收集期过滤（`test.skip` 回调拿不到 project 信息；且 Edge 的 browserName 也是 'chromium'，按引擎判会漏）。
+3. Edge/Firefox 冒烟遍历：键盘审批流在三浏览器全跑。**种子改为每浏览器一个独立暂停 gate run**（manifest 记 gate_run_ids 映射，测试按 project.name 取用）——批准推进 run 到终态而账本 append-only 不可重置，共用 gate run 会让第一个批准饿死后续浏览器（首轮实测踩中，已修）。
+4. 反向验证三连（改坏→红→恢复，零残留）：强制 `dataset.theme='dark'` → light 两组合红、dark 绿（主题真在驱动渲染）；200% 组合视口改 1280 → 200% 红、100% 绿（窄布局真被覆盖）；改 `aria-label="批复说明"` → 三浏览器键盘流全红（Edge/Firefox 真实执行用例）。
+5. CI：e2e-smoke 安装步骤加 firefox（Edge 走 runner 系统安装）；其余触发/门禁不变。
+6. **偏差**：①反向验证 RV2 的恢复脚本用"模式替换+计数断言"误把 100%/200% 视口互换，导致一轮四组合全红——教训：位置敏感的编辑不能只断言出现次数，要断言位置；已修正并两连跑全绿。②config 三浏览器项目结构由用户在裁定后预先改好（`Desktop Edge` 预设），实施照用。
+
 ---
 
 ## E-5 · OS 级沙箱调研（末位）

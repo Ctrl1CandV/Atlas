@@ -97,7 +97,7 @@ uv run atlas-web
 
 ## 测试与验证
 
-2026-08-27 基线：Python 测试 **664 passed / 2 skipped**（另有 5 个真实供应商测试默认排除、需主动运行且可能收费）；Web 测试 22 passed、lint 0 告警、生产构建通过；公开 CI 在 main 分支三 job 通过（另有 workflow_dispatch/release 触发的可选浏览器 e2e 冒烟 2 用例，不计入主门）。10 节点自定义图经 MCP HTTP 端点真实运行全链路通过（含人工审批，见上文真实案例）。
+2026-08-27 基线：Python 测试 **664 passed / 2 skipped**（另有 5 个真实供应商测试默认排除、需主动运行且可能收费）；Web 测试 22 passed、lint 0 告警、生产构建通过；公开 CI 在 main 分支三 job 通过（另有 workflow_dispatch/release 触发的可选浏览器 e2e 冒烟 5 用例——键盘审批流跑 Chromium/Edge/Firefox 三浏览器 + 终局卡片 dark/light × 100%/200% 四组合基线截图，不计入主门）。10 节点自定义图经 MCP HTTP 端点真实运行全链路通过（含人工审批，见上文真实案例）。
 
 2026-08-19 发布基线：Python 测试 **427 passed**；Web 测试 22 passed、lint 0 告警、生产构建通过；六个示例工作流严格离线 validate/dry-run，0 次供应商调用；发布 sdist 100 个条目、0 扫描发现。数字对应当时的源状态，详见 [`docs/STATUS.md`](docs/STATUS.md)。
 

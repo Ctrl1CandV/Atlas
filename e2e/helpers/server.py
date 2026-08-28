@@ -111,10 +111,16 @@ def _seed() -> None:
     (WORKFLOWS_DIR / "e2e_gate.yaml").write_text(GATE_YAML, encoding="utf-8")
     (WORKFLOWS_DIR / "e2e_done.yaml").write_text(DONE_YAML, encoding="utf-8")
 
-    gate = execute_graph(spec_from_yaml(GATE_YAML), task=TASK_TEXT,
-                         runs_root=RUNS_DIR, registry=_fake_registry())
-    if gate.status != "paused":
-        raise RuntimeError(f"gate 种子运行没有停在 human 门:{gate.status}")
+    # 每个 e2e 浏览器项目一个独立的暂停 gate run:批准会推进 run 到终态,
+    # 而服务器在一次 Playwright 会话内只种子化一次——共用一个 gate run 会让
+    # 第一个批准把后面浏览器的用例饿死(账本 append-only,不能重置)。
+    gate_run_ids = {}
+    for browser in ("chromium", "msedge", "firefox"):
+        gate = execute_graph(spec_from_yaml(GATE_YAML), task=TASK_TEXT,
+                             runs_root=RUNS_DIR, registry=_fake_registry())
+        if gate.status != "paused":
+            raise RuntimeError(f"gate 种子运行没有停在 human 门:{gate.status}")
+        gate_run_ids[browser] = gate.run_id
 
     done = execute_graph(spec_from_yaml(DONE_YAML), task=TASK_TEXT,
                          runs_root=RUNS_DIR, registry=_fake_registry())
@@ -123,10 +129,10 @@ def _seed() -> None:
     _normalize_done_ledger(done.dir)
 
     MANIFEST.write_text(json.dumps({
-        "gate_run_id": gate.run_id,
+        "gate_run_ids": gate_run_ids,
         "done_run_id": done.run_id,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[e2e-seed] gate={gate.run_id} done={done.run_id}")
+    print(f"[e2e-seed] gate={gate_run_ids} done={done.run_id}")
 
 
 def _normalize_done_ledger(run_dir: Path) -> None:
