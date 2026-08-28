@@ -1622,6 +1622,7 @@ def execute_graph(
     prepared: PreparedExecution | None = None,
     heartbeat_interval_s: float | None = None,
     search_backend_factory=None,
+    attachments: tuple = (),
     base_spec_sha256: str | None = None,
     binding_summary=(),
     override_summary=(),
@@ -1697,6 +1698,14 @@ def execute_graph(
             backend_sha256=prepared.backend_sha256)
         pending_lineage = list(import_plans)
 
+        # ── E-2A 附件落盘(阶段二)─────────────────────────────────
+        # 阶段一(read→size→SHA)已在 run_id 分配前由调用方完成;这里统一
+        # 原子复制,失败清理已落盘副本——不存在"一半附件进来的 run"。
+        attachment_entries = []
+        if attachments:
+            from atlas.runs import admit_attachments
+            attachment_entries = admit_attachments(run_dir, attachments)
+
 
         ctx = _NodeCtx(run_dir=run_dir, log=log, registry=prepared.registry,
                        reader=EventReader(run_dir / "events.jsonl"),
@@ -1733,6 +1742,16 @@ def execute_graph(
                  overrides=list(override_summary),
                  **run_started_fields)
 
+        # E-2A:附件准入入账紧跟 run_started(同 artifact_imported 先例,
+        # 顺序确定);账本只记 name/sha256/bytes/basename,绝不记原路径。
+        for entry in attachment_entries:
+            log.emit(
+                "attachment_admitted", run_id=run_id,
+                name=entry["name"], sha256=entry["sha256"],
+                bytes=entry["bytes"],
+                basename=(entry.get("metadata") or {}).get("basename", ""),
+                media_type=entry["media_type"])
+
         # P13 lineage:changed/closure/import map 全量入账,顺序确定;
         # fork 计划是"为什么跳过某些节点"的唯一权威解释。
         if fork_plan is not None:
@@ -1760,6 +1779,8 @@ def execute_graph(
 
         initial_artifacts = {"task": task_ref.as_dict()}
         initial_artifacts.update(imported_artifacts)
+        for entry in attachment_entries:
+            initial_artifacts[entry["name"]] = entry
         result = _invoke(
             spec, ctx, run_id, entry=prepared.entry, checkpoint=checkpoint,
             task_input={"task": task, "artifacts": initial_artifacts},

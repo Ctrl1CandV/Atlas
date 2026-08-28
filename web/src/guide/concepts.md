@@ -26,6 +26,10 @@
 
 条件路由按 `route_field` 查找边的 `when`；该字段必须列入 `output_schema.required`，prompt 必须明确合法值。环必须有条件出口和 `max_iterations`。`llm` 节点可声明 `on_error: stop|continue|branch`（默认 stop）：内容类失败（候选全部失败）可让图继续（continue，不能带条件出边），或走 `when: __failed__` 的失败分支（branch，校验期必须接线，下游可消费 `<node>.error`）；费用、守卫、取消、完整性等治理异常任何策略都不可吞。
 
+## 运行附件（E-2A）
+
+发起运行时可携带 `attachments: [{name, path}]`（MCP `atlas_run_workflow` 参数或界面运行请求）。`path` 是本机绝对路径，启动准入时一次性整读：名字全小写 ASCII（大写变体与同形 unicode 字符刻意拒绝）、不得以 `.output/.diff/.error/.changes` 结尾、不得叫 `task` 或撞节点 id；单件 ≤16 MiB、合计 ≤32 MiB；任一失败在分配 run_id 之前整体拒绝——不存在"带一半附件"的运行。通过后字节克隆进 run 的 write-once 产物库（原子写 + 写后哈希复验），账本只记 name/sha256/大小/基名，绝不记源路径，响应也不回传。下游节点用 `consumes: [附件名]` 显式消费；投影里只有一行摘要（名字 · 大小 · sha256 前 12 位），原字节经产物工作台查看——大材料不占 prompt 预算，审批材料面板天然可见。运行期附件缺失是投影期显式失败，不是加载期（附件是运行参数，不是图结构）。
+
 ## Agent 字段事实
 
 生产执行要求 `config/agents.json` 显式 `runner: local_cli`，且所选模型的供应商配置 `anthropicBaseUrl` 与当前凭据；默认 fail-closed。`allow_web` 默认 `false`，开启时只增加 `WebSearch`/`WebFetch`，不是网络隔离；coding `Bash` 仍可能联网。当前 Claude CLI 不支持硬轮次参数，因此 `max_turns` 是保留的规格元数据，硬限制由 deadline 和已配置预算承担。

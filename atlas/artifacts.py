@@ -19,7 +19,9 @@ from atlas.integrity import (ArtifactRef, IntegrityError, read_artifact,
 ARTIFACT_ROLES = frozenset({"report", "output", "diff", "projection", "raw",
                             "error",
                             # P11:routed 审批的 request_changes 意见产物
-                            "changes"})
+                            "changes",
+                            # E-2A:运行发起时附加的材料(运行输入侧)
+                            "input"})
 
 _ROLE_TITLES = {
     "report": "执行报告",
@@ -29,6 +31,7 @@ _ROLE_TITLES = {
     "raw": "原始产物",
     "error": "错误上下文",   # P3 soft failure 的 write-once 错误产物
     "changes": "修改要求",     # P11 routed 审批的 request_changes 意见
+    "input": "运行附件",       # E-2A 运行发起时附加的材料
 }
 
 

@@ -10,7 +10,7 @@ from pathlib import Path
 from atlas.costs import fold_cost_accounting
 from atlas.engine import (RunConflictError, RunNotFoundError,
                           acquire_run_lock, release_run_lock)
-from atlas.spec import SpecError
+from atlas.spec import ATTACHMENT_NAME_RE, SpecError
 from atlas.events import EventReader, fold_events
 from atlas.spec import spec_from_snapshot, spec_to_snapshot
 
@@ -468,6 +468,155 @@ def precheck_imports(*, imports_spec, runs_root: Path) -> None:
                 f"导入源 {imp.run!r} 持久状态是 {status!r}:只有静稳终态"
                 f"({', '.join(_IMPORTABLE_STATUSES)} 除 running 外)可作为"
                 f"导入来源;运行中/中断的 run 拒绝引用")
+
+
+# ─────────────────────────── E-2A 运行附件 ───────────────────────────
+
+# 附件逻辑名正则归 spec.py(与 consumes 裸名校验同一条法域);此处仅转引
+ATTACHMENT_NAME_RE_PATTERN = ATTACHMENT_NAME_RE.pattern
+_ATTACHMENT_RESERVED_SUFFIXES = (".output", ".diff", ".error", ".changes")
+# 单件 ≤16 MiB(与产物同上限)、合计 ≤32 MiB(约为投影上限的预算预留)
+ATTACHMENT_MAX_BYTES = 16 * 1024 * 1024
+ATTACHMENT_TOTAL_MAX_BYTES = 32 * 1024 * 1024
+_ATTACHMENT_MEDIA_TYPES = {".txt": "text/plain", ".md": "text/markdown",
+                           ".json": "application/json", ".csv": "text/csv"}
+
+
+def _attachment_media_type(path: Path) -> str:
+    """按扩展名小映射表给 media_type;不猜格式,其余一律 octet-stream。"""
+    return _ATTACHMENT_MEDIA_TYPES.get(path.suffix.lower(),
+                                       "application/octet-stream")
+
+
+def parse_attachments(raw, *, node_ids) -> tuple:
+    """解析并零成本校验 attachments 参数([{name, path}])。
+
+    所有拒绝都发生在分配 run_id 之前(SpecError 级);path 必须是发起
+    机器绝对路径——相对路径的解析基准含糊,fail-closed。账本只存基名,
+    绝不存路径语义链接(隐私边界)。
+    """
+    from atlas.spec import SpecError
+
+    if raw is None or raw == []:
+        return ()
+    if not isinstance(raw, list):
+        raise SpecError("attachments 必须是数组或省略")
+    pattern = ATTACHMENT_NAME_RE
+    parsed: list = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise SpecError(f"attachments[{index}] 必须是映射(name, path)")
+        unknown = {k for k in item if isinstance(k, str)} - {"name", "path"}
+        if unknown:
+            raise SpecError(f"attachments[{index}] 有未知字段:{sorted(unknown)}。"
+                            "可用:name/path")
+        name = item.get("name")
+        path_str = item.get("path")
+        # fullmatch 而非 match:$ 锚点会放过末尾换行——"ghost.output\n"
+        # 的 endswith(保留后缀) 为 False,两种护栏会被同一伎俩同时绕过
+        if not isinstance(name, str) or pattern.fullmatch(name) is None:
+            raise SpecError(
+                f"attachments[{index}].name {name!r} 不合法:需匹配 "
+                f"{ATTACHMENT_NAME_RE_PATTERN}(全小写 ASCII,2–64 字符;"
+                "大写/unicode 同形字符一律拒绝,防保留名变体与同形欺骗)")
+        if name == "task":
+            raise SpecError(
+                f"attachments[{index}].name 不能叫 task(保留逻辑名)")
+        if name.endswith(_ATTACHMENT_RESERVED_SUFFIXES):
+            raise SpecError(
+                f"attachments[{index}].name {name!r} 以保留后缀结尾"
+                f"({_ATTACHMENT_RESERVED_SUFFIXES});这些后缀属于节点产物")
+        if name in node_ids:
+            raise SpecError(
+                f"attachments[{index}].name {name!r} 与节点 id 冲突;"
+                "附件与节点产出共用一个逻辑名命名空间,不能撞名")
+        if name in seen:
+            raise SpecError(f"attachments 里 {name!r} 重复声明")
+        if not isinstance(path_str, str) or not path_str.strip():
+            raise SpecError(f"attachments[{index}].path 必须是非空字符串")
+        path = Path(path_str)
+        if not path.is_absolute():
+            raise SpecError(
+                f"attachments[{index}].path 必须是绝对路径(发起机器本机),"
+                f"得到 {path_str!r}")
+        seen.add(name)
+        parsed.append((name, path))
+    return tuple(parsed)
+
+
+def stage_attachments(parsed) -> tuple:
+    """两阶段准入的阶段一(纯读,不落盘):read→size 检查→SHA-256。
+
+    全部通过才返回暂存清单;任一失败抛 SpecError,调用方此刻尚未创建
+    run 目录——"绝不允许一半附件进来的 run"由这里保证前置半边。
+    """
+    from atlas.integrity import sha256_bytes
+    from atlas.spec import SpecError
+
+    staged: list[dict] = []
+    total = 0
+    for name, path in parsed:
+        try:
+            content = path.read_bytes()
+        except OSError as e:
+            raise SpecError(
+                f"附件 {name!r} 无法读取({path.name}):{e}") from e
+        if len(content) > ATTACHMENT_MAX_BYTES:
+            raise SpecError(
+                f"附件 {name!r} 单件 {len(content)} 字节超过上限 "
+                f"{ATTACHMENT_MAX_BYTES} 字节;拒绝截断")
+        total += len(content)
+        if total > ATTACHMENT_TOTAL_MAX_BYTES:
+            raise SpecError(
+                f"附件合计 {total} 字节超过上限 {ATTACHMENT_TOTAL_MAX_BYTES}"
+                " 字节;拒绝截断")
+        staged.append({
+            "name": name,
+            "path": path,
+            "basename": path.name,
+            "content": content,
+            "sha256": sha256_bytes(content),
+            "bytes": len(content),
+            "media_type": _attachment_media_type(path),
+        })
+    return tuple(staged)
+
+
+def admit_attachments(run_dir: Path, staged) -> list[dict]:
+    """两阶段准入的阶段二(锁内、落盘):统一原子复制 + 写后复验。
+
+    复制复用 P7 的 copy_imported_artifact(temp+fsync+os.replace+写后
+    哈希复验);中途失败清理本轮已落盘副本再上抛——磁盘上绝不残留
+    "一半附件"。
+    """
+    from atlas.artifacts import artifact_entry, copy_imported_artifact
+    from atlas.integrity import IntegrityError
+    from atlas.spec import SpecError
+
+    entries: list[dict] = []
+    written: list[Path] = []
+    try:
+        for item in staged:
+            try:
+                ref = copy_imported_artifact(
+                    source_path=item["path"], source_sha256=item["sha256"],
+                    run_dir=run_dir, name=item["name"])
+            except IntegrityError as e:
+                raise SpecError(f"附件 {item['name']!r} 落盘复验失败:{e}") from e
+            written.append(Path(ref.path))
+            entry = artifact_entry(
+                name=ref.name, role="input", path=ref.path,
+                sha256=ref.sha256, size_bytes=item["bytes"],
+                media_type=item["media_type"],
+                metadata={"basename": item["basename"]})
+            entries.append(entry)
+    except Exception:
+        for path in written:
+            path.unlink(missing_ok=True)
+            path.with_name(path.name + ".sha256").unlink(missing_ok=True)
+        raise
+    return entries
 
 
 # ─────────────────────────── P10 retention / star / 删除执行 ───────────────────────────

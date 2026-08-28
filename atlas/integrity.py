@@ -145,7 +145,7 @@ def build_projection(
 
     prompt_bytes = prompt.encode("utf-8")
     total = len(prompt_bytes)
-    separators: list[tuple[bytes, bytes, bytes, bool]] = []
+    separators: list[tuple[bytes, bytes, bytes, bool, bytes | None]] = []
     for ref in consumed:
         opening = f"\n\n===== 上游产物 [{ref.name}] 开始 =====\n".encode("utf-8")
         closing = f"\n===== 上游产物 [{ref.name}] 结束 =====\n".encode("utf-8")
@@ -170,14 +170,26 @@ def build_projection(
         if not ref.path.exists():
             read_artifact(ref)  # 复用缺失文件的精确错误
         size = ref.path.stat().st_size
-        if untrusted:
+        # E-2A:运行附件(role=input)不内联进投影正文——附件可达 16 MiB,
+        # 内联会撑爆投影预算;完整性照常断言(读回复验哈希),投影里只留
+        # 一行可审计摘要,原字节经产物工作台查看。
+        inline_summary = None
+        if ref_dict.get("role") == "input":
+            read_artifact(ref)
+            inline_summary = (
+                f"[运行附件 {ref.name} · {size} B · "
+                f"sha256:{ref.sha256[:12]}](内容不内联,经产物工作台查看"
+                "原字节)\n").encode("utf-8")
+            size = len(inline_summary)
+        elif untrusted:
             # 转义会让围栏后字节 ≥ 原始字节(每处闭合标签 +1),估算不严谨;
             # 不可信产物直接读回按围栏后字节数精确计量,会计不过账。
             size = len(fence_untrusted(read_artifact(ref)))
         _check_size(f"产物 {ref.name!r}", size, ARTIFACT_MAX_BYTES)
         total += len(opening) + size + len(evidence) + len(closing)
         _check_size(f"节点 {node_id} 的输入投影", total, PROJECTION_MAX_BYTES)
-        separators.append((opening, evidence, closing, untrusted))
+        separators.append((opening, evidence, closing, untrusted,
+                           inline_summary))
 
     _check_size(f"节点 {node_id} 的输入投影", total, PROJECTION_MAX_BYTES)
     proj_dir = run_dir / "projections"
@@ -189,9 +201,12 @@ def build_projection(
         with open(proj_path, "xb") as f:
             f.write(prompt_bytes)
             digest_obj.update(prompt_bytes)
-            for ref, (opening, evidence, closing, untrusted) in zip(consumed, separators):
+            for ref, (opening, evidence, closing, untrusted,
+                      inline_summary) in zip(consumed, separators):
                 raw = read_artifact(ref)  # 写入前再次做哈希断言
-                if untrusted:
+                if inline_summary is not None:
+                    raw = inline_summary
+                elif untrusted:
                     raw = fence_untrusted(raw)
                 for piece in (opening, raw, evidence, closing):
                     f.write(piece)

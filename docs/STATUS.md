@@ -28,6 +28,7 @@
 | 工作流文件管理 | Web 页面可删除工作流；保存走 MCP 的 `expected_sha256` 读-改-写闭环（乐观锁防覆盖） |
 | 零成本预检 | validate 与 dry-run 不调用供应商；`expected_execution_sha256` 可绑定预演与真跑身份；dry-run 对显式 `retry>0` 的 research/coding_agent 节点必现放大风险警告（K，RFC 已实施关闭），Web preview 与 MCP 同源透出 |
 | search 检索节点（E-1） | 封闭类型 `search`：Atlas 自持后端（封闭枚举 tavily/searxng，key/base-url 缺失在预检位拒绝，dry-run 同样拦截）；写了 `model` 校验期拒绝。查询词三级来源（显式 ≤5 / 上游 JSON queries 截断至 5 并入账 / prompt 兜底单查询）；每次执行落 `search_performed` 事件 + write-once JSON 产物，`cost_usd`=后端实报或 null（不冒充 $0），有帽时派发前保守预留剩余预算。下游投影强制 `<untrusted-source>` 围栏 + 系统说明 + 闭合标签逃逸转义（围栏字节有正反例测试）；域名过滤只看初始 URL host（userinfo 伪装按 host 解析拒绝），不追重定向为如实限制。后端网络/HTTP 失败归内容类（`on_error` 可策略化，治理类照旧不可吞）；取消在每个 query 边界消费，`timeout_s` 覆盖整批；不进 P7 skip/P13 合成导入（复用=造假），显式 imports 保留 untrusted 标记 |
+| 运行附件（E-2A） | MCP `atlas_run_workflow` 与 Web 运行接口接受 `attachments: [{name, path}]`：名字全小写 ASCII 正则（大写变体/同形 unicode 刻意拒绝）、保留后缀拒绝、不得叫 task 或撞节点 id；单件 ≤16 MiB、合计 ≤32 MiB；两阶段准入（read→size→SHA 在 run_id 分配前全量通过 → 统一原子落盘+写后复验，失败清理已落盘副本），不存在"带一半附件"的运行。字节克隆进 write-once 产物库（role=input），账本只记 name/sha256/bytes/basename，响应绝不回传源路径；下游经裸逻辑名 consumes 显式消费（保留后缀笔误仍在加载期拒绝），投影只含摘要行（名字·大小·sha256 前 12 位），原字节走产物工作台；`attachment_admitted` 事件紧跟 run_started，fold 显式忽略（回归锁）；消费附件的节点在 fork 时保守归 changed（新 run 附件字节可能不同），未消费附件的节点闭包不受影响；工具数仍 8（attachments 是参数） |
 | 可审计运行 | append-only JSONL 事件、write-once 产物、读取时 SHA-256 断言、有效规格快照 |
 | 成本保护（P0min） | 有 `max_cost_usd` 时派发前持久化 reservation；未知费率保守占用剩余预算；无 cap 不虚构金额 |
 | 崩溃恢复（P1） | 动态派生 `interrupted`；只有 interrupted 可 resume；paused 只能 approve/reject |
@@ -62,7 +63,7 @@
 
 2026-08-23 公开 CI 基线（`main` @ `7eac07b`，GitHub Actions）：
 
-- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-27 批次 E-1 起为 634 passed，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
+- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-27 批次 E-2A 起为 643 passed，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
 - Ubuntu 兼容性信号 job（`continue-on-error`，明确不支持）同样通过：跨平台 agent CLI 桩修复后它反映真实兼容性。
 - `real-api.yml` 仅手动触发（`environment: real-api` 保护），不计入常规 CI。
 

@@ -27,6 +27,9 @@ NODE_TYPES = frozenset({"llm", "human", "research", "coding_agent", "search"})
 # 避免 spec→search 的模块级循环导入)
 SEARCH_BACKENDS = ("tavily", "searxng")
 SEARCH_MAX_QUERIES = 5
+# E-2A 运行附件逻辑名(常量归本模块;atlas/runs.py 反向引用):全小写
+# ASCII,天然挡住 "Task" 大小写变体与 unicode 同形字符——刻意的,不是遗漏。
+ATTACHMENT_NAME_RE = re.compile(r"^[a-z][a-z0-9_.-]{1,63}$")
 _AGENT_TYPES = frozenset({"research", "coding_agent"})
 
 _NODE_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]*$")
@@ -1416,13 +1419,27 @@ def validate_spec(spec: WorkflowSpec, *, source: str = "spec",
                         if produces:
                             ok = True
                     break
+            # fullmatch 与 parse_attachments 同口径:$ 锚点会放过末尾换行
+            if (not ok and ATTACHMENT_NAME_RE.fullmatch(c)
+                    and not c.endswith((".output", ".diff", ".error",
+                                        ".changes"))):
+                # E-2A:不命中任何产物后缀的裸逻辑名 = 运行附件(run 输入侧)。
+                # 图保持附件无关:名字合法性在此校验(同附件命名法域),存在
+                # 性由运行准入保证,运行期缺失在投影期 WiringError(fail-
+                # closed)。保留后缀结尾的名字绝不按附件放行——那些是节点
+                # 产物命名空间,"ghost.output" 这类笔误必须照旧在加载期
+                # 拒绝(附件命名法本身也在 parse_attachments 拒绝保留后缀,
+                # 两处同口径)。刻意的取舍:附件是运行参数,不是图结构,
+                # 加载期不猜它来不来的了。
+                ok = True
             if not ok:
                 raise _located_error(
                     f"{source}:节点 {n.id} 消费 {c!r},但不存在能产出它的节点。"
                     f"consumes 只能引用 'task'、'<节点id>.output'、coding_agent "
                     f"节点的 '<节点id>.diff'、on_error: branch 节点的 "
-                    f"'<节点id>.error',或 routed human 节点的 "
-                    f"'<节点id>.changes'(已知节点:{sorted(ids)})",
+                    f"'<节点id>.error'、routed human 节点的 "
+                    f"'<节点id>.changes',或运行附件的逻辑名(全小写,启动时经 "
+                    f"attachments 提供)(已知节点:{sorted(ids)})",
                     ("nodes", node_index, "consumes", consume_index), _marks,
                     fallback_paths=(("nodes", node_index, "consumes"),
                                     ("nodes", node_index)),

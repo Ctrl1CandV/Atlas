@@ -124,6 +124,7 @@ def _register_tools(srv: MCPServer) -> None:
                            node_overrides: dict | None = None,
                            expected_execution_sha256: str | None = None,
                            yaml: str = "", persist_as: str = "",
+                           attachments: list[dict] | None = None,
                            wait: bool = True) -> str:
         """运行工作流。同步阻塞到结束。
 
@@ -133,6 +134,12 @@ def _register_tools(srv: MCPServer) -> None:
         persist_as(可选):真实运行结束后,把 yaml 固化为
         workflows/<persist_as>.yaml——新建要求 id 未被占用,更新需
         expected_sha256 语义与 atlas_save_workflow 相同;dry_run 不固化。
+
+        attachments(可选,E-2A):运行附件 [{name, path}];path 是发起
+        机器本机绝对路径,启动前整读校验(单件 ≤16MiB/合计 ≤32MiB,名字
+        全小写且不得撞保留名/节点 id),内容字节克隆进 run 产物库后与原
+        文件再无关联。下游节点用 consumes 引用 name;投影只含摘要行,
+        原字节经界面产物工作台查看。响应不含原始路径。
 
         node_overrides 是封闭的本次运行节点参数覆盖；不改 YAML，不接受权限或拓扑字段。
         可覆盖:model/fallback/thinking/max_output_tokens/temperature/seed/
@@ -152,7 +159,8 @@ def _register_tools(srv: MCPServer) -> None:
             return _render(run_workflow_impl(
                 workflow_id, task, dry_run, node_overrides=node_overrides,
                 expected_execution_sha256=expected_execution_sha256,
-                yaml=yaml, persist_as=persist_as, wait=wait))
+                yaml=yaml, persist_as=persist_as,
+                attachments=attachments, wait=wait))
         except ValueError as e:
             return _render({"error": str(e), "next": "id 不合法"})
 
@@ -711,6 +719,7 @@ def run_workflow_impl(workflow_id: str, task: str, dry_run: bool = False,
                       agent_runner_factory=None,
                       expected_execution_sha256: str | None = None,
                       yaml: str = "", persist_as: str = "",
+                      attachments: list | None = None,
                       wait: bool = True) -> dict:
     """跑一张图。同步阻塞到完成/暂停/失败;事件实时落盘,界面实时可见。
 
@@ -725,6 +734,25 @@ def run_workflow_impl(workflow_id: str, task: str, dry_run: bool = False,
             providers_path=providers_path, env_store=env_store,
             registry_factory=registry_factory,
             agent_runner_factory=agent_runner_factory, yaml=yaml)
+        if attachments:
+            # 名字校验零成本(不读文件内容);引用合法性让作者在预演期看到
+            from atlas.runs import parse_attachments
+            try:
+                if yaml:
+                    base_spec = spec_from_yaml(yaml, source="dry-run:<adhoc>")
+                else:
+                    base_spec = spec_from_yaml_file(
+                        WORKFLOWS_DIR / f"{workflow_id}.yaml")
+                parsed = parse_attachments(
+                    attachments,
+                    node_ids=frozenset(n.id for n in base_spec.nodes))
+            except SpecError as e:
+                return {"error": str(e),
+                        "next": "修正 attachments 后重试(零成本拒绝)"}
+            preview["attachments"] = [name for name, _ in parsed]
+            preview["attachments_note"] = (
+                "真实运行将读取这些本机文件为运行附件并哈希入账;"
+                "预演不读取文件内容")
         if persist_as:
             preview["persist_as"] = persist_as
             preview["persist_note"] = ("persist_as 只在真实运行(dry_run=False)"
@@ -754,6 +782,24 @@ def run_workflow_impl(workflow_id: str, task: str, dry_run: bool = False,
         return {"error": str(e), "next": "有效规格不合法,运行未开始(零成本拒绝)"}
 
     spec = effective.spec
+
+    # E-2A:附件名字校验零成本;阶段一(read→size→SHA)同样在任何 run_id
+    # 分配之前完成——附件读不到/超限/名字撞保留名,运行在花钱前拒绝。
+    from atlas.runs import parse_attachments, stage_attachments
+    try:
+        parsed_attachments = parse_attachments(
+            attachments, node_ids=frozenset(n.id for n in spec.nodes))
+    except SpecError as e:
+        return {"error": str(e),
+                "next": "修正 attachments 后重试(零成本拒绝,未分配 run_id)"}
+    staged_attachments: tuple = ()
+    if parsed_attachments:
+        try:
+            staged_attachments = stage_attachments(parsed_attachments)
+        except SpecError as e:
+            return {"error": str(e),
+                    "next": "修正 attachments 后重试(零成本拒绝,未分配 run_id)"}
+
     if effective.unconfigured_nodes:
         return {"error": f"节点 {', '.join(effective.unconfigured_nodes)} "
                          "未配置模型,运行未开始(零成本拒绝)。先在节点里选择"
@@ -789,6 +835,7 @@ def run_workflow_impl(workflow_id: str, task: str, dry_run: bool = False,
         run_id = launcher.start_background_run(
             spec, task=task, runs_root=RUNS_DIR, registry=registry,
             agent_runner=agent_runner, prepared=prepared,
+            attachments=staged_attachments,
             base_spec_sha256=effective.base_fingerprint,
             binding_summary=effective.bindings,
             override_summary=effective.overrides)
@@ -805,6 +852,7 @@ def run_workflow_impl(workflow_id: str, task: str, dry_run: bool = False,
     try:
         result = execute_graph(
             spec, task=task, runs_root=RUNS_DIR, prepared=prepared,
+            attachments=staged_attachments,
             base_spec_sha256=effective.base_fingerprint,
             binding_summary=effective.bindings,
             override_summary=effective.overrides)

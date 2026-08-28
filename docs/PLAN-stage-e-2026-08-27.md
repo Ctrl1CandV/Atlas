@@ -188,6 +188,12 @@ class SearchResult:
 
 工程量：**3–4 人日**。
 
+**实施记录（2026-08-27 已交付）**：
+1. consumes 裸名回退的口径：图校验对"不命中产物后缀、且匹配附件命名正则"的裸逻辑名按附件放行（存在性由运行准入保证，运行期缺失在投影期 WiringError）；**保留后缀结尾的名字绝不按附件放行**——实施中发现回退分支不排除后缀会让 `ghost.output` 这类笔误逃过加载期接线校验，已修复并由既有 spec 校验 fixture 继续锁定。
+2. wait=false 时序：阶段一（read→size→SHA）同步完成于 run_id 分配之前，`starting` 响应意味着附件已全部读验；落盘（阶段二）在 controller 内、`run_started` 之后。
+3. fork 保守语义：消费附件的节点因新 run 附件字节可能不同而无法静态证明输入相等，诚实归 changed 重跑；未消费附件的节点闭包不受影响（测试锁定两侧）。
+4. fold 按合同显式忽略 `attachment_admitted`、不重建附件产物（fold 是终态语义视图；附件实体在产物库与 node_input consumed 清单中可审计）。
+
 ---
 
 ## E-2B · agent collect（多命名收集）

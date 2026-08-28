@@ -197,6 +197,11 @@ def fold_events(records: list[dict]) -> dict:
             # task_input 初始 state 流转,不携带终态语义;删掉这些事件后
             # fold 结果必须与保留时一致(回归锁定,见 test_p7_import)。
             pass
+        elif t == "attachment_admitted":
+            # E-2A 运行附件准入:附件实体经字节克隆进产物库、随初始
+            # state 流转,与导入同性质——不携带终态语义。删掉该事件后
+            # fold 结果必须与保留时一致(回归锁定,见 test_e2a_attachments)。
+            pass
         elif t == "fork_planned":
             # P13 fork 计划(changed/closure/import map):计划本身的
             # 执行结果由后续 node_imported_reused/node_done 体现;删掉

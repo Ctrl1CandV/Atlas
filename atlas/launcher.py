@@ -88,6 +88,8 @@ def spawn_controller(run_id: str, target: Callable[[], Any], *,
 
 def start_background_run(spec, *, task: str, runs_root: Path, registry,
                          agent_runner=None, prepared=None,
+                         heartbeat_interval_s: float | None = None,
+                         attachments: tuple = (),
                          base_spec_sha256: str | None = None,
                          binding_summary=(), override_summary=(),
                          logger=None, run_id: str | None = None) -> str:
@@ -104,6 +106,8 @@ def start_background_run(spec, *, task: str, runs_root: Path, registry,
             execute_graph(
                 spec, task=task, runs_root=runs_root, registry=registry,
                 run_id=run_id, agent_runner=agent_runner, prepared=prepared,
+                heartbeat_interval_s=heartbeat_interval_s,
+                attachments=attachments,
                 base_spec_sha256=base_spec_sha256,
                 binding_summary=binding_summary,
                 override_summary=override_summary,

@@ -337,7 +337,8 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
     @app.post("/api/workflows/{wid}/run")
     def start_run(wid: str, body: dict):
         _check_id(wid, "工作流")
-        unknown = set(body) - {"task", "node_overrides", "expected_execution_sha256"}
+        unknown = set(body) - {"task", "node_overrides",
+                               "expected_execution_sha256", "attachments"}
         if unknown:
             raise HTTPException(400, f"运行请求有未知字段:{sorted(unknown)}")
         task = body.get("task")
@@ -371,11 +372,24 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
                 409, "expected_execution_sha256 与当前执行配置不符;"
                      "未分配 run_id、未创建锁或运行目录")
 
+        # E-2A:附件名字校验与阶段一(read→size→SHA)在任何 run_id 分配之前;
+        # 校验失败 400,响应绝不回传原始路径。
+        staged_attachments: tuple = ()
+        if body.get("attachments") is not None:
+            from atlas.runs import parse_attachments, stage_attachments
+            try:
+                parsed_attachments = parse_attachments(
+                    body.get("attachments"),
+                    node_ids=frozenset(n.id for n in effective.spec.nodes))
+                staged_attachments = stage_attachments(parsed_attachments)
+            except SpecError as e:
+                raise HTTPException(400, str(e)) from e
+
         try:
             run_id = launcher.start_background_run(
                 effective.spec, task=task, runs_root=runs_dir,
                 registry=registry, agent_runner=agent_runner,
-                prepared=prepared,
+                prepared=prepared, attachments=staged_attachments,
                 base_spec_sha256=effective.base_fingerprint,
                 binding_summary=effective.bindings,
                 override_summary=effective.overrides,
