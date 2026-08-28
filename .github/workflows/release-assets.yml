@@ -100,6 +100,18 @@ jobs:
         run: uv run python scripts/release_workflow_gate.py
       - name: Run clean-init and MCP silence gate
         run: uv run python scripts/release_clean_init_gate.py
+      - name: Build bundle with machine-checked exclusions (E-3)
+        shell: pwsh
+        env:
+          CONTEXT_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $nodeVersion = (node --version).Trim()
+          uv run python scripts/release_bundle.py `
+            --repo . --web-dist web/dist `
+            --out "dist/atlas-bundle-$env:RELEASE_TAG.zip" `
+            --git-sha "$env:CONTEXT_SHA" --node-version "$nodeVersion"
       - name: Build source distribution only
         run: uv build --sdist
       - name: Verify source distribution name
@@ -128,7 +140,7 @@ jobs:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: |
-          $keep = @("atlas-$env:RELEASE_VERSION.tar.gz", "atlas-$env:RELEASE_TAG.spdx.json")
+          $keep = @("atlas-$env:RELEASE_VERSION.tar.gz", "atlas-$env:RELEASE_TAG.spdx.json", "atlas-bundle-$env:RELEASE_TAG.zip")
           Get-ChildItem dist -File -Force | Where-Object { $_.Name -notin $keep } |
             Remove-Item -Force
           foreach ($name in $keep) {
@@ -138,7 +150,7 @@ jobs:
         shell: pwsh
         run: |
           $files = @(Get-ChildItem dist -File -Force | Sort-Object Name)
-          if ($files.Count -ne 2) { throw "Expected sdist and SBOM before manifest, found $($files.Count) files" }
+          if ($files.Count -ne 3) { throw "Expected sdist, SBOM and bundle before manifest, found $($files.Count) files" }
           $lines = foreach ($file in $files) {
             $hash = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
             "$hash  $($file.Name)"
@@ -164,6 +176,7 @@ jobs:
           $assets = @(
             "atlas-$env:RELEASE_VERSION.tar.gz",
             "atlas-$env:RELEASE_TAG.spdx.json",
+            "atlas-bundle-$env:RELEASE_TAG.zip",
             "SHA256SUMS"
           )
           foreach ($name in $assets) {

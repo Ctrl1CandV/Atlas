@@ -2,7 +2,7 @@
 
 ## 环境
 
-Windows 10/11 x64、Python 3.12、Git、[uv](https://docs.astral.sh/uv/)、Node.js 22.12+ 与 npm。Atlas 未发布到 PyPI；请使用可信源码压缩包或已有源码检出，本文不猜仓库 URL。
+Windows 10/11 x64、Python 3.12、Git、[uv](https://docs.astral.sh/uv/)。从源码检出运行还需 Node.js 22.12+ 与 npm（构建一次前端）；官方 Release 的 bundle 包已内置构建好的前端，`atlas-web` 自动识别（也可用 `--dist` 参数或 `ATLAS_WEB_DIST` 环境变量显式指定）。Atlas 未发布到 PyPI；请使用可信源码压缩包或已有源码检出，本文不猜仓库 URL。
 
 ## 安装
 

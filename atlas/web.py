@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 from pathlib import Path
@@ -994,10 +995,14 @@ def create_app(workflows_dir: Path = DEFAULT_WORKFLOWS_DIR,
     return app
 
 
-def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
+def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT,
+          web_dist: str | None = None) -> None:
     """启动观测界面 + MCP streamable-http 端点。
 
     host 只接受 127.0.0.1(红线 ④,硬编码拒绝其他值)。
+    dist 解析走四级顺序(CLI 参数 > ATLAS_WEB_DIST > 仓库 sibling web/dist
+    > 包内 web-dist),全 miss fail-loud(E-3);manifest 哈希不符属本地
+    开发态时打 stderr 大警告继续跑(发布冒烟 job 则断言相等否则 fail)。
     """
     if host != DEFAULT_HOST:
         raise ValueError(
@@ -1007,6 +1012,11 @@ def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
     from atlas.config_init import initialize_runtime_config
 
     initialize_runtime_config()
+    from atlas.distbundle import manifest_mismatch, resolve_web_dist
+    dist = resolve_web_dist(web_dist)
+    mismatch = manifest_mismatch(dist)
+    if mismatch:
+        print(f"[atlas] 警告:{mismatch}", file=sys.stderr)
     # 端口被占必须 fail-loud,而不是打印"已启动"横幅后静默退出——
     # 否则旧实例仍占着 8321(harness 连到的是旧代码),新进程误导排查。
     import socket
@@ -1027,15 +1037,25 @@ def serve(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> None:
     import uvicorn
     print(f"Atlas Web 界面:   http://{host}:{port}")
     print(f"Atlas MCP 端点:   http://{host}:{port}/mcp (streamable-http)")
-    uvicorn.run(create_app(), host=host, port=port)
+    uvicorn.run(create_app(web_dist_dir=dist), host=host, port=port)
 
 
 def main() -> None:
     """``atlas-web`` 命令入口。"""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="atlas-web",
+        description="Atlas 观测界面 + MCP streamable-http 端点(只绑 127.0.0.1)")
+    parser.add_argument(
+        "--dist", default=None,
+        help="已构建前端的 dist 目录(四级解析的第一优先级:缺省依次尝试 "
+             "ATLAS_WEB_DIST 环境变量、仓库 web/dist、包内 web-dist)")
+    args = parser.parse_args()
     from atlas.console import force_utf8_stdio
 
     force_utf8_stdio()
-    serve()
+    serve(web_dist=args.dist)
 
 
 if __name__ == "__main__":

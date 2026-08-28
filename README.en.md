@@ -61,7 +61,7 @@ All come from real provider API runs before release — including failures, beca
 
 ## Quick start
 
-Requires Windows 10/11 x64, Python 3.12, [uv](https://docs.astral.sh/uv/), and Node.js 22.12+ (to build the frontend once).
+Requires Windows 10/11 x64, Python 3.12, and [uv](https://docs.astral.sh/uv/). Git-clone users also need Node.js 22.12+ to build the frontend once; the official Release bundle ships a prebuilt frontend that `atlas-web` picks up automatically (override with `--dist` or the `ATLAS_WEB_DIST` env var).
 
 ```powershell
 git clone https://github.com/Ctrl1CandV/Atlas.git
@@ -97,7 +97,7 @@ First start generates local configuration from templates (never overwriting exis
 
 ## Testing and verification
 
-2026-08-27 baseline: Python tests **654 passed / 2 skipped** (plus 5 real-provider tests excluded by default — opt-in and possibly billable); Web tests 22 passed, lint clean, production build OK; public CI passes both jobs on main. A 10-node custom graph ran end-to-end over the MCP HTTP endpoint including human approval (see the real runs above).
+2026-08-27 baseline: Python tests **664 passed / 2 skipped** (plus 5 real-provider tests excluded by default — opt-in and possibly billable); Web tests 22 passed, lint clean, production build OK; public CI passes both jobs on main. A 10-node custom graph ran end-to-end over the MCP HTTP endpoint including human approval (see the real runs above).
 
 2026-08-19 release baseline: Python tests **427 passed** (plus 5 real-provider tests excluded by default — opt-in and possibly billable); Web tests 22 passed, lint clean, production build OK; strict offline validate/dry-run of all six example workflows with 0 provider calls; release sdist scanned at 100 entries with 0 findings. These numbers describe that source state; see [`docs/STATUS.md`](docs/STATUS.md).
 

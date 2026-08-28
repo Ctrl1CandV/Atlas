@@ -30,6 +30,7 @@
 | search 检索节点（E-1） | 封闭类型 `search`：Atlas 自持后端（封闭枚举 tavily/searxng，key/base-url 缺失在预检位拒绝，dry-run 同样拦截）；写了 `model` 校验期拒绝。查询词三级来源（显式 ≤5 / 上游 JSON queries 截断至 5 并入账 / prompt 兜底单查询）；每次执行落 `search_performed` 事件 + write-once JSON 产物，`cost_usd`=后端实报或 null（不冒充 $0），有帽时派发前保守预留剩余预算。下游投影强制 `<untrusted-source>` 围栏 + 系统说明 + 闭合标签逃逸转义（围栏字节有正反例测试）；域名过滤只看初始 URL host（userinfo 伪装按 host 解析拒绝），不追重定向为如实限制。后端网络/HTTP 失败归内容类（`on_error` 可策略化，治理类照旧不可吞）；取消在每个 query 边界消费，`timeout_s` 覆盖整批；不进 P7 skip/P13 合成导入（复用=造假），显式 imports 保留 untrusted 标记 |
 | 运行附件（E-2A） | MCP `atlas_run_workflow` 与 Web 运行接口接受 `attachments: [{name, path}]`：名字全小写 ASCII 正则（大写变体/同形 unicode 刻意拒绝）、保留后缀拒绝、不得叫 task 或撞节点 id；单件 ≤16 MiB、合计 ≤32 MiB；两阶段准入（read→size→SHA 在 run_id 分配前全量通过 → 统一原子落盘+写后复验，失败清理已落盘副本），不存在"带一半附件"的运行。字节克隆进 write-once 产物库（role=input），账本只记 name/sha256/bytes/basename，响应绝不回传源路径；下游经裸逻辑名 consumes 显式消费（保留后缀笔误仍在加载期拒绝），投影只含摘要行（名字·大小·sha256 前 12 位），原字节走产物工作台；`attachment_admitted` 事件紧跟 run_started，fold 显式忽略（回归锁）；消费附件的节点在 fork 时保守归 changed（新 run 附件字节可能不同），未消费附件的节点闭包不受影响；工具数仍 8（attachments 是参数） |
 | agent collect（E-2B） | `agents.json` runner 配置的只读收集清单 `collect`（封闭字段，role 封闭 output/raw/report）：CLI 成功后按相对 glob 扫描执行目录（research=runner 实报临时目录，coding_agent=worktree；禁 `..`/绝对路径/反斜杠，symlink/junction 拒绝不追），命中文件 write-once 入库追加到 `node_done.artifacts` 尾部（相对路径字典序确定）；系统排除目录可追加不可删减；硬上限 ≤20 文件/单件 ≤16 MiB（产物上限）/合计 ≤64 MiB，超限与清洗同形逻辑名冲突均治理失败并带计数与字节事实；逻辑名 `{prefix}.{清洗相对路径}`（分隔符/点号折叠连字，保留 unicode 字母，非 ASCII 名可查看审批但裸名 consumes 只收 ASCII）；仅 local_cli 支持（runner 未报执行目录时响亮记账跳过）；不消耗模型调用；下游按裸逻辑名消费 |
+| 发布 bundle（E-3） | Release 资产新增 bundle 包（干净代码树 git archive + 已构建 web/dist + manifest.json）；manifest 由与运行端同一函数写入（digest 排除 manifest 自身），打包阶段对暂存树与 zip 解包内容做两道排除名单机检（凭据/运行记录/缓存目录/密钥后缀），tracked 凭据混入当场失败；`atlas-web` 启动四级解析 dist（CLI `--dist` > `ATLAS_WEB_DIST` > 仓库 sibling > 包内 web-dist），全 miss fail-loud 附三条出路；manifest 哈希不符本地开发态 stderr 警告继续、CI 冒烟 job 断言相等否则 fail（同一函数两个调用侧）；Git 仍不跟踪 web/dist |
 | 可审计运行 | append-only JSONL 事件、write-once 产物、读取时 SHA-256 断言、有效规格快照 |
 | 成本保护（P0min） | 有 `max_cost_usd` 时派发前持久化 reservation；未知费率保守占用剩余预算；无 cap 不虚构金额 |
 | 崩溃恢复（P1） | 动态派生 `interrupted`；只有 interrupted 可 resume；paused 只能 approve/reject |
@@ -64,7 +65,7 @@
 
 2026-08-23 公开 CI 基线（`main` @ `7eac07b`，GitHub Actions）：
 
-- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-27 批次 E-2B 起为 654 passed / 2 skipped，其中新增 skip 为无 symlink 权限账户下的 collect 链接拒绝测试，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
+- Windows 支持平台 job 全链路通过：locked sync、`atlas init`（含 UTF-8 stdio 修复，cp1252 控制台不再崩溃）、Web 测试/lint/build、全套测试（2026-08-27 批次 E-2B 起为 664 passed / 2 skipped，其中新增 skip 为无 symlink 权限账户下的 collect 链接拒绝测试，随批次增长）、离线发布门、密钥/路径扫描、sdist 构建 + lock 约束冒烟安装。
 - Ubuntu 兼容性信号 job（`continue-on-error`，明确不支持）同样通过：跨平台 agent CLI 桩修复后它反映真实兼容性。
 - `real-api.yml` 仅手动触发（`environment: real-api` 保护），不计入常规 CI。
 
@@ -91,7 +92,7 @@
 - agent 自动 retry 的预算约束尚未落地（RFC 草案 `docs/rfcs/agent-retry-budget.md` 待评审）。
 - 节点失败默认终止整图。human gate 的三分支已交付：request_changes 需图作者显式 `approval_mode: routed` 并接线 `__changes__` 回边；「循环携带反馈」的完整语义仍是 Stage E 独立 RFC 议题——P11 通过显式消费 `<node>.changes` 已可实现反馈可见的修订环。
 - retention 的清理触发点是"每次图执行完成后顺路清扫"；长期不跑图、也不起 atlas-web 的冷目录不会被自动清（可用任意一次执行或手工 DELETE 驱动）。fork 只复用源事件证明完整的产物，源 run 中从未执行/未完成的节点诚实重跑。索引目前不含成本摘要列（列表本就不展示成本）。
-- release sdist 不包含 built `web/dist`，使用者仍需 Node.js 构建前端。
+- release **sdist** 不包含 built `web/dist`（Git clone 用户仍需 Node.js 构建一次前端）；官方 Release 自 E-3 起附 **bundle 包**（干净代码树 + 已构建前端 + manifest 哈希），`atlas-web` 经四级解析自动识别（CLI `--dist` > `ATLAS_WEB_DIST` > 仓库 sibling > 包内 web-dist），manifest 哈希不符时本地开发态警告继续、发布冒烟断言相等。
 - Claude CLI 当前没有硬 `max_turns` 参数；`seed`/`temperature` 只进请求体，供应商是否尊重未验证。
 - 阶段 D 曾出现一次 Kiro agent 首次 attempt 自报约 `$10.508`，随后自动 retry 被人工终止。直接原因是图没有 `max_cost_usd`、本地 pricing 全为 `null`，CLI 预算没有生效。所有真实 agent 示例都应配置预算；自动 retry 的默认策略需先经 RFC 决策，不能在没有评审时静默改行为。
 - 本地 pricing 全 `null` 时设 `max_cost_usd` 的实际表现：首节点结算即按预留全额计入，后续节点会被"没有剩余预算"拦截（2026-08-22 run `20260822-113908-531dab` 实证）。要么填入确认过的费率，要么不设帽改用结构性约束控成本。

@@ -280,6 +280,11 @@ checkout 精确 tag → `uv sync` + pytest 冒烟 → `npm ci && npm run build` 
 
 工程量：**2–3 人日**。
 
+**实施记录（2026-08-27 已交付）**：
+1. 机检函数进 `atlas/distbundle.py`（可单测、可被冒烟 job 复用），打包脚本在 `scripts/release_bundle.py`；bundle 树来自 `git archive HEAD`（tracked-only），排除机检执行两道（暂存树 + zip 解包复验），并有 tracked-secret 负例测试证明第二道防线真实可触发。
+2. manifest 放 dist 内、digest 计算排除 manifest 自身（防自引用）；解析函数接受 repo_root/package_dir 注入以便四级顺序可测。
+3. 冒烟 job `web-dist-smoke` 加进 ci.yml（主双绿门不动，job 名与既有两 job 明显区分）；发布流水线 keep-list 从 2 件改 3 件（sdist/SBOM/bundle）。
+
 ---
 
 ## E-4 · 浏览器矩阵 GUI 测试

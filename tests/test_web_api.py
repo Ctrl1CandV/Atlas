@@ -8,6 +8,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+
+from pathlib import Path
 from fastapi.testclient import TestClient
 
 from atlas import __version__
@@ -646,9 +648,11 @@ def test_fastapi_version_uses_package_version(tmp_path):
 
 def test_main_delegates_to_serve(monkeypatch):
     called = []
-    monkeypatch.setattr(web_module, "serve", lambda: called.append(True))
+    monkeypatch.setattr(web_module, "serve",
+                        lambda **kwargs: called.append(kwargs))
+    monkeypatch.setattr("sys.argv", ["atlas-web", "--dist", "some/dist"])
     web_module.main()
-    assert called == [True]
+    assert called == [{"web_dist": "some/dist"}]
 
 
 def test_serve_initializes_config_before_app(monkeypatch):
@@ -664,12 +668,17 @@ def test_serve_initializes_config_before_app(monkeypatch):
 
     monkeypatch.setattr(config_init, "initialize_runtime_config",
                         lambda: order.append("init"))
+    # serve 在函数体内 from atlas.distbundle import ...——patch 必须打在源模块
+    monkeypatch.setattr("atlas.distbundle.resolve_web_dist",
+                        lambda *a, **kw: order.append("resolve") or Path("."))
+    monkeypatch.setattr("atlas.distbundle.manifest_mismatch",
+                        lambda dist: None)
     monkeypatch.setattr(web_module, "create_app",
-                        lambda: order.append("app") or object())
+                        lambda **kwargs: order.append("app") or object())
     monkeypatch.setattr(uvicorn, "run",
                         lambda app, **kwargs: order.append("run"))
     web_module.serve(port=port)
-    assert order == ["init", "app", "run"]
+    assert order == ["init", "resolve", "app", "run"]
 
 
 def test_path_traversal_blocked(app):

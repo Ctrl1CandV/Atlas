@@ -364,7 +364,7 @@ human 只有 approve/reject。
 | 项目 | 价值与边界 | 建议验收 |
 |---|---|---|
 | LLM `web_search` ✅ 已实施（2026-08-27，E-1） | 实施形态为封闭 `search` 节点 + Atlas 自持可插拔后端（tavily/searxng），**排除** provider tool-calling（原表中该形态不落地）；来源、查询、成本落 `search_performed` 事件与 write-once 产物，下游投影 untrusted 围栏；域名过滤只看初始 URL host 为如实限制 | tool schema/fallback/来源完整性/预算/prompt injection 测试全绿（`tests/test_e1_search.py`，24 项）；实施细节与偏差见 [`PLAN-stage-e-2026-08-27.md`](PLAN-stage-e-2026-08-27.md) E-1 章 |
-| Release 包含 built frontend | 让使用者免 Node；Git 仍不跟踪 `web/dist` | clean machine 解压即可启动，frontend hash 进入 manifest/provenance |
+| Release 包含 built frontend ✅ 已实施（2026-08-27，E-3） | 让使用者免 Node；Git 仍不跟踪 `web/dist`；manifest 哈希与排除名单机检进 `atlas/distbundle.py`，细节见 [`PLAN-stage-e-2026-08-27.md`](PLAN-stage-e-2026-08-27.md) E-3 章 | clean machine 解压即可启动，frontend hash 进入 manifest/provenance |
 | OS-level sandbox | 调研 Windows Sandbox 或 WSL backend；与 `local_cli` 并列而非把副本改名为沙箱 | 宿主路径/网络/凭据/输出回收威胁模型和逃逸测试 |
 | Browser matrix | 主题、键盘调栏、200% 缩放、系统 Edge/Chromium | 可重复 GUI 测试与真实截图，不用源码字符串代替渲染验证 |
 | 节点通讯文件 | 多命名产物、agent collect、attachments；详见 [`rfcs/node-io-files.md`](rfcs/node-io-files.md) | **附件（E-2A）与 agent collect（E-2B）已实施（2026-08-27）**，设计以 [`PLAN-stage-e-2026-08-27.md`](PLAN-stage-e-2026-08-27.md) E-2A/B 章为准（collect 采用 agents.json runner 配置而非 RFC 的 YAML `collect_files`；附件采用本机路径而非 base64）；每阶段保持 write-once、hash、no traversal、size caps 和 projection 完整性；多命名产物（`outputs` 围栏块）未实施 |

@@ -60,7 +60,7 @@ guards:
 
 ## 快速开始
 
-需要 Windows 10/11 x64、Python 3.12、[uv](https://docs.astral.sh/uv/)、Node.js 22.12+（构建前端一次）。
+需要 Windows 10/11 x64、Python 3.12、[uv](https://docs.astral.sh/uv/)。Git clone 用户还需 Node.js 22.12+ 构建一次前端；官方 Release 的 bundle 包已内置构建好的前端（`atlas-web` 自动识别，也可用 `--dist` 参数或 `ATLAS_WEB_DIST` 环境变量显式指定）。
 
 ```powershell
 git clone https://github.com/Ctrl1CandV/Atlas.git
@@ -97,7 +97,7 @@ uv run atlas-web
 
 ## 测试与验证
 
-2026-08-27 基线：Python 测试 **654 passed / 2 skipped**（另有 5 个真实供应商测试默认排除、需主动运行且可能收费）；Web 测试 22 passed、lint 0 告警、生产构建通过；公开 CI 在 main 分支双 job 通过。10 节点自定义图经 MCP HTTP 端点真实运行全链路通过（含人工审批，见上文真实案例）。
+2026-08-27 基线：Python 测试 **664 passed / 2 skipped**（另有 5 个真实供应商测试默认排除、需主动运行且可能收费）；Web 测试 22 passed、lint 0 告警、生产构建通过；公开 CI 在 main 分支双 job 通过。10 节点自定义图经 MCP HTTP 端点真实运行全链路通过（含人工审批，见上文真实案例）。
 
 2026-08-19 发布基线：Python 测试 **427 passed**；Web 测试 22 passed、lint 0 告警、生产构建通过；六个示例工作流严格离线 validate/dry-run，0 次供应商调用；发布 sdist 100 个条目、0 扫描发现。数字对应当时的源状态，详见 [`docs/STATUS.md`](docs/STATUS.md)。
 
