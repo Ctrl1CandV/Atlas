@@ -198,7 +198,7 @@ jobs:
                 -H "Authorization: Bearer $env:GH_TOKEN" `
                 -H "Content-Type: application/octet-stream" `
                 --data-binary "@dist/$name" `
-                "$env:UPLOAD_URL?name=$encodedName"
+                "${env:UPLOAD_URL}?name=$encodedName"
               if ($LASTEXITCODE -eq 0 -and $code -eq "201") { $uploaded = $true; break }
               Write-Host "Upload attempt $attempt for $name failed (exit $LASTEXITCODE); retrying in 10s..."
               Start-Sleep -Seconds 10
