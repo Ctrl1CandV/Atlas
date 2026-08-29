@@ -180,12 +180,25 @@ jobs:
           )
           foreach ($name in $assets) {
             $encodedName = [Uri]::EscapeDataString($name)
-            gh api --hostname uploads.github.com --method POST `
-              -H "Content-Type: application/octet-stream" `
-              --input "dist/$name" `
-              "repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID/assets?name=$encodedName"
-            if ($LASTEXITCODE -ne 0) {
-              throw "Asset upload failed for $name; the workflow never selects another Release by tag"
+            $uploaded = $false
+            foreach ($attempt in 1..4) {
+              # 幂等重试:先删同名残留资产(连接断在响应前会留下已传完的资产,
+              # GitHub 不允许同名,残留会让后续重试必然失败)
+              $existing = gh api "repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID/assets?per_page=100" |
+                ConvertFrom-Json | Where-Object { $_.name -eq $name }
+              if ($existing) {
+                gh api --method DELETE "repos/$env:GITHUB_REPOSITORY/releases/assets/$($existing.id)"
+              }
+              gh api --hostname uploads.github.com --method POST `
+                -H "Content-Type: application/octet-stream" `
+                --input "dist/$name" `
+                "repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID/assets?name=$encodedName"
+              if ($LASTEXITCODE -eq 0) { $uploaded = $true; break }
+              Write-Host "Upload attempt $attempt for $name failed (exit $LASTEXITCODE); retrying in 10s..."
+              Start-Sleep -Seconds 10
+            }
+            if (-not $uploaded) {
+              throw "Asset upload failed for $name after 4 attempts; the workflow never selects another Release by tag"
             }
           }
       - name: Publish reserved release
