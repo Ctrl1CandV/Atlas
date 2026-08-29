@@ -76,6 +76,7 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
           "commit=$tagCommit" >> $env:GITHUB_OUTPUT
           "release_id=$($created.id)" >> $env:GITHUB_OUTPUT
+          "upload_url=$($created.upload_url -replace '\{\?name,label\}$','')" >> $env:GITHUB_OUTPUT
       - name: Sync locked dependencies
         run: uv sync --locked --all-groups
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -171,6 +172,7 @@ jobs:
           RELEASE_ID: ${{ steps.release.outputs.release_id }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          UPLOAD_URL: ${{ steps.release.outputs.upload_url }}
         run: |
           $assets = @(
             "atlas-$env:RELEASE_VERSION.tar.gz",
@@ -189,11 +191,15 @@ jobs:
               if ($existing) {
                 gh api --method DELETE "repos/$env:GITHUB_REPOSITORY/releases/assets/$($existing.id)"
               }
-              gh api --hostname uploads.github.com --method POST `
+              # 上传必须直连预留 Release 的 upload_url(uploads.github.com 主机);
+              # gh api --hostname uploads.github.com 会拼出不存在的
+              # api.uploads.github.com(v0.2.0 两次实测 4/4 失败的根因)
+              $code = curl.exe -sS -o NUL -w "%{http_code}" -X POST `
+                -H "Authorization: Bearer $env:GH_TOKEN" `
                 -H "Content-Type: application/octet-stream" `
-                --input "dist/$name" `
-                "repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID/assets?name=$encodedName"
-              if ($LASTEXITCODE -eq 0) { $uploaded = $true; break }
+                --data-binary "@dist/$name" `
+                "$env:UPLOAD_URL?name=$encodedName"
+              if ($LASTEXITCODE -eq 0 -and $code -eq "201") { $uploaded = $true; break }
               Write-Host "Upload attempt $attempt for $name failed (exit $LASTEXITCODE); retrying in 10s..."
               Start-Sleep -Seconds 10
             }
